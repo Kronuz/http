@@ -1,0 +1,14 @@
+# ThreadSanitizer suppressions for running the load test.
+#
+# libev's async wakeup primitive -- ev_async_send (called cross-thread to wake a
+# reactor: write_start_async.send(), complete_async_.send(), break_loop), the
+# evpipe_write it performs, and the pipecb that drains it on the loop --
+# synchronizes with hand-rolled ECB memory fences that ThreadSanitizer cannot
+# model. TSAN therefore reports false races on the async pipe/flag. These are
+# libev internals (compat/ev/ev.c), not the offload data path
+# (request_/writer_/offloaded_/pending_input_/the Dispatcher queue), and they
+# pre-exist the offload change -- the server lib already wakes the reactor from
+# worker threads.
+race:evpipe_write
+race:ev_async_send
+race:pipecb

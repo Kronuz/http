@@ -27,12 +27,14 @@
 
 #pragma once
 
+#include <cstddef>
 #include <memory>
 
 #include "base_server.h"     // Kronuz/server: MetaBaseServer<ServerImpl>
 #include "worker.h"          // Kronuz/server: Worker
 
 #include "http_connection.h"
+#include "http_dispatcher.h"
 #include "http_handler.h"
 
 namespace http {
@@ -41,11 +43,13 @@ class HttpServer : public MetaBaseServer<HttpServer> {
 	friend Worker;
 
 	HttpHandler& handler_;
+	Dispatcher* dispatcher_;   // this reactor's worker pool; null => handlers run inline
 
 public:
-	HttpServer(const std::shared_ptr<Worker>& parent, ev::loop_ref* loop, unsigned int flags, HttpHandler& handler)
+	HttpServer(const std::shared_ptr<Worker>& parent, ev::loop_ref* loop, unsigned int flags, HttpHandler& handler, Dispatcher* dispatcher = nullptr)
 		: MetaBaseServer<HttpServer>(parent, loop, flags, "http", 0),
-		  handler_(handler) {}
+		  handler_(handler),
+		  dispatcher_(dispatcher) {}
 
 	void listen(unsigned int port) {
 		bind(nullptr, port, 1);
@@ -62,7 +66,7 @@ public:
 		}
 		int client_sock = accept();
 		if (client_sock != -1) {
-			auto conn = Worker::make_shared<HttpConnection>(share_this<HttpServer>(), ev_loop, ev_flags, handler_);
+			auto conn = Worker::make_shared<HttpConnection>(share_this<HttpServer>(), ev_loop, ev_flags, handler_, dispatcher_);
 			if (!conn->init(client_sock)) {
 				conn->detach();
 				return;
@@ -73,23 +77,48 @@ public:
 };
 
 
-// The root of the worker tree: owns the event loop and one HttpServer. An app
-// builds one with create(handler), binds a port, and runs.
+// The root of the worker tree: owns the event loop, one HttpServer, and -- when
+// the application opts into off-reactor dispatch -- this reactor's Dispatcher. An
+// app builds one with create(handler), binds a port, and runs.
+//
+// One HttpService == one reactor (one event loop) == one Dispatcher. That keeps
+// the worker pool shared-nothing across cores: to scale, run several HttpService
+// instances on several threads (SO_REUSEPORT), each with its own loop + pool,
+// rather than one global pool shared by every reactor thread.
 class HttpService : public Worker {
 	HttpHandler& handler_;
+	std::unique_ptr<Dispatcher> dispatcher_;   // null => handlers run inline on the reactor
 	std::shared_ptr<HttpServer> server_;
 
 public:
-	HttpService(const std::shared_ptr<Worker>& parent, ev::loop_ref* loop, unsigned int flags, HttpHandler& handler)
+	HttpService(const std::shared_ptr<Worker>& parent, ev::loop_ref* loop, unsigned int flags, HttpHandler& handler, std::unique_ptr<Dispatcher> dispatcher)
 		: Worker(parent, loop, flags),
-		  handler_(handler) {}
+		  handler_(handler),
+		  dispatcher_(std::move(dispatcher)) {}
 
+	// The Worker contract: a Worker subclass must call Worker::deinit() as the last
+	// line of its destructor (it stops the base async watchers and sets _deinited,
+	// which ~Worker asserts). BaseServer/BaseClient do this for the server and the
+	// connections; HttpService is a direct Worker, so it must too.
+	~HttpService() noexcept { Worker::deinit(); }
+
+	// Inline: every handler runs on the reactor thread. Simplest; correct when
+	// handlers are cheap and non-blocking.
 	static std::shared_ptr<HttpService> create(HttpHandler& handler) {
-		return Worker::make_shared<HttpService>(std::shared_ptr<Worker>(), static_cast<ev::loop_ref*>(nullptr), static_cast<unsigned int>(ev::AUTO), handler);
+		return Worker::make_shared<HttpService>(std::shared_ptr<Worker>(), static_cast<ev::loop_ref*>(nullptr), static_cast<unsigned int>(ev::AUTO), handler, std::unique_ptr<Dispatcher>());
+	}
+
+	// Off-reactor (the un-stallable model): handlers run on a bounded pool of
+	// `workers` threads draining a queue bounded at `queue_limit` tasks, so a slow
+	// or blocking handler never stalls the loop and overload sheds as 503. The
+	// HttpHandler must be thread-safe (handlers run concurrently across connections).
+	static std::shared_ptr<HttpService> create(HttpHandler& handler, std::size_t workers, std::size_t queue_limit) {
+		auto dispatcher = std::make_unique<Dispatcher>(workers, queue_limit);
+		return Worker::make_shared<HttpService>(std::shared_ptr<Worker>(), static_cast<ev::loop_ref*>(nullptr), static_cast<unsigned int>(ev::AUTO), handler, std::move(dispatcher));
 	}
 
 	void listen(unsigned int port) {
-		server_ = Worker::make_shared<HttpServer>(share_this<HttpService>(), ev_loop, ev_flags, handler_);
+		server_ = Worker::make_shared<HttpServer>(share_this<HttpService>(), ev_loop, ev_flags, handler_, dispatcher_.get());
 		server_->listen(port);
 		server_->start();
 	}

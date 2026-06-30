@@ -17,11 +17,16 @@ the working notes.
 http_message.h     Request + the buffered Response value + reason_phrase().
 http_handler.h     HttpHandler (the seam) + ResponseWriter (buffered/streamed output).
 http_router.h      Router — method/path dispatch; a thin binding over Kronuz/radix-router.
+http_dispatcher.h  Dispatcher — a bounded worker pool (Kronuz/queue) for off-reactor work.
 http_connection.h  The connection: http_parser parsing + HTTP/1.1 framing + the one
-                   handler call site, over BaseClient.
-http_server.h      HttpServer (accept loop) + HttpService (worker-tree root).
-examples/kv_store.cc  A complete REST app: buffered routes + a streaming route (/stream/:n).
+                   handler call site (inline or offloaded), over BaseClient.
+http_server.h      HttpServer (accept loop) + HttpService (worker-tree root; owns the
+                   per-reactor Dispatcher).
+examples/kv_store.cc        A complete REST app: buffered routes + a streaming route.
+examples/dispatcher_bench.cc Throughput of the Dispatcher queue (single vs sharded).
 test/test.cc       ctest: method dispatch, 404 vs 405, param capture, streamed body.
+test/loadtest.cc   ctest "loadtest": the un-stallable model over real TCP (a slow
+                   handler must not stall the loop) + 503 backpressure.
 ```
 
 ## Dependencies (Kronuz family, FetchContent at tip)
@@ -57,14 +62,49 @@ choice is contained in `HttpConnection`. Note http_parser has no
 transition (`reading_value_`). Planned follow-up (separate commit): refresh the
 fork 2.7.1 → 2.9.4 for upstream security/correctness fixes.
 
-## Never-stalling the loop (design, not yet built)
+## Never-stalling the loop (the un-stallable model — built)
 
-The target concurrency model is multiple per-core reactors + a bounded worker
-pool: heavy handlers run *only* on the pool (never the reactor), bounded queues
-with 503 backpressure, a reactor-stall watchdog, and the worker hands the response
-back to the owning reactor via `ev::async`. The value-semantic seam plus
-`end()`-completion is exactly what makes this additive — design new work so it
-stays behind the seam.
+When `HttpService` is created with a worker count, it owns a **per-reactor
+`Dispatcher`** (a bounded worker pool) and `HttpConnection` runs `handle()` on a
+worker so a slow or blocking handler never stalls the loop. The reactor keeps
+accepting, reading, and serving other connections. `test/loadtest.cc` proves it:
+~8 ms fast-request latency under offload vs ~450 ms inline (same slow load).
+
+Invariants — do not break these when touching `HttpConnection`:
+
+- **One in-flight handler per connection.** On offload the parser is paused
+  (`http_parser_pause`) at message-complete and `io_read` is stopped, so the
+  worker has sole, race-free access to `request_`/`writer_`, responses stay
+  ordered, and the stopped read is TCP backpressure. Pipelined bytes already
+  received are stashed in `pending_input_` and re-fed when the handler completes.
+- **The worker never touches reactor-owned state.** It reads `request_` and drives
+  the writer (whose `write()` path is thread-safe — Kronuz/server enqueues to the
+  per-connection `write_queue` and wakes the reactor). Completion (`end()`) is
+  handed back to the reactor via `complete_async_` (an `ev::async`); the reactor
+  runs `complete_response` + resumes reading, because that step touches the ev
+  watchers / `close()` and must run on the loop. The task captures
+  `share_this<HttpConnection>` so the connection outlives the work.
+- **`submit()` false → 503, inline.** A full bounded queue is the backpressure
+  signal; answer 503 on the reactor rather than block it or grow an unbounded
+  backlog.
+- **Offloaded handlers run concurrently across connections, so the `HttpHandler`
+  must be thread-safe** when a Dispatcher is configured. With no Dispatcher
+  (`create(handler)`), `handle()` runs inline on the reactor — the cheap fast path,
+  single-threaded, unchanged.
+
+Per-reactor, not global: one `HttpService` == one loop == one Dispatcher
+(shared-nothing across cores). To scale, run several `HttpService` instances on
+several threads (SO_REUSEPORT). `examples/dispatcher_bench.cc` shows the single
+queue is not the bottleneck for ms-scale handlers and that sharding the queue
+would not help (the cost at high worker counts is condvar wakeup latency, not lock
+contention) — size the pool to the task rate instead.
+
+Still open (follow-ups): a **stall watchdog** (a monitor thread that flags a loop
+that hasn't ticked in N ms — observability, the load test is the functional check
+for now); per-route cheap/heavy classification so trivial endpoints keep the inline
+fast path even when a Dispatcher exists. Validated race-/leak-free under TSAN and
+ASAN+UBSAN (Homebrew LLVM); the only sanitizer reports are libev's own async
+primitive (hand-rolled fences TSAN can't model), not the offload path.
 
 ## Roadmap (Leg 2 productionization)
 
@@ -79,8 +119,21 @@ waits for the Asio + coroutine migration. Verify against the doc-driven E2E suit
 
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
-ctest --test-dir build
+ctest --test-dir build              # http (unit) + loadtest (un-stallable, ~2s)
 ./build/kv_store 8080
 #   curl -XPUT localhost:8080/kv/k -d v ; curl localhost:8080/kv/k   # buffered
 #   curl localhost:8080/stream/5                                     # chunked
+./build/dispatcher_bench            # queue throughput / sharding analysis
+```
+
+Concurrency validation (Homebrew LLVM — Apple clang's sanitizers misbehave here):
+
+```sh
+cmake -B build-tsan -S . -DCMAKE_CXX_COMPILER=/opt/homebrew/opt/llvm/bin/clang++ \
+  -DCMAKE_C_COMPILER=/opt/homebrew/opt/llvm/bin/clang -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1" -DCMAKE_C_FLAGS="-fsanitize=thread -g -O1" \
+  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"   # + FETCHCONTENT_SOURCE_DIR_* to reuse deps
+cmake --build build-tsan --target http_loadtest
+# suppress libev's async primitive (race:evpipe_write / ev_async_send / pipecb)
+TSAN_OPTIONS="suppressions=tsan.supp" ./build-tsan/http_loadtest
 ```

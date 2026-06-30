@@ -52,12 +52,18 @@ application code:
   (`COUNT`, `INFO`, `DUMP`, `RESTORE`, …) that a stricter parser like llhttp
   rejects. Swapping it for another parser is contained here; the handler and the
   `Request`/`ResponseWriter` are parser-agnostic.
-- **Concurrency (synchronous today).** Completion is signalled by `ResponseWriter::end()`,
-  not by `handle()` returning. So a handler is free to finish the response *later* —
-  the coroutine upgrade makes `handle()` a `task<>` and the *one* call site in
-  `HttpConnection::dispatch()` becomes `co_await handler.handle(...)`; the
-  un-stallable model hands the writer to a worker thread so heavy work never runs
-  on the reactor. Neither changes a handler's logic, because the writer is the same.
+- **Concurrency (inline or offloaded; coroutine-ready).** Completion is signalled
+  by `ResponseWriter::end()`, not by `handle()` returning. So a handler is free to
+  finish the response *later*. That is exactly what the **un-stallable model** uses:
+  give `HttpService` a worker count and it runs `handle()` on a per-reactor worker
+  pool (one in-flight per connection), so a slow or blocking handler never stalls
+  the loop — the worker drives the same writer and hands completion back to the
+  reactor via an `ev::async`; a full bounded queue answers 503. With no pool,
+  `handle()` runs inline on the reactor (the cheap fast path). The coroutine upgrade
+  is the same seam from the other direction: `handle()` becomes a `task<>` and the
+  *one* call site becomes `co_await handler.handle(...)`. None changes a handler's
+  logic, because the writer is the same. (See AGENTS.md for the offload invariants;
+  offloaded handlers must be thread-safe.)
 - **Reactor (libev, via Kronuz/server today).** The handler never sees the
   reactor; an Asio port of `Kronuz/server` keeps `BaseClient`'s `on_read`/`write`
   surface and so never reaches the HTTP layer or the app.
@@ -72,8 +78,9 @@ hardcoded `prepare()` method-switch becomes once search is an `HttpHandler`.
 | `http_message.h` | `Request` and the `Response` value (for buffered handlers), plus `reason_phrase`. |
 | `http_handler.h` | `HttpHandler` (the seam) + `ResponseWriter` (buffered `send` / streamed `write`+`end`). |
 | `http_router.h` | `Router` — method/path dispatch, a thin binding over `Kronuz/radix-router`. |
-| `http_connection.h` | The generic connection: http-parser parsing, HTTP/1.1 framing (Content-Length / chunked), and the single handler call site, over `BaseClient`. |
-| `http_server.h` | `HttpServer` (accept loop) + `HttpService` (the worker-tree root). |
+| `http_dispatcher.h` | `Dispatcher` — a bounded worker pool (Kronuz/queue) for off-reactor handler work; `submit()` false = the 503 backpressure signal. |
+| `http_connection.h` | The generic connection: http-parser parsing, HTTP/1.1 framing (Content-Length / chunked), and the single handler call site (inline or offloaded), over `BaseClient`. |
+| `http_server.h` | `HttpServer` (accept loop) + `HttpService` (the worker-tree root; owns the per-reactor `Dispatcher`). |
 
 ## Dependencies
 
@@ -83,3 +90,4 @@ system/brew install):
 - [`Kronuz/server`](https://github.com/Kronuz/server) — reactor + TCP + connection FSM.
 - [`Kronuz/http-parser`](https://github.com/Kronuz/http-parser) — the HTTP parser (accepts custom methods).
 - [`Kronuz/radix-router`](https://github.com/Kronuz/radix-router) — the radix-tree path router behind `Router`.
+- [`Kronuz/queue`](https://github.com/Kronuz/queue) — the bounded MPMC queue behind `Dispatcher` (via `Kronuz/server`).

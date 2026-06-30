@@ -40,9 +40,31 @@
 // completion is driven by end() rather than by handle() returning, a handler is
 // free to finish the response later (off a worker thread, or as a coroutine)
 // without any change here.
+//
+// The un-stallable model. When the connection is given a Dispatcher (one per
+// reactor, shared-nothing across cores), handle() runs on a worker thread so a
+// slow or blocking handler never stalls the event loop -- the reactor keeps
+// accepting, reading, and serving other connections. The contract:
+//   * One in-flight handler per connection. Reading is paused (the parser is
+//     paused at message-complete and the read io is stopped) while the handler
+//     runs, so the worker has sole, race-free access to the request, responses
+//     stay ordered, and a stopped read provides TCP backpressure. Any pipelined
+//     bytes already received are stashed and re-fed when the handler completes.
+//   * The worker drives the response through the thread-safe write path and never
+//     touches reactor-owned connection state. Completion (end()) is handed back to
+//     the reactor via an ev::async; the reactor runs complete_response + resumes
+//     reading, because that step touches the ev watchers / close and must run on
+//     the loop. The task captures share_this so the connection outlives the work.
+//   * submit() returning false (the bounded queue is full) is the backpressure
+//     signal: the reactor answers 503 inline instead of growing an unbounded
+//     backlog. With no Dispatcher, handle() runs inline on the reactor (the cheap
+//     fast path), exactly as before.
+// Offloaded handlers run concurrently across connections, so an application that
+// opts into a Dispatcher must make its HttpHandler thread-safe.
 
 #pragma once
 
+#include <atomic>
 #include <charconv>
 #include <cstdio>
 #include <memory>
@@ -56,6 +78,7 @@
 #include "base_client.h"     // Kronuz/server: BaseClient<ClientImpl>
 #include "worker.h"          // Kronuz/server: Worker
 
+#include "http_dispatcher.h"
 #include "http_handler.h"
 #include "http_message.h"
 
@@ -126,7 +149,7 @@ class HttpConnection : public BaseClient<HttpConnection> {
 			} else {                             // streaming: terminate the chunked body
 				conn_->emit("0\r\n\r\n");
 			}
-			conn_->complete_response(!close_);
+			conn_->response_finished(!close_);
 		}
 
 	private:
@@ -179,6 +202,7 @@ class HttpConnection : public BaseClient<HttpConnection> {
 	};
 
 	HttpHandler& handler_;
+	Dispatcher* dispatcher_;       // per-reactor worker pool; null => run inline
 
 	http_parser parser_;
 	http_parser_settings settings_;
@@ -190,10 +214,21 @@ class HttpConnection : public BaseClient<HttpConnection> {
 	std::unique_ptr<BodySink> body_sink_;   // non-null => the app is streaming the body in
 	Writer writer_{this};
 
+	// Off-reactor dispatch coordination (the un-stallable model). complete_async_
+	// is signaled by the worker and runs complete_async_cb on the reactor;
+	// pending_input_ stashes any pipelined bytes captured while reading is paused
+	// for the in-flight handler; offloaded_ marks that a worker owns request_.
+	ev::async complete_async_;
+	std::string pending_input_;
+	std::atomic<bool> offloaded_{false};
+	std::atomic<bool> complete_keep_alive_{true};
+
 public:
-	HttpConnection(const std::shared_ptr<Worker>& parent, ev::loop_ref* loop, unsigned int flags, HttpHandler& handler)
+	HttpConnection(const std::shared_ptr<Worker>& parent, ev::loop_ref* loop, unsigned int flags, HttpHandler& handler, Dispatcher* dispatcher = nullptr)
 		: BaseClient<HttpConnection>(parent, loop, flags),
-		  handler_(handler) {
+		  handler_(handler),
+		  dispatcher_(dispatcher),
+		  complete_async_(*ev_loop) {
 		http_parser_settings_init(&settings_);
 		settings_.on_url = &on_url_cb;
 		settings_.on_header_field = &on_header_field_cb;
@@ -203,23 +238,49 @@ public:
 		settings_.on_message_complete = &on_message_complete_cb;
 		http_parser_init(&parser_, HTTP_REQUEST);
 		parser_.data = this;
+		complete_async_.set<HttpConnection, &HttpConnection::complete_async_cb>(this);
 	}
 
 private:
+	// The completion async is live only while the connection is started.
+	void start_impl() override {
+		BaseClient<HttpConnection>::start_impl();
+		complete_async_.start();
+	}
+	void stop_impl() override {
+		complete_async_.stop();
+		BaseClient<HttpConnection>::stop_impl();
+	}
+
 	// ---- Kronuz/server BaseClient<ClientImpl> interface -------------------
 	ssize_t on_read(const char* buf, ssize_t received) {
 		if (received <= 0) {
 			return received;
 		}
-		http_parser_execute(&parser_, &settings_, buf, static_cast<size_t>(received));
-		if (HTTP_PARSER_ERRNO(&parser_) != HPE_OK) {
+		parse(buf, received);
+		return received;   // fully consumed; a pipelined remainder is stashed, not left behind
+	}
+
+	// Feed bytes to the parser. On a parse error, answer 400 and close. When the
+	// handler is offloaded, on_request_complete() pauses the parser at message
+	// completion; the unparsed remainder (a pipelined request) is stashed and
+	// re-fed once the in-flight handler finishes -- one in-flight handler/conn.
+	void parse(const char* buf, ssize_t len) {
+		size_t nparsed = http_parser_execute(&parser_, &settings_, buf, static_cast<size_t>(len));
+		auto err = HTTP_PARSER_ERRNO(&parser_);
+		if (err == HPE_PAUSED) {
+			if (static_cast<ssize_t>(nparsed) < len) {
+				pending_input_.append(buf + nparsed, static_cast<size_t>(len) - nparsed);
+			}
+			return;
+		}
+		if (err != HPE_OK) {
 			Response resp;
-			resp.set(400, std::string("Bad Request: ") + http_errno_name(HTTP_PARSER_ERRNO(&parser_)) + "\n");
+			resp.set(400, std::string("Bad Request: ") + http_errno_name(err) + "\n");
 			resp.close = true;
 			write(resp.serialize(false));
 			close();
 		}
-		return received;
 	}
 
 	// The file-transfer path (replication) is not part of HTTP.
@@ -231,7 +292,23 @@ private:
 	// ---- helpers the Writer drives ----------------------------------------
 	void emit(std::string bytes) { write(std::move(bytes)); }
 
-	void complete_response(bool keep_alive) {
+	// The response is finished (end() was called). On the inline path this runs on
+	// the reactor and completes immediately. On the offload path it runs on a
+	// worker and hands completion back to the reactor via complete_async_ -- the
+	// reactor owns the connection lifecycle (the ev watchers / close), so that step
+	// must not run on a worker.
+	void response_finished(bool keep_alive) {
+		if (offloaded_.load(std::memory_order_acquire)) {
+			complete_keep_alive_.store(keep_alive, std::memory_order_relaxed);
+			complete_async_.send();   // thread-safe; wakes the reactor
+			return;
+		}
+		complete_response(keep_alive);
+	}
+
+	// Reset per-request state for keep-alive reuse, or close. Returns whether the
+	// connection was kept alive. Reactor-only (touches close()).
+	bool complete_response(bool keep_alive) {
 		bool ka = request_.keep_alive && keep_alive;
 		if (ka) {
 			request_.clear();
@@ -239,9 +316,10 @@ private:
 			cur_value_.clear();
 			reading_value_ = false;
 			body_sink_.reset();
-		} else {
-			close();
+			return true;
 		}
+		close();
+		return false;
 	}
 
 	// ---- headers are complete: finalize the request and let the app decide
@@ -274,19 +352,80 @@ private:
 		}
 	}
 
-	// ---- the request is complete: hand it to the application --------------
+	// ---- the request is complete: route it to the handler -----------------
+	// Inline (no Dispatcher) or offloaded to a worker (the un-stallable model).
+	void on_request_complete() {
+		if (dispatcher_ == nullptr) {
+			dispatch();   // run on the reactor (the cheap fast path)
+			return;
+		}
+		// Offload so a slow/blocking handler never stalls the reactor. One in-flight
+		// handler per connection: pause reading so the worker has sole, race-free
+		// access to request_/writer_ and responses stay ordered, and a stopped read
+		// applies TCP backpressure.
+		writer_.reset();
+		offloaded_.store(true, std::memory_order_release);
+		auto keep_alive_ref = share_this<HttpConnection>();   // keep the conn alive across the handoff
+		bool accepted = dispatcher_->submit([this, keep_alive_ref] { run_offloaded(); });
+		if (!accepted) {
+			// The bounded queue is full: shed load with 503 rather than block the
+			// reactor or grow an unbounded backlog. Answered inline, on the reactor.
+			offloaded_.store(false, std::memory_order_release);
+			writer_.send(503, "Service Unavailable\n");
+			return;
+		}
+		http_parser_pause(&parser_, 1);   // stop after this message (one in-flight)
+		io_read.stop();                   // backpressure: no more reads until the handler completes
+	}
+
+	// Inline handler invocation (on the reactor). THE SEAM: completion is end(),
+	// not "handle() returned", so the same call becomes `co_await` for coroutines.
 	void dispatch() {
 		writer_.reset();
-
-		// THE SEAM. end() (not "handle() returned") completes the response, so a
-		// handler may answer later off a worker thread or as a coroutine; this is
-		// the one call site that becomes `co_await handler_.handle(...)`.
 		try {
 			handler_.handle(request_, writer_);
 		} catch (...) {
 			// Backstop: an app should map its own exceptions, but never leave a
 			// synchronous handler's connection hung on an unhandled throw.
 			if (!writer_.ended()) { writer_.send(500, "Internal Server Error\n"); }
+		}
+	}
+
+	// Offloaded handler invocation (on a worker thread). The worker reads request_
+	// and drives writer_ (whose write path is thread-safe); it must NOT touch the
+	// reactor-owned connection state -- end() routes completion back via the async.
+	void run_offloaded() {
+		try {
+			handler_.handle(request_, writer_);
+		} catch (...) {
+			if (!writer_.ended()) { writer_.send(500, "Internal Server Error\n"); }
+		}
+		if (!writer_.ended()) { writer_.end(); }   // a handler that neither ended nor threw still completes
+	}
+
+	// Runs on the reactor when a worker signals completion: finish the response and
+	// resume reading. complete_response touches ev/close, so it must run here.
+	void complete_async_cb(ev::async&, int) {
+		if (!offloaded_.load(std::memory_order_acquire)) { return; }
+		offloaded_.store(false, std::memory_order_release);
+		bool keep_alive = complete_response(complete_keep_alive_.load(std::memory_order_relaxed));
+		resume_reading(keep_alive);
+	}
+
+	// Undo the offload pause and re-enable reads. Even when closing we re-enable
+	// io_read so the existing teardown path (io_cb sees `closed`) detaches the
+	// connection, mirroring the inline path which never stops reading.
+	void resume_reading(bool keep_alive) {
+		if (HTTP_PARSER_ERRNO(&parser_) == HPE_PAUSED) {
+			http_parser_pause(&parser_, 0);
+		}
+		if (!io_read.is_active()) { io_read.start(); }
+		if (keep_alive && !closed && !pending_input_.empty()) {
+			std::string buffered;
+			buffered.swap(pending_input_);
+			parse(buffered.data(), static_cast<ssize_t>(buffered.size()));
+		} else {
+			pending_input_.clear();
 		}
 	}
 
@@ -337,7 +476,7 @@ private:
 	static int on_message_complete_cb(http_parser* p) {
 		auto* c = self(p);
 		if (c->body_sink_) { c->body_sink_->end(); }
-		c->dispatch();
+		c->on_request_complete();
 		return 0;
 	}
 };

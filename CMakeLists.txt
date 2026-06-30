@@ -48,8 +48,20 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	add_executable(kv_store examples/kv_store.cc)
 	target_link_libraries(kv_store PRIVATE http)
 
+	# A throughput benchmark for the Dispatcher's queue (single-queue vs sharded),
+	# to decide whether the per-reactor pool needs per-worker run queues.
+	add_executable(dispatcher_bench examples/dispatcher_bench.cc)
+	target_link_libraries(dispatcher_bench PRIVATE http)
+
 	enable_testing()
 	add_executable(http_test test/test.cc)
 	target_link_libraries(http_test PRIVATE http)
 	add_test(NAME http COMMAND http_test)
+
+	# Drives a real server over TCP to prove the un-stallable model (a slow handler
+	# must not stall the loop) + 503 backpressure. Slower (~2s); still a ctest.
+	add_executable(http_loadtest test/loadtest.cc)
+	target_link_libraries(http_loadtest PRIVATE http)
+	add_test(NAME loadtest COMMAND http_loadtest)
+	set_tests_properties(loadtest PROPERTIES TIMEOUT 60)
 endif()
