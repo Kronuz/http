@@ -31,14 +31,24 @@
 // stricter parsers because it accepts arbitrary request methods -- Xapiand's
 // REST API uses custom verbs (COUNT, INFO, DUMP, RESTORE, ...) that a method-
 // validating parser rejects outright. Because parsing only *produces* a Request,
-// this choice is invisible above the seam: the handler and the Request/Response
-// structs are parser-agnostic.
+// this choice is invisible above the seam.
+//
+// The connection supplies the concrete ResponseWriter (the nested Writer): it
+// frames the handler's output as HTTP/1.1 -- Content-Length for a buffered body,
+// chunked transfer encoding once the response streams -- and treats end() as the
+// signal to finish the request (flush, then keep-alive reset or close). Because
+// completion is driven by end() rather than by handle() returning, a handler is
+// free to finish the response later (off a worker thread, or as a coroutine)
+// without any change here.
 
 #pragma once
 
+#include <cstdio>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
+#include <vector>
 
 #include <http_parser.h>
 
@@ -53,6 +63,120 @@ namespace http {
 class HttpConnection : public BaseClient<HttpConnection> {
 	friend BaseClient<HttpConnection>;
 
+	// The connection-backed ResponseWriter. Buffers status + headers until the
+	// first body byte, then frames: a single write (or none) becomes a
+	// Content-Length response; a second write before end() switches to chunked.
+	class Writer : public ResponseWriter {
+		HttpConnection* conn_;
+		int status_ = 200;
+		std::vector<std::pair<std::string, std::string>> headers_;
+		std::string pending_;        // first/whole body, held until framing is known
+		bool has_pending_ = false;
+		bool headers_sent_ = false;
+		bool chunked_ = false;
+		bool close_ = false;
+		bool ended_ = false;
+
+	public:
+		explicit Writer(HttpConnection* conn) : conn_(conn) {}
+
+		void reset() {
+			status_ = 200;
+			headers_.clear();
+			pending_.clear();
+			has_pending_ = false;
+			headers_sent_ = false;
+			chunked_ = false;
+			close_ = false;
+			ended_ = false;
+		}
+
+		bool ended() const { return ended_; }
+
+		void status(int code) override { status_ = code; }
+
+		void set_header(std::string_view name, std::string_view value) override {
+			headers_.emplace_back(std::string(name), std::string(value));
+		}
+
+		void set_close() override { close_ = true; }
+
+		void write(std::string_view chunk) override {
+			if (!headers_sent_ && !has_pending_) {
+				pending_.assign(chunk);          // might be the whole body; decide at end()
+				has_pending_ = true;
+				return;
+			}
+			if (!headers_sent_) {                // a second chunk: commit to streaming
+				send_headers(true, 0);
+				send_chunk(pending_);
+				pending_.clear();
+				has_pending_ = false;
+			}
+			send_chunk(chunk);
+		}
+
+		void end() override {
+			if (ended_) { return; }
+			ended_ = true;
+			if (!headers_sent_) {                // buffered: the length is known
+				send_headers(false, has_pending_ ? pending_.size() : 0);
+				if (has_pending_) { conn_->emit(std::move(pending_)); }
+			} else {                             // streaming: terminate the chunked body
+				conn_->emit("0\r\n\r\n");
+			}
+			conn_->complete_response(!close_);
+		}
+
+	private:
+		bool has_header(std::string_view name) const {
+			for (const auto& [k, v] : headers_) {
+				if (iequal(k, name)) { return true; }
+			}
+			return false;
+		}
+
+		void send_headers(bool chunked, size_t content_length) {
+			bool keep_alive = conn_->request_.keep_alive && !close_;
+			std::string out;
+			out.reserve(128);
+			out += "HTTP/1.1 ";
+			out += std::to_string(status_);
+			out += ' ';
+			out += reason_phrase(status_);
+			out += "\r\n";
+			for (const auto& [k, v] : headers_) {
+				out += k; out += ": "; out += v; out += "\r\n";
+			}
+			if (chunked) {
+				if (!has_header("Transfer-Encoding")) { out += "Transfer-Encoding: chunked\r\n"; }
+			} else if (!has_header("Content-Length")) {
+				out += "Content-Length: ";
+				out += std::to_string(content_length);
+				out += "\r\n";
+			}
+			if (!has_header("Connection")) {
+				out += keep_alive ? "Connection: keep-alive\r\n" : "Connection: close\r\n";
+			}
+			out += "\r\n";
+			conn_->emit(std::move(out));
+			headers_sent_ = true;
+			chunked_ = chunked;
+		}
+
+		void send_chunk(std::string_view chunk) {
+			if (chunk.empty()) { return; }   // an empty chunk would read as the terminator
+			char hex[24];
+			int n = std::snprintf(hex, sizeof(hex), "%zx\r\n", chunk.size());
+			std::string out;
+			out.reserve(static_cast<size_t>(n) + chunk.size() + 2);
+			out.append(hex, static_cast<size_t>(n));
+			out.append(chunk.data(), chunk.size());
+			out += "\r\n";
+			conn_->emit(std::move(out));
+		}
+	};
+
 	HttpHandler& handler_;
 
 	http_parser parser_;
@@ -62,6 +186,7 @@ class HttpConnection : public BaseClient<HttpConnection> {
 	std::string cur_field_;
 	std::string cur_value_;
 	bool reading_value_ = false;   // tracks the header field->value->field transition
+	Writer writer_{this};
 
 public:
 	HttpConnection(const std::shared_ptr<Worker>& parent, ev::loop_ref* loop, unsigned int flags, HttpHandler& handler)
@@ -101,6 +226,21 @@ private:
 
 	bool is_idle() { return request_.method.empty() && request_.body.empty(); }
 
+	// ---- helpers the Writer drives ----------------------------------------
+	void emit(std::string bytes) { write(std::move(bytes)); }
+
+	void complete_response(bool keep_alive) {
+		bool ka = request_.keep_alive && keep_alive;
+		if (ka) {
+			request_.clear();
+			cur_field_.clear();
+			cur_value_.clear();
+			reading_value_ = false;
+		} else {
+			close();
+		}
+	}
+
 	// ---- the request is complete: hand it to the application --------------
 	void dispatch() {
 		// Finish building the Request from the parser's accumulated state. For a
@@ -117,21 +257,17 @@ private:
 			request_.query = request_.target.substr(qpos + 1);
 		}
 
-		// THE SEAM. Value-semantic, so this is the one line that becomes
-		// `co_await handler_.handle(request_, response)` when the engine moves to
-		// coroutine handlers; the application's logic is unchanged.
-		Response response;
-		handler_.handle(request_, response);
+		writer_.reset();
 
-		bool keep_alive = request_.keep_alive && !response.close;
-		write(response.serialize(keep_alive));
-		if (keep_alive) {
-			request_.clear();
-			cur_field_.clear();
-			cur_value_.clear();
-			reading_value_ = false;
-		} else {
-			close();
+		// THE SEAM. end() (not "handle() returned") completes the response, so a
+		// handler may answer later off a worker thread or as a coroutine; this is
+		// the one call site that becomes `co_await handler_.handle(...)`.
+		try {
+			handler_.handle(request_, writer_);
+		} catch (...) {
+			// Backstop: an app should map its own exceptions, but never leave a
+			// synchronous handler's connection hung on an unhandled throw.
+			if (!writer_.ended()) { writer_.send(500, "Internal Server Error\n"); }
 		}
 	}
 

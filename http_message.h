@@ -50,6 +50,24 @@ inline bool iequal(std::string_view a, std::string_view b) {
 	return true;
 }
 
+// The reason phrase for a status code. A small, common subset; anything else
+// gets a generic phrase (the code is what matters on the wire).
+inline const char* reason_phrase(int status) {
+	switch (status) {
+		case 200: return "OK";
+		case 201: return "Created";
+		case 202: return "Accepted";
+		case 204: return "No Content";
+		case 400: return "Bad Request";
+		case 404: return "Not Found";
+		case 405: return "Method Not Allowed";
+		case 409: return "Conflict";
+		case 500: return "Internal Server Error";
+		case 503: return "Service Unavailable";
+		default:  return "Status";
+	}
+}
+
 
 struct Request {
 	std::string method;        // "GET", "POST", "PUT", ...
@@ -98,25 +116,12 @@ struct Response {
 
 	// Serialize to the raw HTTP/1.1 response bytes.
 	std::string serialize(bool keep_alive) const {
-		static const auto reason = [](int s) -> const char* {
-			switch (s) {
-				case 200: return "OK";
-				case 201: return "Created";
-				case 204: return "No Content";
-				case 400: return "Bad Request";
-				case 404: return "Not Found";
-				case 405: return "Method Not Allowed";
-				case 409: return "Conflict";
-				case 500: return "Internal Server Error";
-				default:  return "Status";
-			}
-		};
 		std::string out;
 		out.reserve(128 + body.size());
 		out += "HTTP/1.1 ";
 		out += std::to_string(status);
 		out += ' ';
-		out += reason(status);
+		out += reason_phrase(status);
 		out += "\r\n";
 		out += "Content-Type: ";
 		out += content_type;

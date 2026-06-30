@@ -32,32 +32,43 @@ class KvApp : public http::HttpHandler {
 
 public:
 	KvApp() {
-		router_.route("GET", "/kv/", [this](const http::Request&, http::Response& resp, const http::Params&) {
+		router_.route("GET", "/kv/", [this](const http::Request&, http::ResponseWriter& resp, const http::Params&) {
 			std::lock_guard<std::mutex> lk(mutex_);   // GET /kv/ -> list keys
 			std::string body;
 			for (const auto& [k, v] : store_) { body += k; body += '\n'; }
-			resp.set(200, std::move(body));
+			resp.send(200, body);
 		});
-		router_.route("GET", "/kv/:key", [this](const http::Request&, http::Response& resp, const http::Params& p) {
+		router_.route("GET", "/kv/:key", [this](const http::Request&, http::ResponseWriter& resp, const http::Params& p) {
 			std::lock_guard<std::mutex> lk(mutex_);
 			auto it = store_.find(std::string(p.get("key")));
-			if (it == store_.end()) { resp.set(404, "not found\n"); return; }
-			resp.set(200, it->second);
+			if (it == store_.end()) { resp.send(404, "not found\n"); return; }
+			resp.send(200, it->second);
 		});
-		router_.route("PUT", "/kv/:key", [this](const http::Request& req, http::Response& resp, const http::Params& p) {
+		router_.route("PUT", "/kv/:key", [this](const http::Request& req, http::ResponseWriter& resp, const http::Params& p) {
 			std::lock_guard<std::mutex> lk(mutex_);
 			std::string key(p.get("key"));
 			bool created = store_.find(key) == store_.end();
 			store_[key] = req.body;
-			resp.set(created ? 201 : 204, created ? "created\n" : "");
+			resp.send(created ? 201 : 204, created ? "created\n" : "");
 		});
-		router_.route("DELETE", "/kv/:key", [this](const http::Request&, http::Response& resp, const http::Params& p) {
+		router_.route("DELETE", "/kv/:key", [this](const http::Request&, http::ResponseWriter& resp, const http::Params& p) {
 			std::lock_guard<std::mutex> lk(mutex_);
-			resp.set(store_.erase(std::string(p.get("key"))) ? 204 : 404, "");
+			resp.send(store_.erase(std::string(p.get("key"))) ? 204 : 404, "");
+		});
+		// A streaming response: emit N lines as chunks, never holding them all in
+		// memory. The same seam produces a chunked body -- the writer frames it.
+		router_.route("GET", "/stream/:n", [](const http::Request&, http::ResponseWriter& resp, const http::Params& p) {
+			long n = std::atol(std::string(p.get("n")).c_str());
+			resp.status(200);
+			resp.content_type("text/plain; charset=utf-8");
+			for (long i = 0; i < n; ++i) {
+				resp.write("line " + std::to_string(i) + "\n");
+			}
+			resp.end();
 		});
 	}
 
-	void handle(const http::Request& request, http::Response& response) override {
+	void handle(const http::Request& request, http::ResponseWriter& response) override {
 		router_.handle(request, response);
 	}
 };

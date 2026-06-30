@@ -54,7 +54,7 @@ public:
 	// A route function also receives the captured path parameters; routes that
 	// take none can ignore the third argument. Patterns use radix-router syntax:
 	// static segments, ":name" params, and a trailing "*name" catch-all.
-	using Route = std::function<void(const Request&, Response&, const Params&)>;
+	using Route = std::function<void(const Request&, ResponseWriter&, const Params&)>;
 
 	// Register `fn` for `method` + `pattern`. `pattern` must begin with '/'.
 	// Throws std::invalid_argument on a malformed pattern or a conflict with an
@@ -67,7 +67,7 @@ public:
 		return *this;
 	}
 
-	void handle(const Request& request, Response& response) override {
+	void handle(const Request& request, ResponseWriter& response) override {
 		Params params;
 		for (auto& t : trees_) {
 			if (iequal(t.method, request.method)) {
@@ -83,7 +83,7 @@ public:
 		for (auto& t : trees_) {
 			if (t.tree.find(request.path) != nullptr) { path_known = true; break; }
 		}
-		response.set(path_known ? 405 : 404, path_known ? "Method Not Allowed\n" : "Not Found\n");
+		response.send(path_known ? 405 : 404, path_known ? "Method Not Allowed\n" : "Not Found\n");
 	}
 
 private:
