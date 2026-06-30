@@ -19,6 +19,7 @@ http_handler.h     HttpHandler (the seam) + ResponseWriter (buffered/streamed ou
 http_router.h      Router — method/path dispatch; a thin binding over Kronuz/radix-router.
 http_accept.h      Accept — content negotiation (Accept / Accept-Encoding / …), RFC 7231.
 http_compression.h Transparent response compression (Accept-Encoding → zstd/gzip).
+http_conditional.h Conditional requests — a weak ETag from the body + If-None-Match → 304.
 http_dispatcher.h  Dispatcher — a bounded worker pool (Kronuz/queue) for off-reactor work.
 http_watchdog.h    StallWatchdog — flags the loop if it stops ticking (offload observability).
 http_connection.h  The connection: http_parser parsing + HTTP/1.1 framing + the one
@@ -140,6 +141,23 @@ compressed size. The application just writes bytes; the lib never learns its mod
 - **The CPU lands where the handler ran** — on the worker for an offloaded handler,
   which is where it belongs. Validated round-trip per codec + race-/leak-free with
   compression running on workers (loadtest phase G).
+
+## Conditional requests (a generic knob)
+
+`HttpService::enable_conditional()` (`http_conditional.h`) makes a repeat GET of an
+unchanged resource cost a hash and a header instead of the body. At `end()` on the
+buffered path (GET/HEAD 200s only), the Writer derives a **weak ETag** from the body
+(`W/"<fnv1a64 hex>"`) and, if the request's `If-None-Match` already holds it (or is
+`*`), drops the body and answers `304 Not Modified` (no `Content-Length` — 304 is
+defined bodyless). It runs *before* compression, so the ETag identifies the resource
+(not the wire bytes — which is exactly why it is weak) and a 304 skips compression
+entirely. Last-Modified/If-Modified-Since is intentionally absent: it needs an
+app-supplied mtime the library can't know. A handler that sets its own `ETag` is
+left alone.
+
+Compression and conditional are configured together via one `ResponseOptions`
+(held by `HttpService`, a `const ResponseOptions*` reaches the connection — the same
+plumbing the Dispatcher uses). Range requests will slot into the same struct.
 
 ## Roadmap (Leg 2 productionization)
 

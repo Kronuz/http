@@ -131,7 +131,8 @@ struct Resp {
 	}
 };
 
-static Resp do_request(uint16_t port, const std::string& path, const std::string& accept_encoding) {
+static Resp do_request(uint16_t port, const std::string& path, const std::string& accept_encoding,
+                       const std::string& if_none_match = "") {
 	Resp r;
 	int fd = ::socket(AF_INET, SOCK_STREAM, 0);
 	if (fd < 0) { return r; }
@@ -144,6 +145,7 @@ static Resp do_request(uint16_t port, const std::string& path, const std::string
 	if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) { ::close(fd); return r; }
 	std::string req = "GET " + path + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n";
 	if (!accept_encoding.empty()) { req += "Accept-Encoding: " + accept_encoding + "\r\n"; }
+	if (!if_none_match.empty()) { req += "If-None-Match: " + if_none_match + "\r\n"; }
 	req += "\r\n";
 	::send(fd, req.data(), req.size(), 0);
 	std::string raw;
@@ -443,6 +445,40 @@ int main() {
 
 		Resp small = do_request(port, "/small", "gzip");
 		CHECK(small.header("Content-Encoding").empty() && small.body == "tiny\n", "body below min_size is not compressed");
+	}
+
+	// ---- H. Conditional requests: ETag / If-None-Match -> 304 ------------------
+	// Conditional + compression enabled together, offloaded. A buffered GET gets a
+	// weak ETag; a matching If-None-Match (or *) short-circuits to a bodyless 304,
+	// before compression; a miss returns the body.
+	{
+		const std::string& big = LoadHandler::big_body();
+		uint16_t port = find_free_port();
+		ServerFixture fx([&handler] {
+			auto svc = http::HttpService::create(handler, /*workers=*/4, /*queue_limit=*/64);
+			svc->enable_compression();
+			svc->enable_conditional();
+			return svc;
+		}, port);
+
+		Resp first = do_request(port, "/big", "", "");
+		std::string etag = first.header("ETag");
+		std::printf("  [H] conditional: ETag %s -> 304 on match/star, 200 on miss, 304 skips compression\n", etag.c_str());
+		CHECK(first.status == 200 && etag.rfind("W/\"", 0) == 0, "a buffered GET gets a weak ETag");
+
+		Resp hit = do_request(port, "/big", "", etag);
+		CHECK(hit.status == 304 && hit.body.empty(), "If-None-Match hit -> 304 with no body");
+		CHECK(hit.header("Content-Length").empty() && hit.header("ETag") == etag, "304 has no Content-Length and echoes the ETag");
+
+		Resp star = do_request(port, "/big", "", "*");
+		CHECK(star.status == 304 && star.body.empty(), "If-None-Match: * -> 304");
+
+		Resp miss = do_request(port, "/big", "", "\"deadbeefdeadbeef\"");
+		CHECK(miss.status == 200 && miss.body == big, "If-None-Match miss -> 200 with body");
+
+		Resp cond_gz = do_request(port, "/big", "gzip", etag);
+		CHECK(cond_gz.status == 304 && cond_gz.body.empty() && cond_gz.header("Content-Encoding").empty(),
+		      "a 304 short-circuits before compression (no body to encode)");
 	}
 
 	std::printf("\n%s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);

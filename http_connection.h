@@ -79,11 +79,21 @@
 #include "worker.h"          // Kronuz/server: Worker
 
 #include "http_compression.h"
+#include "http_conditional.h"
 #include "http_dispatcher.h"
 #include "http_handler.h"
 #include "http_message.h"
 
 namespace http {
+
+// Service-level response transforms the connection applies after a handler finishes
+// (configured once on HttpService; a connection sees a pointer, null => none). They
+// are transparent: the application just writes its bytes.
+struct ResponseOptions {
+	bool compress = false;             // negotiate Accept-Encoding -> compress the body
+	CompressionOptions compression{};  // ...with these tunables
+	bool conditional = false;          // derive an ETag + answer 304 on If-None-Match
+};
 
 class HttpConnection : public BaseClient<HttpConnection> {
 	friend BaseClient<HttpConnection>;
@@ -145,7 +155,10 @@ class HttpConnection : public BaseClient<HttpConnection> {
 			if (ended_) { return; }
 			ended_ = true;
 			if (!headers_sent_) {                // buffered: the length is known
-				if (has_pending_) { maybe_compress(); }
+				if (has_pending_) {
+					maybe_conditional();             // sets ETag; may flip to a bodyless 304
+					if (status_ != 304) { maybe_compress(); }
+				}
 				send_headers(false, has_pending_ ? pending_.size() : 0);
 				if (has_pending_) { conn_->emit(std::move(pending_)); }
 			} else {                             // streaming: terminate the chunked body
@@ -176,7 +189,7 @@ class HttpConnection : public BaseClient<HttpConnection> {
 			}
 			if (chunked) {
 				if (!has_header("Transfer-Encoding")) { out += "Transfer-Encoding: chunked\r\n"; }
-			} else if (!has_header("Content-Length")) {
+			} else if (!has_header("Content-Length") && status_ != 304) {   // 304 is defined bodyless
 				out += "Content-Length: ";
 				out += std::to_string(content_length);
 				out += "\r\n";
@@ -196,18 +209,38 @@ class HttpConnection : public BaseClient<HttpConnection> {
 		// offloaded handlers, which is where the CPU should be. A streamed/chunked
 		// response is left as-is (the first chunk already committed the framing).
 		void maybe_compress() {
-			const CompressionOptions* opt = conn_->compression_;
-			if (opt == nullptr) { return; }
-			if (pending_.size() < opt->min_size) { return; }             // too small to bother
+			if (conn_->response_ == nullptr || !conn_->response_->compress) { return; }
+			const CompressionOptions& opt = conn_->response_->compression;
+			if (pending_.size() < opt.min_size) { return; }              // too small to bother
 			if (has_header("Content-Encoding")) { return; }              // handler already encoded
 			if (status_ == 204 || status_ == 304 || (status_ >= 100 && status_ < 200)) { return; }  // bodyless
 			std::string_view coding = negotiate_encoding(conn_->request_.header("Accept-Encoding"));
 			if (coding.empty()) { return; }                              // client accepts nothing we offer
-			std::string compressed = encode(coding, pending_, opt->zstd_level);
+			std::string compressed = encode(coding, pending_, opt.zstd_level);
 			if (compressed.empty() || compressed.size() >= pending_.size()) { return; }   // didn't help
 			pending_ = std::move(compressed);
 			headers_.emplace_back("Content-Encoding", std::string(coding));
 			if (!has_header("Vary")) { headers_.emplace_back("Vary", "Accept-Encoding"); }
+		}
+
+		// Conditional GET: derive a weak ETag from the (uncompressed) body and, if the
+		// client's If-None-Match already holds it, drop the body and answer 304. Runs
+		// before maybe_compress so the ETag covers the resource, not the wire bytes,
+		// and a 304 skips compression entirely. Buffered GET/HEAD 200s only.
+		void maybe_conditional() {
+			if (conn_->response_ == nullptr || !conn_->response_->conditional) { return; }
+			if (status_ != 200) { return; }
+			const std::string& method = conn_->request_.method;
+			if (method != "GET" && method != "HEAD") { return; }
+			if (has_header("ETag")) { return; }                          // handler set its own validator
+			std::string etag = weak_etag(pending_);
+			std::string_view inm = conn_->request_.header("If-None-Match");
+			if (!inm.empty() && if_none_match(inm, etag)) {
+				status_ = 304;                                           // not modified: no body
+				pending_.clear();
+				has_pending_ = false;
+			}
+			headers_.emplace_back("ETag", std::move(etag));
 		}
 
 		void send_chunk(std::string_view chunk) {
@@ -225,7 +258,7 @@ class HttpConnection : public BaseClient<HttpConnection> {
 
 	HttpHandler& handler_;
 	Dispatcher* dispatcher_;       // per-reactor worker pool; null => run inline
-	const CompressionOptions* compression_;   // response compression tunables; null => off
+	const ResponseOptions* response_;   // response transforms (compress / conditional); null => none
 
 	http_parser parser_;
 	http_parser_settings settings_;
@@ -247,11 +280,11 @@ class HttpConnection : public BaseClient<HttpConnection> {
 	std::atomic<bool> complete_keep_alive_{true};
 
 public:
-	HttpConnection(const std::shared_ptr<Worker>& parent, ev::loop_ref* loop, unsigned int flags, HttpHandler& handler, Dispatcher* dispatcher = nullptr, const CompressionOptions* compression = nullptr)
+	HttpConnection(const std::shared_ptr<Worker>& parent, ev::loop_ref* loop, unsigned int flags, HttpHandler& handler, Dispatcher* dispatcher = nullptr, const ResponseOptions* response = nullptr)
 		: BaseClient<HttpConnection>(parent, loop, flags),
 		  handler_(handler),
 		  dispatcher_(dispatcher),
-		  compression_(compression),
+		  response_(response),
 		  complete_async_(*ev_loop) {
 		http_parser_settings_init(&settings_);
 		settings_.on_url = &on_url_cb;

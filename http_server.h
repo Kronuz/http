@@ -46,14 +46,14 @@ class HttpServer : public MetaBaseServer<HttpServer> {
 
 	HttpHandler& handler_;
 	Dispatcher* dispatcher_;   // this reactor's worker pool; null => handlers run inline
-	const CompressionOptions* compression_;   // response compression tunables; null => off
+	const ResponseOptions* response_;   // response transforms (compress / conditional); null => none
 
 public:
-	HttpServer(const std::shared_ptr<Worker>& parent, ev::loop_ref* loop, unsigned int flags, HttpHandler& handler, Dispatcher* dispatcher = nullptr, const CompressionOptions* compression = nullptr)
+	HttpServer(const std::shared_ptr<Worker>& parent, ev::loop_ref* loop, unsigned int flags, HttpHandler& handler, Dispatcher* dispatcher = nullptr, const ResponseOptions* response = nullptr)
 		: MetaBaseServer<HttpServer>(parent, loop, flags, "http", 0),
 		  handler_(handler),
 		  dispatcher_(dispatcher),
-		  compression_(compression) {}
+		  response_(response) {}
 
 	void listen(unsigned int port) {
 		bind(nullptr, port, 1);
@@ -70,7 +70,7 @@ public:
 		}
 		int client_sock = accept();
 		if (client_sock != -1) {
-			auto conn = Worker::make_shared<HttpConnection>(share_this<HttpServer>(), ev_loop, ev_flags, handler_, dispatcher_, compression_);
+			auto conn = Worker::make_shared<HttpConnection>(share_this<HttpServer>(), ev_loop, ev_flags, handler_, dispatcher_, response_);
 			if (!conn->init(client_sock)) {
 				conn->detach();
 				return;
@@ -93,8 +93,7 @@ class HttpService : public Worker {
 	HttpHandler& handler_;
 	std::unique_ptr<Dispatcher> dispatcher_;   // null => handlers run inline on the reactor
 	std::unique_ptr<StallWatchdog> watchdog_;  // null => no stall monitoring
-	bool compress_ = false;                    // response compression off until enable_compression()
-	CompressionOptions compression_;
+	ResponseOptions response_;                 // response transforms; off until enable_*()
 	std::shared_ptr<HttpServer> server_;
 
 public:
@@ -138,12 +137,19 @@ public:
 	// the codec the client advertised in Accept-Encoding (zstd or gzip). Call before
 	// listen(). The CPU cost lands on the worker for offloaded handlers.
 	void enable_compression(CompressionOptions options = {}) {
-		compression_ = options;
-		compress_ = true;
+		response_.compression = options;
+		response_.compress = true;
+	}
+
+	// Enable conditional requests: buffered GET/HEAD 200s get a weak ETag, and a
+	// matching If-None-Match is answered 304 Not Modified (no body). Call before
+	// listen().
+	void enable_conditional() {
+		response_.conditional = true;
 	}
 
 	void listen(unsigned int port) {
-		server_ = Worker::make_shared<HttpServer>(share_this<HttpService>(), ev_loop, ev_flags, handler_, dispatcher_.get(), compress_ ? &compression_ : nullptr);
+		server_ = Worker::make_shared<HttpServer>(share_this<HttpService>(), ev_loop, ev_flags, handler_, dispatcher_.get(), &response_);
 		server_->listen(port);
 		server_->start();
 		if (watchdog_) { watchdog_->start(); }   // on the loop thread, before the loop runs
