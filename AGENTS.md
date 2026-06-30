@@ -17,6 +17,8 @@ the working notes.
 http_message.h     Request + the buffered Response value + reason_phrase().
 http_handler.h     HttpHandler (the seam) + ResponseWriter (buffered/streamed output).
 http_router.h      Router — method/path dispatch; a thin binding over Kronuz/radix-router.
+http_accept.h      Accept — content negotiation (Accept / Accept-Encoding / …), RFC 7231.
+http_compression.h Transparent response compression (Accept-Encoding → zstd/gzip).
 http_dispatcher.h  Dispatcher — a bounded worker pool (Kronuz/queue) for off-reactor work.
 http_watchdog.h    StallWatchdog — flags the loop if it stops ticking (offload observability).
 http_connection.h  The connection: http_parser parsing + HTTP/1.1 framing + the one
@@ -115,9 +117,29 @@ contention) — size the pool to the task rate instead.
 Both follow-ups are now built: the **stall watchdog** (`http_watchdog.h`) and
 **per-route classification** (`should_offload`). Validated race-/leak-free under TSAN
 and ASAN+UBSAN (Homebrew LLVM); the only sanitizer reports are libev's own async
-primitive (hand-rolled fences TSAN can't model), not the offload path. Next up the
-HTTP knobs (compression, Accept-LRU, conditional/range) then #51 (collapse Xapiand's
-search onto one `HttpHandler`).
+primitive (hand-rolled fences TSAN can't model), not the offload path.
+
+## Response compression (a generic knob)
+
+`HttpService::enable_compression(opts)` turns on transparent response compression
+(`http_compression.h`). The connection's Writer, at `end()` on the buffered path,
+negotiates the body's `Content-Encoding` from the request's `Accept-Encoding`
+(reusing `http::Accept`) and compresses with Kronuz/compressors, setting
+`Content-Encoding` + `Vary: Accept-Encoding` and a `Content-Length` from the
+compressed size. The application just writes bytes; the lib never learns its model.
+
+- **Codings: zstd (preferred) and gzip.** HTTP `deflate` is intentionally omitted —
+  it is ambiguously raw-vs-zlib in the wild and the backend emits raw deflate, which
+  some clients reject. `Accept::best({"zstd","gzip"})` favours zstd on ties.
+- **Conservative triggers.** Compress only when the client *explicitly* advertised a
+  coding we produce (absent `Accept-Encoding` → identity, not RFC 7231's "anything");
+  skip bodies below `min_size`, bodyless statuses (204/304/1xx), a response that
+  already set `Content-Encoding`, and the result if it didn't actually shrink.
+- **Buffered path only.** A streamed/chunked response is left as-is (the first chunk
+  already committed the framing); streaming compression is a later refinement.
+- **The CPU lands where the handler ran** — on the worker for an offloaded handler,
+  which is where it belongs. Validated round-trip per codec + race-/leak-free with
+  compression running on workers (loadtest phase G).
 
 ## Roadmap (Leg 2 productionization)
 

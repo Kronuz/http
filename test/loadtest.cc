@@ -37,6 +37,8 @@
 #include <thread>
 #include <vector>
 
+#include "compressor_deflate.h"   // for decompressing gzip responses in the test
+#include "compressor_zstd.h"      // for decompressing zstd responses in the test
 #include "http_handler.h"
 #include "http_router.h"
 #include "http_server.h"
@@ -117,6 +119,70 @@ static int count_status(const std::vector<Result>& v, int status) {
 }
 
 
+// ---- a header+body-capturing client (for the compression checks) --------------
+struct Resp {
+	int status = 0;
+	http::Headers headers;
+	std::string body;   // raw, possibly binary (compressed)
+	bool ok = false;
+	std::string header(std::string_view name) const {
+		for (const auto& [k, v] : headers) { if (http::iequal(k, name)) { return v; } }
+		return {};
+	}
+};
+
+static Resp do_request(uint16_t port, const std::string& path, const std::string& accept_encoding) {
+	Resp r;
+	int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0) { return r; }
+	sockaddr_in addr{};
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(port);
+	::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+	timeval tv{.tv_sec = 5, .tv_usec = 0};
+	::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) { ::close(fd); return r; }
+	std::string req = "GET " + path + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n";
+	if (!accept_encoding.empty()) { req += "Accept-Encoding: " + accept_encoding + "\r\n"; }
+	req += "\r\n";
+	::send(fd, req.data(), req.size(), 0);
+	std::string raw;
+	char buf[8192];
+	ssize_t n;
+	while ((n = ::recv(fd, buf, sizeof(buf), 0)) > 0) { raw.append(buf, static_cast<size_t>(n)); }
+	::close(fd);
+
+	auto sep = raw.find("\r\n\r\n");
+	if (sep == std::string::npos) { return r; }
+	std::string head = raw.substr(0, sep);
+	r.body = raw.substr(sep + 4);   // binary-safe: the rest of the buffer
+	auto eol = head.find("\r\n");
+	std::string status_line = head.substr(0, eol);
+	if (status_line.rfind("HTTP/1.1 ", 0) == 0) { r.status = std::atoi(status_line.c_str() + 9); }
+	for (std::size_t pos = (eol == std::string::npos ? head.size() : eol + 2); pos < head.size();) {
+		auto e = head.find("\r\n", pos);
+		if (e == std::string::npos) { e = head.size(); }
+		std::string line = head.substr(pos, e - pos);
+		pos = e + 2;
+		auto colon = line.find(':');
+		if (colon != std::string::npos) {
+			std::string v = line.substr(colon + 1);
+			auto s = v.find_first_not_of(" \t");
+			r.headers.emplace_back(line.substr(0, colon), s == std::string::npos ? std::string() : v.substr(s));
+		}
+	}
+	r.ok = r.status != 0;
+	return r;
+}
+
+static std::string gunzip(std::string_view s) {
+	std::string out;
+	DeflateDecompressData d(s.data(), s.size(), /*gzip=*/true);
+	for (auto it = d.begin(); it; ++it) { out.append(*it); }
+	return out;
+}
+
+
 // ---- the application: a fast route and a deliberately-slow route --------------
 static constexpr int SLOW_MS = 500;
 
@@ -131,6 +197,22 @@ public:
 			std::this_thread::sleep_for(std::chrono::milliseconds(SLOW_MS));   // blocking, CPU-bound stand-in
 			resp.send(200, "slow\n");
 		});
+		router_.route("GET", "/big", [](const http::Request&, http::ResponseWriter& resp, const http::Params&) {
+			resp.send(200, big_body());          // large, highly compressible
+		});
+		router_.route("GET", "/small", [](const http::Request&, http::ResponseWriter& resp, const http::Params&) {
+			resp.send(200, "tiny\n");            // below the compression threshold
+		});
+	}
+
+	// A large, very compressible body (repeated text) for the compression checks.
+	static const std::string& big_body() {
+		static const std::string body = [] {
+			std::string s;
+			while (s.size() < 20000) { s += "The quick brown fox jumps over the lazy dog. "; }
+			return s;
+		}();
+		return body;
 	}
 	void handle(const http::Request& req, http::ResponseWriter& resp) override { router_.handle(req, resp); }
 };
@@ -291,13 +373,13 @@ int main() {
 
 	// ---- E. Stall watchdog: an inline blocking handler trips it ---------------
 	// No Dispatcher -> /slow runs on the reactor and blocks it for 500 ms, well past
-	// the 120 ms threshold, so the monitor thread observes the stall and fires.
+	// the 250 ms threshold, so the monitor thread observes the stall and fires.
 	{
 		std::atomic<int> stalls{0};
 		uint16_t port = find_free_port();
 		ServerFixture fx([&handler, &stalls] {
 			auto svc = http::HttpService::create(handler);
-			svc->watch_stalls(std::chrono::milliseconds(120), [&stalls](std::chrono::milliseconds) { stalls.fetch_add(1); });
+			svc->watch_stalls(std::chrono::milliseconds(250), [&stalls](std::chrono::milliseconds) { stalls.fetch_add(1); });
 			return svc;
 		}, port);
 		std::this_thread::sleep_for(std::chrono::milliseconds(60));   // let the loop pet healthily first
@@ -316,7 +398,7 @@ int main() {
 		uint16_t port = find_free_port();
 		ServerFixture fx([&handler, &stalls] {
 			auto svc = http::HttpService::create(handler, /*workers=*/4, /*queue_limit=*/64);
-			svc->watch_stalls(std::chrono::milliseconds(120), [&stalls](std::chrono::milliseconds) { stalls.fetch_add(1); });
+			svc->watch_stalls(std::chrono::milliseconds(250), [&stalls](std::chrono::milliseconds) { stalls.fetch_add(1); });
 			return svc;
 		}, port);
 		std::this_thread::sleep_for(std::chrono::milliseconds(60));
@@ -325,6 +407,42 @@ int main() {
 		std::this_thread::sleep_for(std::chrono::milliseconds(60));
 		std::printf("  [F] watchdog (offload): healthy loop fired the watchdog %d time(s)\n", stalls.load());
 		CHECK(stalls.load() == 0, "the watchdog stays silent while heavy work runs off-reactor");
+	}
+
+	// ---- G. Response compression: negotiate Accept-Encoding, round-trip --------
+	// Compression enabled + offloaded (the CPU lands on a worker). A large body is
+	// compressed to the client's advertised codec; small / unsupported / absent
+	// Accept-Encoding are left identity.
+	{
+		const std::string& big = LoadHandler::big_body();
+		uint16_t port = find_free_port();
+		ServerFixture fx([&handler] {
+			auto svc = http::HttpService::create(handler, /*workers=*/4, /*queue_limit=*/64);
+			svc->enable_compression();
+			return svc;
+		}, port);
+
+		Resp gz = do_request(port, "/big", "gzip");
+		std::printf("  [G] compression: /big %zuB -> gzip %zuB, zstd negotiated, identity fallbacks\n",
+		            big.size(), gz.body.size());
+		CHECK(gz.status == 200 && gz.header("Content-Encoding") == "gzip", "gzip negotiated when advertised");
+		CHECK(gz.header("Vary") == "Accept-Encoding", "Vary: Accept-Encoding is set on a compressed response");
+		CHECK(gz.body.size() < big.size() && gunzip(gz.body) == big, "gzip body is smaller and round-trips");
+
+		Resp zs = do_request(port, "/big", "zstd");
+		CHECK(zs.header("Content-Encoding") == "zstd" && decompress_zstd(zs.body) == big, "zstd body round-trips");
+
+		Resp both = do_request(port, "/big", "gzip, zstd");
+		CHECK(both.header("Content-Encoding") == "zstd", "server prefers zstd when the client accepts both");
+
+		Resp raw = do_request(port, "/big", "");
+		CHECK(raw.header("Content-Encoding").empty() && raw.body == big, "no Accept-Encoding -> identity (uncompressed)");
+
+		Resp br = do_request(port, "/big", "br");
+		CHECK(br.header("Content-Encoding").empty() && br.body == big, "unsupported coding -> identity");
+
+		Resp small = do_request(port, "/small", "gzip");
+		CHECK(small.header("Content-Encoding").empty() && small.body == "tiny\n", "body below min_size is not compressed");
 	}
 
 	std::printf("\n%s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);

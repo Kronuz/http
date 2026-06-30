@@ -78,6 +78,7 @@
 #include "base_client.h"     // Kronuz/server: BaseClient<ClientImpl>
 #include "worker.h"          // Kronuz/server: Worker
 
+#include "http_compression.h"
 #include "http_dispatcher.h"
 #include "http_handler.h"
 #include "http_message.h"
@@ -144,6 +145,7 @@ class HttpConnection : public BaseClient<HttpConnection> {
 			if (ended_) { return; }
 			ended_ = true;
 			if (!headers_sent_) {                // buffered: the length is known
+				if (has_pending_) { maybe_compress(); }
 				send_headers(false, has_pending_ ? pending_.size() : 0);
 				if (has_pending_) { conn_->emit(std::move(pending_)); }
 			} else {                             // streaming: terminate the chunked body
@@ -188,6 +190,26 @@ class HttpConnection : public BaseClient<HttpConnection> {
 			chunked_ = chunked;
 		}
 
+		// Transparent response compression (buffered path only). If enabled and the
+		// client advertised a codec we produce, swap the body for its compressed form
+		// and set Content-Encoding + Vary. Runs wherever end() runs -- on a worker for
+		// offloaded handlers, which is where the CPU should be. A streamed/chunked
+		// response is left as-is (the first chunk already committed the framing).
+		void maybe_compress() {
+			const CompressionOptions* opt = conn_->compression_;
+			if (opt == nullptr) { return; }
+			if (pending_.size() < opt->min_size) { return; }             // too small to bother
+			if (has_header("Content-Encoding")) { return; }              // handler already encoded
+			if (status_ == 204 || status_ == 304 || (status_ >= 100 && status_ < 200)) { return; }  // bodyless
+			std::string_view coding = negotiate_encoding(conn_->request_.header("Accept-Encoding"));
+			if (coding.empty()) { return; }                              // client accepts nothing we offer
+			std::string compressed = encode(coding, pending_, opt->zstd_level);
+			if (compressed.empty() || compressed.size() >= pending_.size()) { return; }   // didn't help
+			pending_ = std::move(compressed);
+			headers_.emplace_back("Content-Encoding", std::string(coding));
+			if (!has_header("Vary")) { headers_.emplace_back("Vary", "Accept-Encoding"); }
+		}
+
 		void send_chunk(std::string_view chunk) {
 			if (chunk.empty()) { return; }   // an empty chunk would read as the terminator
 			char hex[24];
@@ -203,6 +225,7 @@ class HttpConnection : public BaseClient<HttpConnection> {
 
 	HttpHandler& handler_;
 	Dispatcher* dispatcher_;       // per-reactor worker pool; null => run inline
+	const CompressionOptions* compression_;   // response compression tunables; null => off
 
 	http_parser parser_;
 	http_parser_settings settings_;
@@ -224,10 +247,11 @@ class HttpConnection : public BaseClient<HttpConnection> {
 	std::atomic<bool> complete_keep_alive_{true};
 
 public:
-	HttpConnection(const std::shared_ptr<Worker>& parent, ev::loop_ref* loop, unsigned int flags, HttpHandler& handler, Dispatcher* dispatcher = nullptr)
+	HttpConnection(const std::shared_ptr<Worker>& parent, ev::loop_ref* loop, unsigned int flags, HttpHandler& handler, Dispatcher* dispatcher = nullptr, const CompressionOptions* compression = nullptr)
 		: BaseClient<HttpConnection>(parent, loop, flags),
 		  handler_(handler),
 		  dispatcher_(dispatcher),
+		  compression_(compression),
 		  complete_async_(*ev_loop) {
 		http_parser_settings_init(&settings_);
 		settings_.on_url = &on_url_cb;

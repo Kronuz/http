@@ -46,12 +46,14 @@ class HttpServer : public MetaBaseServer<HttpServer> {
 
 	HttpHandler& handler_;
 	Dispatcher* dispatcher_;   // this reactor's worker pool; null => handlers run inline
+	const CompressionOptions* compression_;   // response compression tunables; null => off
 
 public:
-	HttpServer(const std::shared_ptr<Worker>& parent, ev::loop_ref* loop, unsigned int flags, HttpHandler& handler, Dispatcher* dispatcher = nullptr)
+	HttpServer(const std::shared_ptr<Worker>& parent, ev::loop_ref* loop, unsigned int flags, HttpHandler& handler, Dispatcher* dispatcher = nullptr, const CompressionOptions* compression = nullptr)
 		: MetaBaseServer<HttpServer>(parent, loop, flags, "http", 0),
 		  handler_(handler),
-		  dispatcher_(dispatcher) {}
+		  dispatcher_(dispatcher),
+		  compression_(compression) {}
 
 	void listen(unsigned int port) {
 		bind(nullptr, port, 1);
@@ -68,7 +70,7 @@ public:
 		}
 		int client_sock = accept();
 		if (client_sock != -1) {
-			auto conn = Worker::make_shared<HttpConnection>(share_this<HttpServer>(), ev_loop, ev_flags, handler_, dispatcher_);
+			auto conn = Worker::make_shared<HttpConnection>(share_this<HttpServer>(), ev_loop, ev_flags, handler_, dispatcher_, compression_);
 			if (!conn->init(client_sock)) {
 				conn->detach();
 				return;
@@ -91,6 +93,8 @@ class HttpService : public Worker {
 	HttpHandler& handler_;
 	std::unique_ptr<Dispatcher> dispatcher_;   // null => handlers run inline on the reactor
 	std::unique_ptr<StallWatchdog> watchdog_;  // null => no stall monitoring
+	bool compress_ = false;                    // response compression off until enable_compression()
+	CompressionOptions compression_;
 	std::shared_ptr<HttpServer> server_;
 
 public:
@@ -130,8 +134,16 @@ public:
 		watchdog_ = std::make_unique<StallWatchdog>(*ev_loop, threshold, std::move(on_stall));
 	}
 
+	// Enable transparent response compression: buffered responses are compressed to
+	// the codec the client advertised in Accept-Encoding (zstd or gzip). Call before
+	// listen(). The CPU cost lands on the worker for offloaded handlers.
+	void enable_compression(CompressionOptions options = {}) {
+		compression_ = options;
+		compress_ = true;
+	}
+
 	void listen(unsigned int port) {
-		server_ = Worker::make_shared<HttpServer>(share_this<HttpService>(), ev_loop, ev_flags, handler_, dispatcher_.get());
+		server_ = Worker::make_shared<HttpServer>(share_this<HttpService>(), ev_loop, ev_flags, handler_, dispatcher_.get(), compress_ ? &compression_ : nullptr);
 		server_->listen(port);
 		server_->start();
 		if (watchdog_) { watchdog_->start(); }   // on the loop thread, before the loop runs
