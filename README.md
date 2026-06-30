@@ -79,8 +79,9 @@ hardcoded `prepare()` method-switch becomes once search is an `HttpHandler`.
 | `http_handler.h` | `HttpHandler` (the seam) + `ResponseWriter` (buffered `send` / streamed `write`+`end`). |
 | `http_router.h` | `Router` — method/path dispatch, a thin binding over `Kronuz/radix-router`. |
 | `http_dispatcher.h` | `Dispatcher` — a bounded worker pool (Kronuz/queue) for off-reactor handler work; `submit()` false = the 503 backpressure signal. |
+| `http_watchdog.h` | `StallWatchdog` — a monitor thread that flags the reactor loop if it stops ticking (offload observability). |
 | `http_connection.h` | The generic connection: http-parser parsing, HTTP/1.1 framing (Content-Length / chunked), and the single handler call site (inline or offloaded), over `BaseClient`. |
-| `http_server.h` | `HttpServer` (accept loop) + `HttpService` (the worker-tree root; owns the per-reactor `Dispatcher`). |
+| `http_server.h` | `HttpServer` (accept loop) + `HttpService` (the worker-tree root; owns the per-reactor `Dispatcher` + the optional `StallWatchdog`). |
 
 ## Dependencies
 

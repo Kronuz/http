@@ -18,10 +18,11 @@ http_message.h     Request + the buffered Response value + reason_phrase().
 http_handler.h     HttpHandler (the seam) + ResponseWriter (buffered/streamed output).
 http_router.h      Router — method/path dispatch; a thin binding over Kronuz/radix-router.
 http_dispatcher.h  Dispatcher — a bounded worker pool (Kronuz/queue) for off-reactor work.
+http_watchdog.h    StallWatchdog — flags the loop if it stops ticking (offload observability).
 http_connection.h  The connection: http_parser parsing + HTTP/1.1 framing + the one
                    handler call site (inline or offloaded), over BaseClient.
 http_server.h      HttpServer (accept loop) + HttpService (worker-tree root; owns the
-                   per-reactor Dispatcher).
+                   per-reactor Dispatcher + the optional StallWatchdog).
 examples/kv_store.cc        A complete REST app: buffered routes + a streaming route.
 examples/dispatcher_bench.cc Throughput of the Dispatcher queue (single vs sharded).
 test/test.cc       ctest: method dispatch, 404 vs 405, param capture, streamed body.
@@ -91,6 +92,18 @@ Invariants — do not break these when touching `HttpConnection`:
   must be thread-safe** when a Dispatcher is configured. With no Dispatcher
   (`create(handler)`), `handle()` runs inline on the reactor — the cheap fast path,
   single-threaded, unchanged.
+- **Per-route fast path.** `HttpHandler::should_offload(request)` (default true) is
+  consulted per request when a Dispatcher exists; return false to keep a cheap,
+  non-blocking route (health check, metrics) inline on the reactor so it is served
+  even when every worker is busy. A route classified cheap must actually be cheap —
+  it runs on the reactor.
+- **Observability.** `HttpService::watch_stalls(threshold, on_stall)` arms a
+  `StallWatchdog`: a periodic timer pets the loop and a monitor thread fires
+  `on_stall` (default: stderr) on the healthy→stalled edge. The timer forces the
+  loop to wake even when idle, so a stale pet means genuinely stuck, not waiting on
+  I/O. In the offload model the loop shouldn't stall; this catches a misclassified
+  cheap handler or an engine bug. Stop the monitor before breaking the loop
+  (`HttpService::stop()` does) so it can't false-fire on the shutdown quiescence.
 
 Per-reactor, not global: one `HttpService` == one loop == one Dispatcher
 (shared-nothing across cores). To scale, run several `HttpService` instances on
@@ -99,12 +112,12 @@ queue is not the bottleneck for ms-scale handlers and that sharding the queue
 would not help (the cost at high worker counts is condvar wakeup latency, not lock
 contention) — size the pool to the task rate instead.
 
-Still open (follow-ups): a **stall watchdog** (a monitor thread that flags a loop
-that hasn't ticked in N ms — observability, the load test is the functional check
-for now); per-route cheap/heavy classification so trivial endpoints keep the inline
-fast path even when a Dispatcher exists. Validated race-/leak-free under TSAN and
-ASAN+UBSAN (Homebrew LLVM); the only sanitizer reports are libev's own async
-primitive (hand-rolled fences TSAN can't model), not the offload path.
+Both follow-ups are now built: the **stall watchdog** (`http_watchdog.h`) and
+**per-route classification** (`should_offload`). Validated race-/leak-free under TSAN
+and ASAN+UBSAN (Homebrew LLVM); the only sanitizer reports are libev's own async
+primitive (hand-rolled fences TSAN can't model), not the offload path. Next up the
+HTTP knobs (compression, Accept-LRU, conditional/range) then #51 (collapse Xapiand's
+search onto one `HttpHandler`).
 
 ## Roadmap (Leg 2 productionization)
 

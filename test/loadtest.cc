@@ -289,6 +289,44 @@ int main() {
 		CHECK(cheap_max < SLOW_MS / 2.0, "cheap route runs inline (does not queue behind the busy pool)");
 	}
 
+	// ---- E. Stall watchdog: an inline blocking handler trips it ---------------
+	// No Dispatcher -> /slow runs on the reactor and blocks it for 500 ms, well past
+	// the 120 ms threshold, so the monitor thread observes the stall and fires.
+	{
+		std::atomic<int> stalls{0};
+		uint16_t port = find_free_port();
+		ServerFixture fx([&handler, &stalls] {
+			auto svc = http::HttpService::create(handler);
+			svc->watch_stalls(std::chrono::milliseconds(120), [&stalls](std::chrono::milliseconds) { stalls.fetch_add(1); });
+			return svc;
+		}, port);
+		std::this_thread::sleep_for(std::chrono::milliseconds(60));   // let the loop pet healthily first
+
+		do_get(port, "/slow");   // blocks the reactor ~500 ms
+		std::this_thread::sleep_for(std::chrono::milliseconds(60));
+		std::printf("  [E] watchdog (inline): a blocking handler fired the watchdog %d time(s)\n", stalls.load());
+		CHECK(stalls.load() >= 1, "the watchdog observes a stalled (blocked) reactor");
+	}
+
+	// ---- F. Stall watchdog: offloaded work keeps the loop healthy -------------
+	// With a Dispatcher the same /slow runs on a worker; the reactor keeps ticking,
+	// so the watchdog stays silent -- exactly the property the offload model buys.
+	{
+		std::atomic<int> stalls{0};
+		uint16_t port = find_free_port();
+		ServerFixture fx([&handler, &stalls] {
+			auto svc = http::HttpService::create(handler, /*workers=*/4, /*queue_limit=*/64);
+			svc->watch_stalls(std::chrono::milliseconds(120), [&stalls](std::chrono::milliseconds) { stalls.fetch_add(1); });
+			return svc;
+		}, port);
+		std::this_thread::sleep_for(std::chrono::milliseconds(60));
+
+		fire(port, "/slow", 4);   // offloaded; the loop should stay responsive throughout
+		std::this_thread::sleep_for(std::chrono::milliseconds(60));
+		std::printf("  [F] watchdog (offload): healthy loop fired the watchdog %d time(s)\n", stalls.load());
+		CHECK(stalls.load() == 0, "the watchdog stays silent while heavy work runs off-reactor");
+	}
+
 	std::printf("\n%s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
 	return g_failures == 0 ? 0 : 1;
 }

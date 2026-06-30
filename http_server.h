@@ -27,6 +27,7 @@
 
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <memory>
 
@@ -36,6 +37,7 @@
 #include "http_connection.h"
 #include "http_dispatcher.h"
 #include "http_handler.h"
+#include "http_watchdog.h"
 
 namespace http {
 
@@ -88,6 +90,7 @@ public:
 class HttpService : public Worker {
 	HttpHandler& handler_;
 	std::unique_ptr<Dispatcher> dispatcher_;   // null => handlers run inline on the reactor
+	std::unique_ptr<StallWatchdog> watchdog_;  // null => no stall monitoring
 	std::shared_ptr<HttpServer> server_;
 
 public:
@@ -100,7 +103,10 @@ public:
 	// line of its destructor (it stops the base async watchers and sets _deinited,
 	// which ~Worker asserts). BaseServer/BaseClient do this for the server and the
 	// connections; HttpService is a direct Worker, so it must too.
-	~HttpService() noexcept { Worker::deinit(); }
+	~HttpService() noexcept {
+		if (watchdog_) { watchdog_->stop(); }   // join the monitor before the loop/members go away
+		Worker::deinit();
+	}
 
 	// Inline: every handler runs on the reactor thread. Simplest; correct when
 	// handlers are cheap and non-blocking.
@@ -117,14 +123,25 @@ public:
 		return Worker::make_shared<HttpService>(std::shared_ptr<Worker>(), static_cast<ev::loop_ref*>(nullptr), static_cast<unsigned int>(ev::AUTO), handler, std::move(dispatcher));
 	}
 
+	// Enable the reactor-stall watchdog: a monitor thread flags the loop if it goes
+	// `threshold` without ticking. Call before listen()/run(). Optional `on_stall`
+	// (default logs to stderr) is invoked from the monitor thread per stall episode.
+	void watch_stalls(std::chrono::milliseconds threshold, StallWatchdog::Callback on_stall = {}) {
+		watchdog_ = std::make_unique<StallWatchdog>(*ev_loop, threshold, std::move(on_stall));
+	}
+
 	void listen(unsigned int port) {
 		server_ = Worker::make_shared<HttpServer>(share_this<HttpService>(), ev_loop, ev_flags, handler_, dispatcher_.get());
 		server_->listen(port);
 		server_->start();
+		if (watchdog_) { watchdog_->start(); }   // on the loop thread, before the loop runs
 	}
 
 	void run() { run_loop(); }
-	void stop() { break_loop(); }
+	void stop() {
+		if (watchdog_) { watchdog_->stop(); }   // stop monitoring before the loop stops petting
+		break_loop();
+	}
 };
 
 }  // namespace http
