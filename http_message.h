@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -80,6 +81,11 @@ struct Request {
 	int http_minor = 1;
 	bool keep_alive = true;
 
+	// Per-request application state, opaque to the library. An app can stash a
+	// context here in on_request_body() and read it back in handle() -- e.g. to
+	// carry what a streaming BodySink accumulated.
+	std::shared_ptr<void> user_data;
+
 	std::string_view header(std::string_view name) const {
 		for (const auto& [k, v] : headers) {
 			if (iequal(k, name)) { return v; }
@@ -87,10 +93,15 @@ struct Request {
 		return {};
 	}
 
+	// The request's Content-Type (the application decodes the body accordingly);
+	// empty if absent.
+	std::string_view content_type() const { return header("Content-Type"); }
+
 	void clear() {
 		method.clear(); target.clear(); path.clear(); query.clear();
 		headers.clear(); body.clear();
 		http_major = 1; http_minor = 1; keep_alive = true;
+		user_data.reset();
 	}
 };
 

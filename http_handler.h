@@ -43,6 +43,7 @@
 
 #pragma once
 
+#include <memory>
 #include <string_view>
 #include <utility>
 
@@ -93,10 +94,32 @@ public:
 };
 
 
+// Optional opt-in streaming intake. An application returns a BodySink from
+// HttpHandler::on_request_body() to receive the request body incrementally
+// instead of having it buffered: the connection calls write() for each chunk as
+// it arrives, then end(), then handle() (with Request::body left empty). This is
+// for large or unbounded bodies -- an NDJSON bulk load, a RESTORE -- where
+// holding the whole body in memory is wrong. The default is to buffer into
+// Request::body. The application owns whatever framing (NDJSON line splitting,
+// etc.) it layers on the chunks; the library stays format-agnostic.
+class BodySink {
+public:
+	virtual ~BodySink() = default;
+	virtual void write(std::string_view chunk) = 0;
+	virtual void end() = 0;
+};
+
+
 class HttpHandler {
 public:
 	virtual ~HttpHandler() = default;
 	virtual void handle(const Request& request, ResponseWriter& response) = 0;
+
+	// Opt in to streaming the request body: return a sink to receive it
+	// incrementally, or nullptr (default) to have it buffered into Request::body.
+	// Called once when the headers are complete, before any body byte, so the
+	// decision can use the method, path, and headers (e.g. Content-Type).
+	virtual std::unique_ptr<BodySink> on_request_body(Request& /*request*/) { return nullptr; }
 };
 
 }  // namespace http

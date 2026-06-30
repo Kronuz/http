@@ -43,6 +43,7 @@
 
 #pragma once
 
+#include <charconv>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -186,6 +187,7 @@ class HttpConnection : public BaseClient<HttpConnection> {
 	std::string cur_field_;
 	std::string cur_value_;
 	bool reading_value_ = false;   // tracks the header field->value->field transition
+	std::unique_ptr<BodySink> body_sink_;   // non-null => the app is streaming the body in
 	Writer writer_{this};
 
 public:
@@ -236,15 +238,17 @@ private:
 			cur_field_.clear();
 			cur_value_.clear();
 			reading_value_ = false;
+			body_sink_.reset();
 		} else {
 			close();
 		}
 	}
 
-	// ---- the request is complete: hand it to the application --------------
-	void dispatch() {
-		// Finish building the Request from the parser's accumulated state. For a
-		// custom method, http_method_str returns the verb the fork added.
+	// ---- headers are complete: finalize the request and let the app decide
+	// whether to stream the body in. Done here (not at message-complete) so the
+	// streaming decision can use the method/path/headers before any body byte. ----
+	void finalize_request() {
+		// For a custom method, http_method_str returns the verb the fork added.
 		request_.method = http_method_str(static_cast<enum http_method>(parser_.method));
 		request_.http_major = parser_.http_major;
 		request_.http_minor = parser_.http_minor;
@@ -257,6 +261,21 @@ private:
 			request_.query = request_.target.substr(qpos + 1);
 		}
 
+		// Opt-in streaming intake: if the app returns a sink, body chunks go to it
+		// instead of being buffered. Otherwise reserve the buffer up front from
+		// Content-Length to avoid reallocations as the body arrives.
+		body_sink_ = handler_.on_request_body(request_);
+		if (!body_sink_) {
+			auto cl = request_.header("Content-Length");
+			long n = 0;
+			if (!cl.empty() && std::from_chars(cl.data(), cl.data() + cl.size(), n).ec == std::errc() && n > 0) {
+				request_.body.reserve(static_cast<size_t>(n));
+			}
+		}
+	}
+
+	// ---- the request is complete: hand it to the application --------------
+	void dispatch() {
 		writer_.reset();
 
 		// THE SEAM. end() (not "handle() returned") completes the response, so a
@@ -303,14 +322,22 @@ private:
 			c->cur_value_.clear();
 			c->reading_value_ = false;
 		}
+		c->finalize_request();
 		return 0;
 	}
 	static int on_body_cb(http_parser* p, const char* at, size_t len) {
-		self(p)->request_.body.append(at, len);
+		auto* c = self(p);
+		if (c->body_sink_) {            // streaming: hand the chunk straight to the app
+			c->body_sink_->write(std::string_view(at, len));
+		} else {                        // buffered: accumulate (reserved from Content-Length)
+			c->request_.body.append(at, len);
+		}
 		return 0;
 	}
 	static int on_message_complete_cb(http_parser* p) {
-		self(p)->dispatch();
+		auto* c = self(p);
+		if (c->body_sink_) { c->body_sink_->end(); }
+		c->dispatch();
 		return 0;
 	}
 };

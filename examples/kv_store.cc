@@ -24,6 +24,30 @@
 #include "http_router.h"
 #include "http_server.h"
 
+// A streaming request-body intake: counts NDJSON lines as the body arrives,
+// without ever holding the whole body in memory. The per-request count rides in
+// Request::user_data so the handler can read it once the body is fully received.
+struct BulkCtx { long lines = 0; };
+
+class LineCountingSink : public http::BodySink {
+	std::shared_ptr<BulkCtx> ctx_;
+	std::string partial_;
+public:
+	explicit LineCountingSink(std::shared_ptr<BulkCtx> ctx) : ctx_(std::move(ctx)) {}
+	void write(std::string_view chunk) override {
+		partial_.append(chunk);
+		std::size_t nl;
+		while ((nl = partial_.find('\n')) != std::string::npos) {
+			++ctx_->lines;
+			partial_.erase(0, nl + 1);
+		}
+	}
+	void end() override {
+		if (!partial_.empty()) { ++ctx_->lines; }  // trailing line without a newline
+	}
+};
+
+
 // The application: an in-memory KV store behind a Router. Pure request->response.
 class KvApp : public http::HttpHandler {
 	std::mutex mutex_;
@@ -66,10 +90,27 @@ public:
 			}
 			resp.end();
 		});
+		// A streamed request body: POST NDJSON; the body is counted line-by-line as
+		// it arrives (see on_request_body) and never buffered whole.
+		router_.route("POST", "/bulk", [](const http::Request& req, http::ResponseWriter& resp, const http::Params&) {
+			auto ctx = std::static_pointer_cast<BulkCtx>(req.user_data);
+			resp.send(200, "received " + std::to_string(ctx ? ctx->lines : 0) + " lines\n");
+		});
 	}
 
 	void handle(const http::Request& request, http::ResponseWriter& response) override {
 		router_.handle(request, response);
+	}
+
+	// Stream the body for POST /bulk instead of buffering it; everything else
+	// buffers (the default). The line count is carried in user_data.
+	std::unique_ptr<http::BodySink> on_request_body(http::Request& request) override {
+		if (request.method == "POST" && request.path == "/bulk") {
+			auto ctx = std::make_shared<BulkCtx>();
+			request.user_data = ctx;
+			return std::make_unique<LineCountingSink>(ctx);
+		}
+		return nullptr;
 	}
 };
 
