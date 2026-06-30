@@ -6,6 +6,7 @@
  * exercise what http:: adds on top. Run via ctest (http_test).
  */
 
+#include "http_accept.h"
 #include "http_handler.h"
 #include "http_message.h"
 #include "http_router.h"
@@ -126,6 +127,23 @@ int main() {
 		threw = true;
 	}
 	CHECK(threw);
+
+	// --- content negotiation (Accept) ---
+	{
+		std::vector<std::string> produce = {"application/json", "application/x-msgpack", "text/yaml", "text/html"};
+		CHECK(http::Accept("application/x-msgpack").best(produce) == "application/x-msgpack");
+		CHECK(http::Accept("application/json;q=0.5, application/x-msgpack;q=0.9").best(produce) == "application/x-msgpack");
+		CHECK(http::Accept("text/html, */*;q=0.1").best(produce) == "text/html");   // exact beats wildcard
+		CHECK(http::Accept("").best(produce) == "application/json");                 // absent Accept -> first available
+		CHECK(http::Accept("image/png").best(produce).empty());                      // 406: nothing acceptable
+		http::Accept a("text/*;q=0.5, text/html;q=0.9, */*;q=0.1");
+		CHECK(a.quality("text/html") == 0.9);       // exact
+		CHECK(a.quality("text/plain") == 0.5);      // type/*
+		CHECK(a.quality("application/json") == 0.1); // */*
+		http::Accept enc("gzip, deflate;q=0.5");     // token-only (Accept-Encoding shape)
+		CHECK(enc.best({"deflate", "gzip"}) == "gzip");
+		CHECK(enc.quality("br") == 0.0);
+	}
 
 	std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
 	return g_failures == 0 ? 0 : 1;
