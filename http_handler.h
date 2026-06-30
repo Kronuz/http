@@ -29,14 +29,11 @@
 // connection, the coroutine upgrade is local and additive -- a `co_await`-able
 // variant returning a task<> can be introduced and the single call site in
 // HttpConnection switched to `co_await`, without touching any handler's logic.
+//
+// A ready-made HttpHandler that dispatches by method + path -- the application's
+// routing table -- lives in http_router.h (the radix-tree Router).
 
 #pragma once
-
-#include <functional>
-#include <string>
-#include <string_view>
-#include <utility>
-#include <vector>
 
 #include "http_message.h"
 
@@ -46,52 +43,6 @@ class HttpHandler {
 public:
 	virtual ~HttpHandler() = default;
 	virtual void handle(const Request& request, Response& response) = 0;
-};
-
-
-// A convenience HttpHandler that dispatches by method + path prefix to registered
-// functions -- the application's routing table. This is what Xapiand's hardcoded
-// `prepare()` method-switch becomes: routing as app configuration, not something
-// baked into the connection. Matching is longest-prefix; a known path with the
-// wrong method yields 405, an unknown path yields 404.
-class Router : public HttpHandler {
-public:
-	using Route = std::function<void(const Request&, Response&)>;
-
-	// `prefix` matches a request whose path starts with it. Register the more
-	// specific prefixes; the longest match wins.
-	Router& route(std::string method, std::string prefix, Route fn) {
-		routes_.push_back({std::move(method), std::move(prefix), std::move(fn)});
-		return *this;
-	}
-
-	void handle(const Request& request, Response& response) override {
-		const Entry* best = nullptr;
-		bool path_known = false;
-		for (const auto& e : routes_) {
-			if (request.path.size() >= e.prefix.size() &&
-			    request.path.compare(0, e.prefix.size(), e.prefix) == 0) {
-				path_known = true;
-				if (iequal(e.method, request.method) &&
-				    (best == nullptr || e.prefix.size() > best->prefix.size())) {
-					best = &e;
-				}
-			}
-		}
-		if (best != nullptr) {
-			best->fn(request, response);
-			return;
-		}
-		if (path_known) {
-			response.set(405, "Method Not Allowed\n");
-		} else {
-			response.set(404, "Not Found\n");
-		}
-	}
-
-private:
-	struct Entry { std::string method; std::string prefix; Route fn; };
-	std::vector<Entry> routes_;
 };
 
 }  // namespace http

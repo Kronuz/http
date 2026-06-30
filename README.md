@@ -12,7 +12,7 @@ struct HttpHandler {
 ```
 
 — and the engine does everything else: a generic `HttpConnection` parses bytes
-with **llhttp**, builds a `Request`, hands it to the handler, and writes the
+with **http-parser**, builds a `Request`, hands it to the handler, and writes the
 `Response` back over a `Kronuz/server` connection. The search engine becomes one
 `HttpHandler`; the demo is another.
 
@@ -24,7 +24,7 @@ curl       localhost:8080/kv/greeting        # -> hello
 ```
 
 `examples/kv_store.cc` is a complete REST app in a `Router` of closures. It never
-names llhttp, a socket, or the event loop.
+names http-parser, a socket, or the event loop.
 
 ## Why the seam has this shape (forward-compatibility)
 
@@ -32,9 +32,13 @@ The handler is **value-semantic** — `Request` in, `Response` out — rather th
 callback into the connection. That single choice keeps three eventual migrations
 contained behind the seam, so none of them touch application code:
 
-- **Parser (llhttp today).** Parsing lives only inside `HttpConnection` and just
-  *produces* a `Request`. Swapping llhttp for another parser is contained there;
-  the handler and the `Request`/`Response` structs are parser-agnostic.
+- **Parser (http-parser today).** Parsing lives only inside `HttpConnection` and
+  just *produces* a `Request`. The parser is the Joyent `http_parser` fork
+  ([Kronuz/http-parser](https://github.com/Kronuz/http-parser)), chosen because it
+  accepts arbitrary request methods — Xapiand's REST API uses custom verbs
+  (`COUNT`, `INFO`, `DUMP`, `RESTORE`, …) that a stricter parser like llhttp
+  rejects. Swapping it for another parser is contained here; the handler and the
+  `Request`/`Response` structs are parser-agnostic.
 - **Concurrency (synchronous today).** Because the handler returns its response
   by value, the coroutine upgrade is additive: `handle()` gains a `task<>`
   variant and the *one* call site in `HttpConnection::dispatch()` becomes
@@ -51,13 +55,16 @@ hardcoded `prepare()` method-switch becomes once search is an `HttpHandler`.
 | File | Role |
 |---|---|
 | `http_message.h` | `Request` / `Response` — the plain data that crosses the seam, with `Response::serialize()`. |
-| `http_handler.h` | `HttpHandler` (the seam) + `Router` (method/path dispatch). |
-| `http_connection.h` | The generic connection: llhttp parsing + the single handler call site, over `BaseClient`. |
+| `http_handler.h` | `HttpHandler` — the seam. |
+| `http_router.h` | `Router` — method/path dispatch, a thin binding over `Kronuz/radix-router`. |
+| `http_connection.h` | The generic connection: http-parser parsing + the single handler call site, over `BaseClient`. |
 | `http_server.h` | `HttpServer` (accept loop) + `HttpService` (the worker-tree root). |
 
 ## Dependencies
 
-Both via FetchContent, so the build is self-contained and version-pinned (no
-system/brew install): `Kronuz/server` (reactor + TCP + connection FSM) and
-`nodejs/llhttp` at a `release/*` tag (which ships pre-generated C, so no Node
-toolchain is needed).
+All via FetchContent, so the build is self-contained and version-pinned (no
+system/brew install):
+
+- [`Kronuz/server`](https://github.com/Kronuz/server) — reactor + TCP + connection FSM.
+- [`Kronuz/http-parser`](https://github.com/Kronuz/http-parser) — the HTTP parser (accepts custom methods).
+- [`Kronuz/radix-router`](https://github.com/Kronuz/radix-router) — the radix-tree path router behind `Router`.

@@ -22,7 +22,7 @@
 
 // The HTTP message values that cross the application seam. They are deliberately
 // plain data: an application sees a request and fills in a response, and nothing
-// here knows how the bytes were parsed (llhttp today), how they arrived (the
+// here knows how the bytes were parsed (http-parser today), how they arrived (the
 // Kronuz/server reactor today), or whether the handler runs synchronously or as
 // a coroutine. That is what keeps the parser / transport / concurrency choices
 // swappable behind the handler.

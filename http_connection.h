@@ -21,18 +21,26 @@
  */
 
 // HttpConnection: a generic HTTP/1.1 connection. It is the only place that knows
-// about the parser (llhttp) and the transport (it is a Kronuz/server BaseClient);
-// it turns received bytes into a Request, hands the Request to the application's
-// HttpHandler, and writes the Response back. Swapping llhttp for another parser
-// is contained here; swapping the reactor lives entirely under BaseClient; and
-// the single handler call site below is the one that would become `co_await`.
+// about the parser and the transport (it is a Kronuz/server BaseClient); it
+// turns received bytes into a Request, hands the Request to the application's
+// HttpHandler, and writes the Response back. Swapping the parser is contained
+// here; swapping the reactor lives entirely under BaseClient; and the single
+// handler call site below is the one that would become `co_await`.
+//
+// The parser is Kronuz/http-parser (the Joyent http_parser fork), chosen over
+// stricter parsers because it accepts arbitrary request methods -- Xapiand's
+// REST API uses custom verbs (COUNT, INFO, DUMP, RESTORE, ...) that a method-
+// validating parser rejects outright. Because parsing only *produces* a Request,
+// this choice is invisible above the seam: the handler and the Request/Response
+// structs are parser-agnostic.
 
 #pragma once
 
 #include <memory>
 #include <string>
+#include <utility>
 
-#include <llhttp.h>
+#include <http_parser.h>
 
 #include "base_client.h"     // Kronuz/server: BaseClient<ClientImpl>
 #include "worker.h"          // Kronuz/server: Worker
@@ -47,25 +55,26 @@ class HttpConnection : public BaseClient<HttpConnection> {
 
 	HttpHandler& handler_;
 
-	llhttp_t parser_;
-	llhttp_settings_t settings_;
+	http_parser parser_;
+	http_parser_settings settings_;
 
 	Request request_;
 	std::string cur_field_;
 	std::string cur_value_;
+	bool reading_value_ = false;   // tracks the header field->value->field transition
 
 public:
 	HttpConnection(const std::shared_ptr<Worker>& parent, ev::loop_ref* loop, unsigned int flags, HttpHandler& handler)
 		: BaseClient<HttpConnection>(parent, loop, flags),
 		  handler_(handler) {
-		llhttp_settings_init(&settings_);
+		http_parser_settings_init(&settings_);
 		settings_.on_url = &on_url_cb;
 		settings_.on_header_field = &on_header_field_cb;
 		settings_.on_header_value = &on_header_value_cb;
-		settings_.on_header_value_complete = &on_header_value_complete_cb;
+		settings_.on_headers_complete = &on_headers_complete_cb;
 		settings_.on_body = &on_body_cb;
 		settings_.on_message_complete = &on_message_complete_cb;
-		llhttp_init(&parser_, HTTP_REQUEST, &settings_);
+		http_parser_init(&parser_, HTTP_REQUEST);
 		parser_.data = this;
 	}
 
@@ -75,10 +84,10 @@ private:
 		if (received <= 0) {
 			return received;
 		}
-		llhttp_errno_t err = llhttp_execute(&parser_, buf, static_cast<size_t>(received));
-		if (err != HPE_OK && err != HPE_PAUSED) {
+		http_parser_execute(&parser_, &settings_, buf, static_cast<size_t>(received));
+		if (HTTP_PARSER_ERRNO(&parser_) != HPE_OK) {
 			Response resp;
-			resp.set(400, std::string("Bad Request: ") + llhttp_errno_name(err) + "\n");
+			resp.set(400, std::string("Bad Request: ") + http_errno_name(HTTP_PARSER_ERRNO(&parser_)) + "\n");
 			resp.close = true;
 			write(resp.serialize(false));
 			close();
@@ -94,11 +103,12 @@ private:
 
 	// ---- the request is complete: hand it to the application --------------
 	void dispatch() {
-		// Finish building the Request from the parser's accumulated state.
-		request_.method = llhttp_method_name(static_cast<llhttp_method_t>(llhttp_get_method(&parser_)));
-		request_.http_major = llhttp_get_http_major(&parser_);
-		request_.http_minor = llhttp_get_http_minor(&parser_);
-		request_.keep_alive = llhttp_should_keep_alive(&parser_) != 0;
+		// Finish building the Request from the parser's accumulated state. For a
+		// custom method, http_method_str returns the verb the fork added.
+		request_.method = http_method_str(static_cast<enum http_method>(parser_.method));
+		request_.http_major = parser_.http_major;
+		request_.http_minor = parser_.http_minor;
+		request_.keep_alive = http_should_keep_alive(&parser_) != 0;
 		auto qpos = request_.target.find('?');
 		if (qpos == std::string::npos) {
 			request_.path = request_.target;
@@ -119,38 +129,51 @@ private:
 			request_.clear();
 			cur_field_.clear();
 			cur_value_.clear();
+			reading_value_ = false;
 		} else {
 			close();
 		}
 	}
 
-	// ---- llhttp callbacks (reach the instance via parser->data) -----------
-	static HttpConnection* self(llhttp_t* p) { return static_cast<HttpConnection*>(p->data); }
+	// ---- http_parser callbacks (reach the instance via parser->data) ------
+	static HttpConnection* self(http_parser* p) { return static_cast<HttpConnection*>(p->data); }
 
-	static int on_url_cb(llhttp_t* p, const char* at, size_t len) {
+	static int on_url_cb(http_parser* p, const char* at, size_t len) {
 		self(p)->request_.target.append(at, len);
 		return 0;
 	}
-	static int on_header_field_cb(llhttp_t* p, const char* at, size_t len) {
-		self(p)->cur_field_.append(at, len);
-		return 0;
-	}
-	static int on_header_value_cb(llhttp_t* p, const char* at, size_t len) {
-		self(p)->cur_value_.append(at, len);
-		return 0;
-	}
-	static int on_header_value_complete_cb(llhttp_t* p) {
+	static int on_header_field_cb(http_parser* p, const char* at, size_t len) {
 		auto* c = self(p);
-		c->request_.headers.emplace_back(std::move(c->cur_field_), std::move(c->cur_value_));
-		c->cur_field_.clear();
-		c->cur_value_.clear();
+		if (c->reading_value_) {   // a new field begins: the previous pair is complete
+			c->request_.headers.emplace_back(std::move(c->cur_field_), std::move(c->cur_value_));
+			c->cur_field_.clear();
+			c->cur_value_.clear();
+			c->reading_value_ = false;
+		}
+		c->cur_field_.append(at, len);
 		return 0;
 	}
-	static int on_body_cb(llhttp_t* p, const char* at, size_t len) {
+	static int on_header_value_cb(http_parser* p, const char* at, size_t len) {
+		auto* c = self(p);
+		c->reading_value_ = true;
+		c->cur_value_.append(at, len);
+		return 0;
+	}
+	static int on_headers_complete_cb(http_parser* p) {
+		auto* c = self(p);
+		if (!c->cur_field_.empty()) {   // flush the final pending header
+			c->request_.headers.emplace_back(std::move(c->cur_field_), std::move(c->cur_value_));
+			c->cur_field_.clear();
+			c->cur_value_.clear();
+			c->reading_value_ = false;
+		}
+		return 0;
+	}
+	static int on_body_cb(http_parser* p, const char* at, size_t len) {
 		self(p)->request_.body.append(at, len);
 		return 0;
 	}
-	static int on_message_complete_cb(llhttp_t* p) {
+	static int on_message_complete_cb(http_parser* p) {
 		self(p)->dispatch();
 		return 0;
 	}
