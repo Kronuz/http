@@ -148,6 +148,13 @@ public:
 		response_.conditional = true;
 	}
 
+	// Enable range requests: a buffered GET 200 advertises Accept-Ranges and serves a
+	// single byte Range as 206 Partial Content (416 when unsatisfiable). Call before
+	// listen().
+	void enable_ranges() {
+		response_.ranges = true;
+	}
+
 	void listen(unsigned int port) {
 		server_ = Worker::make_shared<HttpServer>(share_this<HttpService>(), ev_loop, ev_flags, handler_, dispatcher_.get(), &response_);
 		server_->listen(port);

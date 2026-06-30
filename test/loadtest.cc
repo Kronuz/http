@@ -132,7 +132,7 @@ struct Resp {
 };
 
 static Resp do_request(uint16_t port, const std::string& path, const std::string& accept_encoding,
-                       const std::string& if_none_match = "") {
+                       const std::string& if_none_match = "", const std::string& range = "") {
 	Resp r;
 	int fd = ::socket(AF_INET, SOCK_STREAM, 0);
 	if (fd < 0) { return r; }
@@ -146,6 +146,7 @@ static Resp do_request(uint16_t port, const std::string& path, const std::string
 	std::string req = "GET " + path + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n";
 	if (!accept_encoding.empty()) { req += "Accept-Encoding: " + accept_encoding + "\r\n"; }
 	if (!if_none_match.empty()) { req += "If-None-Match: " + if_none_match + "\r\n"; }
+	if (!range.empty()) { req += "Range: " + range + "\r\n"; }
 	req += "\r\n";
 	::send(fd, req.data(), req.size(), 0);
 	std::string raw;
@@ -479,6 +480,44 @@ int main() {
 		Resp cond_gz = do_request(port, "/big", "gzip", etag);
 		CHECK(cond_gz.status == 304 && cond_gz.body.empty() && cond_gz.header("Content-Encoding").empty(),
 		      "a 304 short-circuits before compression (no body to encode)");
+	}
+
+	// ---- I. Range requests: Range -> 206 Partial Content -----------------------
+	// Ranges enabled, offloaded. Prefix / open / suffix ranges return 206 with the
+	// right slice + Content-Range; past-the-end -> 416; no Range -> 200 advertising
+	// Accept-Ranges; a multi-range we don't handle -> the full 200.
+	{
+		const std::string& big = LoadHandler::big_body();
+		const std::size_t total = big.size();
+		uint16_t port = find_free_port();
+		ServerFixture fx([&handler] {
+			auto svc = http::HttpService::create(handler, /*workers=*/4, /*queue_limit=*/64);
+			svc->enable_ranges();
+			return svc;
+		}, port);
+
+		Resp pre = do_request(port, "/big", "", "", "bytes=0-9");
+		std::printf("  [I] ranges: bytes=0-9 -> %d %s, len %zu; past-end -> 416; no-range -> 200+Accept-Ranges\n",
+		            pre.status, pre.header("Content-Range").c_str(), pre.body.size());
+		CHECK(pre.status == 206 && pre.body == big.substr(0, 10), "prefix range -> 206 with the right 10 bytes");
+		CHECK(pre.header("Content-Range") == "bytes 0-9/" + std::to_string(total), "Content-Range names the slice + total");
+		CHECK(pre.header("Accept-Ranges") == "bytes", "206 advertises Accept-Ranges");
+
+		Resp open = do_request(port, "/big", "", "", "bytes=10-");
+		CHECK(open.status == 206 && open.body == big.substr(10), "open range bytes=N- -> to end");
+
+		Resp suffix = do_request(port, "/big", "", "", "bytes=-5");
+		CHECK(suffix.status == 206 && suffix.body == big.substr(total - 5), "suffix range bytes=-N -> last N bytes");
+
+		Resp unsat = do_request(port, "/big", "", "", "bytes=" + std::to_string(total + 10) + "-");
+		CHECK(unsat.status == 416 && unsat.header("Content-Range") == "bytes */" + std::to_string(total), "past-the-end range -> 416");
+
+		Resp norange = do_request(port, "/big", "", "", "");
+		CHECK(norange.status == 200 && norange.body == big && norange.header("Accept-Ranges") == "bytes",
+		      "no Range -> full 200 that advertises Accept-Ranges");
+
+		Resp multi = do_request(port, "/big", "", "", "bytes=0-9,20-29");
+		CHECK(multi.status == 200 && multi.body == big, "unhandled multi-range -> full 200");
 	}
 
 	std::printf("\n%s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);

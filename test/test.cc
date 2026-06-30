@@ -7,8 +7,10 @@
  */
 
 #include "http_accept.h"
+#include "http_conditional.h"
 #include "http_handler.h"
 #include "http_message.h"
+#include "http_range.h"
 #include "http_router.h"
 
 #include <cstdio>
@@ -143,6 +145,42 @@ int main() {
 		http::Accept enc("gzip, deflate;q=0.5");     // token-only (Accept-Encoding shape)
 		CHECK(enc.best({"deflate", "gzip"}) == "gzip");
 		CHECK(enc.quality("br") == 0.0);
+	}
+
+	// --- conditional requests (weak ETag + If-None-Match) ---
+	{
+		std::string e1 = http::weak_etag("hello");
+		CHECK(e1.rfind("W/\"", 0) == 0 && e1.back() == '"');         // shape W/"...."
+		CHECK(http::weak_etag("hello") == e1);                       // stable for the same body
+		CHECK(http::weak_etag("hellp") != e1);                       // changes with the body
+		// weak comparison: a quoted or W/-prefixed tag with the same opaque-tag matches
+		CHECK(http::if_none_match("\"" + std::string(http::etag_opaque(e1)) + "\"", e1));
+		CHECK(http::if_none_match(e1, e1));
+		CHECK(http::if_none_match("*", e1));                         // * matches any
+		CHECK(http::if_none_match("\"x\", " + e1, e1));              // a list, ours is present
+		CHECK(!http::if_none_match("\"nope\"", e1));                 // a miss
+		CHECK(!http::if_none_match("", e1));                         // absent
+	}
+
+	// --- range parsing (RFC 7233, single range) ---
+	{
+		auto r = http::parse_byte_range("bytes=0-9", 100);
+		CHECK(r.recognized && r.satisfiable && r.start == 0 && r.end == 9);
+		r = http::parse_byte_range("bytes=10-", 100);               // open: to the end
+		CHECK(r.satisfiable && r.start == 10 && r.end == 99);
+		r = http::parse_byte_range("bytes=-5", 100);                // suffix: last 5
+		CHECK(r.satisfiable && r.start == 95 && r.end == 99);
+		r = http::parse_byte_range("bytes=90-1000", 100);           // last clamped to the end
+		CHECK(r.satisfiable && r.start == 90 && r.end == 99);
+		r = http::parse_byte_range("bytes=200-", 100);              // start past end -> 416
+		CHECK(r.recognized && !r.satisfiable);
+		r = http::parse_byte_range("bytes=5-2", 100);               // end < start -> 416
+		CHECK(r.recognized && !r.satisfiable);
+		r = http::parse_byte_range("bytes=-0", 100);                // -0 -> 416
+		CHECK(r.recognized && !r.satisfiable);
+		CHECK(!http::parse_byte_range("bytes=0-9,20-29", 100).recognized);  // multi-range: full 200
+		CHECK(!http::parse_byte_range("items=0-9", 100).recognized);        // wrong unit
+		CHECK(!http::parse_byte_range("bytes=abc-def", 100).recognized);    // malformed
 	}
 
 	std::printf("\n%d checks, %d failures\n", g_checks, g_failures);

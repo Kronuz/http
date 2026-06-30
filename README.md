@@ -81,6 +81,7 @@ hardcoded `prepare()` method-switch becomes once search is an `HttpHandler`.
 | `http_accept.h` | `Accept` — content negotiation (Accept / Accept-Encoding / …) per RFC 7231. |
 | `http_compression.h` | Transparent response compression — negotiate `Accept-Encoding` → zstd/gzip (Kronuz/compressors). |
 | `http_conditional.h` | Conditional requests — a weak ETag from the body + `If-None-Match` → `304 Not Modified`. |
+| `http_range.h` | Range requests — a single byte range → `206 Partial Content` (`Content-Range`), `416` if unsatisfiable. |
 | `http_dispatcher.h` | `Dispatcher` — a bounded worker pool (Kronuz/queue) for off-reactor handler work; `submit()` false = the 503 backpressure signal. |
 | `http_watchdog.h` | `StallWatchdog` — a monitor thread that flags the reactor loop if it stops ticking (offload observability). |
 | `http_connection.h` | The generic connection: http-parser parsing, HTTP/1.1 framing (Content-Length / chunked), and the single handler call site (inline or offloaded), over `BaseClient`. |

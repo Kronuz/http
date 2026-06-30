@@ -20,6 +20,7 @@ http_router.h      Router — method/path dispatch; a thin binding over Kronuz/r
 http_accept.h      Accept — content negotiation (Accept / Accept-Encoding / …), RFC 7231.
 http_compression.h Transparent response compression (Accept-Encoding → zstd/gzip).
 http_conditional.h Conditional requests — a weak ETag from the body + If-None-Match → 304.
+http_range.h       Range requests — parse a single byte range (bytes=N-M / N- / -M).
 http_dispatcher.h  Dispatcher — a bounded worker pool (Kronuz/queue) for off-reactor work.
 http_watchdog.h    StallWatchdog — flags the loop if it stops ticking (offload observability).
 http_connection.h  The connection: http_parser parsing + HTTP/1.1 framing + the one
@@ -155,9 +156,23 @@ entirely. Last-Modified/If-Modified-Since is intentionally absent: it needs an
 app-supplied mtime the library can't know. A handler that sets its own `ETag` is
 left alone.
 
-Compression and conditional are configured together via one `ResponseOptions`
-(held by `HttpService`, a `const ResponseOptions*` reaches the connection — the same
-plumbing the Dispatcher uses). Range requests will slot into the same struct.
+## Range requests (a generic knob)
+
+`HttpService::enable_ranges()` (`http_range.h`) lets a buffered GET 200 advertise
+`Accept-Ranges: bytes` and serve a single byte `Range` as `206 Partial Content`
+(`Content-Range`), or `416` when unsatisfiable — what media players and resumable
+downloads use to seek. Forms handled: `bytes=N-M`, `bytes=N-`, `bytes=-N`. A
+multi-range (`multipart/byteranges`) or any other unit is left unrecognized and the
+full 200 is served — always correct, just not partial. It runs after conditional and
+before compression; a 206 is served **uncompressed** (range + content-coding is a tar
+pit, and ranges are for already-compressed media).
+
+The transforms run in order at `end()`: **conditional → range → compression**, so a
+304 short-circuits everything and a 206 skips compression. All four are configured
+through one `ResponseOptions` (held by `HttpService`, a `const ResponseOptions*`
+reaches the connection — the same plumbing the Dispatcher uses), enabled by
+`enable_compression()` / `enable_conditional()` / `enable_ranges()`. The parsers
+(`if_none_match`, `parse_byte_range`) have direct unit coverage in `test/test.cc`.
 
 ## Roadmap (Leg 2 productionization)
 

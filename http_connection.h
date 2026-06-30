@@ -83,6 +83,7 @@
 #include "http_dispatcher.h"
 #include "http_handler.h"
 #include "http_message.h"
+#include "http_range.h"
 
 namespace http {
 
@@ -93,6 +94,7 @@ struct ResponseOptions {
 	bool compress = false;             // negotiate Accept-Encoding -> compress the body
 	CompressionOptions compression{};  // ...with these tunables
 	bool conditional = false;          // derive an ETag + answer 304 on If-None-Match
+	bool ranges = false;               // serve a byte Range as 206 Partial Content
 };
 
 class HttpConnection : public BaseClient<HttpConnection> {
@@ -157,7 +159,8 @@ class HttpConnection : public BaseClient<HttpConnection> {
 			if (!headers_sent_) {                // buffered: the length is known
 				if (has_pending_) {
 					maybe_conditional();             // sets ETag; may flip to a bodyless 304
-					if (status_ != 304) { maybe_compress(); }
+					if (status_ != 304) { maybe_range(); }   // may flip to 206 (a slice) or 416
+					maybe_compress();                // self-skips 204/206/304 and tiny bodies
 				}
 				send_headers(false, has_pending_ ? pending_.size() : 0);
 				if (has_pending_) { conn_->emit(std::move(pending_)); }
@@ -213,7 +216,7 @@ class HttpConnection : public BaseClient<HttpConnection> {
 			const CompressionOptions& opt = conn_->response_->compression;
 			if (pending_.size() < opt.min_size) { return; }              // too small to bother
 			if (has_header("Content-Encoding")) { return; }              // handler already encoded
-			if (status_ == 204 || status_ == 304 || (status_ >= 100 && status_ < 200)) { return; }  // bodyless
+			if (status_ == 204 || status_ == 304 || status_ == 206 || (status_ >= 100 && status_ < 200)) { return; }  // bodyless / a partial slice
 			std::string_view coding = negotiate_encoding(conn_->request_.header("Accept-Encoding"));
 			if (coding.empty()) { return; }                              // client accepts nothing we offer
 			std::string compressed = encode(coding, pending_, opt.zstd_level);
@@ -241,6 +244,33 @@ class HttpConnection : public BaseClient<HttpConnection> {
 				has_pending_ = false;
 			}
 			headers_.emplace_back("ETag", std::move(etag));
+		}
+
+		// Range request: serve a single byte range of the buffered body as 206 Partial
+		// Content (Content-Range), or 416 if it can't be satisfied. Advertises
+		// Accept-Ranges: bytes. Runs after conditional, before compression; a 206 is
+		// served uncompressed (range + content-coding is a tar pit, and ranges are for
+		// media, which is already compressed). Buffered GET 200s only; a multi-range or
+		// unrecognized header is left as the full 200.
+		void maybe_range() {
+			if (conn_->response_ == nullptr || !conn_->response_->ranges) { return; }
+			if (status_ != 200 || conn_->request_.method != "GET") { return; }
+			if (!has_header("Accept-Ranges")) { headers_.emplace_back("Accept-Ranges", "bytes"); }
+			std::string_view spec = conn_->request_.header("Range");
+			if (spec.empty()) { return; }
+			const std::size_t total = pending_.size();
+			ByteRange r = parse_byte_range(spec, total);
+			if (!r.recognized) { return; }                              // multi/other: serve the full 200
+			if (!r.satisfiable) {
+				status_ = 416;                                          // Range Not Satisfiable
+				pending_.clear();
+				has_pending_ = false;
+				headers_.emplace_back("Content-Range", "bytes */" + std::to_string(total));
+				return;
+			}
+			headers_.emplace_back("Content-Range", "bytes " + std::to_string(r.start) + "-" + std::to_string(r.end) + "/" + std::to_string(total));
+			pending_ = pending_.substr(r.start, r.end - r.start + 1);
+			status_ = 206;
 		}
 
 		void send_chunk(std::string_view chunk) {
