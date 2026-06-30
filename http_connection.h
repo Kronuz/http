@@ -353,9 +353,10 @@ private:
 	}
 
 	// ---- the request is complete: route it to the handler -----------------
-	// Inline (no Dispatcher) or offloaded to a worker (the un-stallable model).
+	// Inline (no Dispatcher, or a route the handler classifies cheap) or offloaded
+	// to a worker (the un-stallable model).
 	void on_request_complete() {
-		if (dispatcher_ == nullptr) {
+		if (dispatcher_ == nullptr || !handler_.should_offload(request_)) {
 			dispatch();   // run on the reactor (the cheap fast path)
 			return;
 		}

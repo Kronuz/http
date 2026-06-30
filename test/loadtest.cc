@@ -136,6 +136,15 @@ public:
 };
 
 
+// Same routes, but classifies /fast as cheap (run inline on the reactor) and /slow
+// as heavy (offload). Demonstrates the per-route fast path: a cheap route is served
+// even while every worker is busy on heavy ones.
+class ClassifiedHandler : public LoadHandler {
+public:
+	bool should_offload(const http::Request& req) const override { return req.path != "/fast"; }
+};
+
+
 // ---- server fixture: create + listen + run on one thread, torn down cleanly ---
 static uint16_t find_free_port() {
 	int fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -255,6 +264,29 @@ int main() {
 		CHECK(n200 >= 1, "requests within capacity are still served (200)");
 		CHECK(n200 + n503 == 16, "every request gets a definite answer (200 or 503)");
 		CHECK(n200 <= 8, "accepted count is bounded by the pool + queue, not unbounded");
+	}
+
+	// ---- D. Per-route classification: a cheap route keeps the inline fast path -
+	// 2 workers, both saturated by heavy /slow requests. /fast is classified cheap
+	// (should_offload=false) -> it runs inline on the reactor and is served at once,
+	// instead of queueing behind the busy workers (which is what a heavy route does).
+	{
+		ClassifiedHandler classified;
+		uint16_t port = find_free_port();
+		ServerFixture fx([&classified] { return http::HttpService::create(classified, /*workers=*/2, /*queue_limit=*/64); }, port);
+
+		std::vector<Result> slow;
+		std::thread slow_t([&] { slow = fire(port, "/slow", 2); });   // occupy both workers
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+		auto fast = fire(port, "/fast", 20);
+		slow_t.join();
+
+		double cheap_max = max_latency(fast);
+		std::printf("  [D] classification: 20 cheap /fast under saturated workers -> %d/20 got 200, max %.1f ms\n",
+		            count_status(fast, 200), cheap_max);
+		CHECK(count_status(fast, 200) == 20, "cheap route served even with every worker busy");
+		CHECK(cheap_max < SLOW_MS / 2.0, "cheap route runs inline (does not queue behind the busy pool)");
 	}
 
 	std::printf("\n%s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);

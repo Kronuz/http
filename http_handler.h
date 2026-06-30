@@ -120,6 +120,15 @@ public:
 	// Called once when the headers are complete, before any body byte, so the
 	// decision can use the method, path, and headers (e.g. Content-Type).
 	virtual std::unique_ptr<BodySink> on_request_body(Request& /*request*/) { return nullptr; }
+
+	// Per-request offload policy (only consulted when a Dispatcher is configured).
+	// Return true (default) to run this request on a worker thread -- correct for
+	// heavy or potentially-blocking handlers (e.g. a search). Return false to run it
+	// inline on the reactor: the cheap fast path, which skips the worker handoff for
+	// trivial endpoints (a health check, a cached/metrics GET) so they are served
+	// even while every worker is busy. A handler classified cheap MUST be cheap and
+	// non-blocking -- it runs on the reactor and a slow one would stall the loop.
+	virtual bool should_offload(const Request& /*request*/) const { return true; }
 };
 
 }  // namespace http
