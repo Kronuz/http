@@ -41,22 +41,45 @@
 
 namespace http {
 
+// How the listening socket is bound. A world-class server exposes these as first
+// class knobs rather than hard-coding them: `reuse_port` (SO_REUSEPORT) is what lets
+// several reactors share one port for scaling and graceful restart, `tcp_nodelay`
+// (disable Nagle) trims latency on small responses, and `defer_accept` (Linux
+// TCP_DEFER_ACCEPT) wakes the acceptor only once data has arrived.
+struct BindOptions {
+	bool reuse_port = false;    // SO_REUSEPORT: several reactors may bind the same port
+	bool tcp_nodelay = true;    // TCP_NODELAY: disable Nagle for lower small-response latency
+	bool defer_accept = false;  // TCP_DEFER_ACCEPT (Linux): accept only when data is ready
+	int tries = 1;              // bind retries before giving up
+
+	int to_flags() const {
+		int flags = 0;
+		if (reuse_port) { flags |= TCP_SO_REUSEPORT; }
+		if (tcp_nodelay) { flags |= TCP_TCP_NODELAY; }
+		if (defer_accept) { flags |= TCP_TCP_DEFER_ACCEPT; }
+		return flags;
+	}
+};
+
+
 class HttpServer : public MetaBaseServer<HttpServer> {
 	friend Worker;
 
 	HttpHandler& handler_;
 	Dispatcher* dispatcher_;   // this reactor's worker pool; null => handlers run inline
 	const ResponseOptions* response_;   // response transforms (compress / conditional); null => none
+	int tries_;
 
 public:
-	HttpServer(const std::shared_ptr<Worker>& parent, ev::loop_ref* loop, unsigned int flags, HttpHandler& handler, Dispatcher* dispatcher = nullptr, const ResponseOptions* response = nullptr)
-		: MetaBaseServer<HttpServer>(parent, loop, flags, "http", 0),
+	HttpServer(const std::shared_ptr<Worker>& parent, ev::loop_ref* loop, unsigned int flags, HttpHandler& handler, Dispatcher* dispatcher = nullptr, const ResponseOptions* response = nullptr, const BindOptions& bind_options = {})
+		: MetaBaseServer<HttpServer>(parent, loop, flags, "http", bind_options.to_flags()),
 		  handler_(handler),
 		  dispatcher_(dispatcher),
-		  response_(response) {}
+		  response_(response),
+		  tries_(bind_options.tries) {}
 
 	void listen(unsigned int port) {
-		bind(nullptr, port, 1);
+		bind(nullptr, port, tries_);
 	}
 
 	void start_impl() override {
@@ -94,6 +117,7 @@ class HttpService : public Worker {
 	std::unique_ptr<Dispatcher> dispatcher_;   // null => handlers run inline on the reactor
 	std::unique_ptr<StallWatchdog> watchdog_;  // null => no stall monitoring
 	ResponseOptions response_;                 // response transforms; off until enable_*()
+	BindOptions bind_options_;                 // how the listening socket is bound
 	std::shared_ptr<HttpServer> server_;
 
 public:
@@ -155,8 +179,16 @@ public:
 		response_.ranges = true;
 	}
 
+	// Set how the listening socket is bound (SO_REUSEPORT for multi-reactor scaling,
+	// TCP_NODELAY, TCP_DEFER_ACCEPT, bind retries). Call before listen(). To run
+	// several reactors on one port -- one HttpService per thread, each with its own
+	// loop + pool (shared-nothing) -- give every one bind_options.reuse_port = true.
+	void set_bind_options(const BindOptions& options) {
+		bind_options_ = options;
+	}
+
 	void listen(unsigned int port) {
-		server_ = Worker::make_shared<HttpServer>(share_this<HttpService>(), ev_loop, ev_flags, handler_, dispatcher_.get(), &response_);
+		server_ = Worker::make_shared<HttpServer>(share_this<HttpService>(), ev_loop, ev_flags, handler_, dispatcher_.get(), &response_, bind_options_);
 		server_->listen(port);
 		server_->start();
 		if (watchdog_) { watchdog_->start(); }   // on the loop thread, before the loop runs

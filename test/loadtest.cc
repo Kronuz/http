@@ -520,6 +520,29 @@ int main() {
 		CHECK(multi.status == 200 && multi.body == big, "unhandled multi-range -> full 200");
 	}
 
+	// ---- J. SO_REUSEPORT: several reactors share one port ----------------------
+	// Two independent HttpServices (each its own loop + pool, shared-nothing) bind the
+	// SAME port with reuse_port=true. Without SO_REUSEPORT the second bind would fail
+	// with EADDRINUSE; with it both listen and the kernel spreads connections across
+	// them. This is the scaling primitive num_http_servers-style deployments rely on.
+	{
+		uint16_t port = find_free_port();
+		auto reuseport_factory = [&handler] {
+			auto svc = http::HttpService::create(handler, /*workers=*/4, /*queue_limit=*/64);
+			http::BindOptions bind;
+			bind.reuse_port = true;
+			svc->set_bind_options(bind);
+			return svc;
+		};
+		ServerFixture fx1(reuseport_factory, port);   // both bind the same port -- only
+		ServerFixture fx2(reuseport_factory, port);   // possible because reuse_port is set
+
+		auto res = fire(port, "/fast", 40);
+		int n200 = count_status(res, 200);
+		std::printf("  [J] reuse_port: 2 reactors on one port -> %d/40 served 200\n", n200);
+		CHECK(n200 == 40, "every request is served with two reactors sharing the port (SO_REUSEPORT)");
+	}
+
 	std::printf("\n%s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
 	return g_failures == 0 ? 0 : 1;
 }
