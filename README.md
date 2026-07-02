@@ -68,8 +68,9 @@ application code:
   chunk-by-chunk as it is parsed, never accumulated, so a multi-gigabyte `RESTORE`
   or bulk load runs in O(read-buffer) memory. Otherwise the body is buffered into
   `Request::body` (the convenient path for small requests).
-- **Runtime (Asio).** The handler never sees the reactor. The transport is N Asio
-  `io_context`s on N threads (thread-per-core, shared-nothing), all bound to one
+- **Runtime (Asio).** The handler never sees the reactor. The transport rides on
+  [Kronuz/reactor](https://github.com/Kronuz/reactor), a generic Asio server runtime:
+  N Asio `io_context`s on N threads (thread-per-core, shared-nothing), all bound to one
   port via `SO_REUSEPORT` where available, with a portable single-acceptor fallback
   elsewhere (macOS/BSD). Swapping the runtime never reaches the HTTP layer or the app.
 
@@ -88,7 +89,7 @@ hardcoded `prepare()` method-switch becomes once search is an `HttpHandler`.
 | `http_conditional.h` | Conditional requests — a weak ETag from the body + `If-None-Match` → `304 Not Modified`. |
 | `http_range.h` | Range requests — a single byte range → `206 Partial Content` (`Content-Range`), `416` if unsatisfiable. |
 | `http_request_parser.h` | `RequestParser` — the transport-agnostic http-parser wrapper: received bytes → `Request` values, with buffered-or-streamed body intake. |
-| `http_asio.h` | The Asio transport: the connection as a C++20 coroutine (parse → handler seam → frame), the buffered `ResponseWriter` with compression, bounded offload, keep-alive, and `HttpAsioService` (N `io_context`s on N threads, one port). |
+| `http_asio.h` | The Asio transport: the connection as a C++20 coroutine (parse → handler seam → frame) run as a `reactor::Session`, the buffered `ResponseWriter` with compression, keep-alive, the streaming `ChannelBodyReader`, and `HttpAsioService` (a thin adapter over `reactor::TcpServer`). |
 
 ## Dependencies
 
@@ -96,6 +97,7 @@ All via FetchContent, so the build is self-contained and version-pinned (no
 system/brew install):
 
 - [standalone Asio](https://github.com/chriskohlhoff/asio) (`asio-1-36-0`) — the reactor + TCP + C++20-coroutine runtime. Header-only, `ASIO_STANDALONE` (no Boost).
+- [`Kronuz/reactor`](https://github.com/Kronuz/reactor) — the generic Asio server runtime (shared-nothing reactor pool + accept + graceful shutdown) `http_asio.h` rides on. Header-only.
 - [`Kronuz/http-parser`](https://github.com/Kronuz/http-parser) — the HTTP parser (accepts custom methods).
 - [`Kronuz/radix-router`](https://github.com/Kronuz/radix-router) — the radix-tree path router behind `Router`.
 - [`Kronuz/compressors`](https://github.com/Kronuz/compressors) — the deflate/gzip + zstd codecs behind response compression.

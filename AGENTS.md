@@ -24,9 +24,13 @@ http_conditional.h    Conditional requests — a weak ETag from the body + If-No
 http_range.h          Range requests — parse a single byte range (bytes=N-M / N- / -M).
 http_request_parser.h RequestParser — transport-agnostic http-parser wrapper: bytes → Request,
                       with buffered-or-streamed body intake (the headers-complete hook).
-http_asio.h           The Asio transport: the connection as a C++20 coroutine, the buffered
-                      ResponseWriter with compression, bounded offload, keep-alive, and
-                      HttpAsioService (N io_contexts on N threads, one port).
+http_asio.h           The Asio transport: the connection as a C++20 coroutine (the
+                      reactor::Session), the buffered ResponseWriter with compression,
+                      keep-alive, the streaming ChannelBodyReader (a reactor::Abortable),
+                      and HttpAsioService (a thin adapter over reactor::TcpServer).
+reactor (dep)         The generic Asio server runtime (Kronuz/reactor): the shared-nothing
+                      reactor pool, accept/bind strategies, offload gate, and graceful
+                      shutdown. Extracted from http_asio.h so other services share it.
 examples/kv_store.cc  A complete REST app: buffered routes, a streamed response route, a
                       streamed request-body route (POST /bulk).
 examples/bench_asio.cc Raw-Asio throughput ceiling (no framework) — the reference bench_http
@@ -72,12 +76,13 @@ transition (`reading_value_`).
 
 ## The un-stallable model (Asio coroutine)
 
-One connection is one coroutine (`serve_connection` in `http_asio.h`). When the
-service is created with a worker count, each `AsioReactor` owns an Asio `thread_pool`
-and a bounded offload window. A request that opts in (`should_offload`) is run with:
+One connection is one coroutine (`detail::serve_connection` in `http_asio.h`, run as a
+`reactor::Session`). When the service is created with a worker count, each
+`reactor::Reactor` owns an Asio `thread_pool` and a bounded offload window. A request
+that opts in (`should_offload`) is run with:
 
 ```cpp
-co_await asio::co_spawn(reactor->pool->get_executor(),
+co_await asio::co_spawn(reactor->pool()->get_executor(),
     [&]() -> asio::awaitable<void> { handler->handle(request, writer); co_return; },
     asio::use_awaitable);
 ```
@@ -90,8 +95,8 @@ break these when touching `serve_connection`:
   `Request` and `ResponseWriter`; it does not read the next request until this one's
   response is written. So there is no pause/resume bookkeeping and no cross-thread
   handoff of the connection state — the race class a callback FSM hides cannot arise.
-- **Bounded offload → 503.** `OffloadGate::try_enter()` fails when the window is full;
-  answer 503 inline rather than grow an unbounded backlog.
+- **Bounded offload → 503.** `reactor::OffloadGate::try_enter()` (via `reactor->gate()`)
+  fails when the window is full; answer 503 inline rather than grow an unbounded backlog.
 - **Offloaded handlers run concurrently across connections, so the `HttpHandler` must
   be thread-safe** when a worker count is set. With `workers = 0`, `handle()` runs
   inline on the reactor — the single-threaded fast path.
@@ -105,11 +110,12 @@ load vs ~450 ms inline (same load).
 
 ## Multi-reactor binding (portable)
 
-`HttpAsioService` runs N `io_context`s on N threads (shared-nothing). Binding N
-reactors to one port:
+`HttpAsioService` runs on a `reactor::TcpServer`: N `io_context`s on N threads
+(shared-nothing). Binding N reactors to one port (handled by the runtime):
 
 - **`reuse_port` true (Linux):** each reactor binds its own acceptor; the kernel
-  load-balances. `AsioBindOptions{reuse_port=true}`.
+  load-balances. `AsioBindOptions{reuse_port=true}` (`AsioBindOptions` is an alias for
+  `reactor::BindOptions`).
 - **`reuse_port` false / macOS/BSD:** a second same-port bind is rejected, so one
   acceptor on reactor 0 distributes accepted connections round-robin (accepting each
   new socket directly onto its target reactor's `io_context`). Chosen automatically
@@ -138,9 +144,10 @@ Chosen at headers-complete:
   feeds, then co_awaits the done signal. feed never throws (a socket/parse error
   `abort()`s the reader so `read()` returns false). `read()` is sticky at end (an
   over-read never blocks). The consumer waking on a condvar -- not the io_context --
-  is what lets shutdown work: `HttpAsioService::stop()` calls `AsioReactor::abort_readers()`
-  (a per-reactor registry of in-flight readers) so a handler blocked mid-stream unwedges
-  before the pool join, even after `io.stop()`. An empty chunk is the end-of-body marker;
+  is what lets shutdown work: `ChannelBodyReader` is a `reactor::Abortable` registered
+  via `reactor->track()`, and `reactor::TcpServer::stop()` aborts every tracked
+  abortable before `io.stop()`, so a handler blocked mid-stream unwedges before the pool
+  join, even after the loops stop. An empty chunk is the end-of-body marker;
   a streaming handler MUST drain the reader.
   `asio_test [K]` (2 MB through a slow consumer: no loss under back-pressure + a fast
   request served mid-stream + an over-read returns false + a tiny body arriving with the

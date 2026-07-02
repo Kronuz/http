@@ -20,21 +20,28 @@ loop, or a thread — so it is testable in isolation and portable to any runtime
                    http_range        byte range -> 206 / 416
                    http_request_parser  bytes -> Request (buffered or streamed body)
        ---------------------------------------------------------------
-  transport        http_asio      Asio io_context + C++20 coroutine connection,
-                                  offload thread_pool, N reactors on one port
+  transport        http_asio      Asio C++20 coroutine connection (the reactor::Session)
+                                  + the buffered ResponseWriter (compression / conditional
+                                  / range), riding on the Kronuz/reactor runtime below
+  runtime          reactor        N shared-nothing reactors on N threads, one port,
+                                  per-reactor offload pool, graceful shutdown (extracted)
 ```
 
-The only file that knows Asio is `http_asio.h`. The only file that knows the parser
-is `http_request_parser.h`. Everything else is plain C++ over the `Request` /
-`ResponseWriter` values.
+The only file that knows Asio is `http_asio.h` (and the generic `reactor` runtime it
+rides on). The only file that knows the parser is `http_request_parser.h`. Everything
+else is plain C++ over the `Request` / `ResponseWriter` values.
 
 ## Runtime: shared-nothing reactors
 
-`HttpAsioService` runs **N `io_context`s on N threads** — thread-per-core, no shared
-state between them, no global lock, no cross-core bounce. Each reactor also owns an
-optional Asio `thread_pool` for offload and a bounded offload window.
+The runtime is [Kronuz/reactor](https://github.com/Kronuz/reactor), a generic Asio
+server runtime extracted from this file: `HttpAsioService` is now a thin adapter that
+turns the `HttpHandler` + response options into a per-connection `reactor::Session`
+(`detail::serve_connection`) and hands it to a `reactor::TcpServer`. The server runs
+**N `io_context`s on N threads** — thread-per-core, no shared state between them, no
+global lock, no cross-core bounce. Each `reactor::Reactor` also owns an optional Asio
+`thread_pool` for offload and a bounded offload window (`OffloadGate`).
 
-Binding N reactors to one port has two modes, chosen automatically:
+Binding N reactors to one port has two modes, chosen automatically by the runtime:
 
 - **`SO_REUSEPORT` (Linux):** each reactor binds its own acceptor and the kernel
   load-balances incoming connections across them. The fast path.
@@ -42,6 +49,9 @@ Binding N reactors to one port has two modes, chosen automatically:
   rejected there, so one acceptor on reactor 0 binds the port and hands each accepted
   connection to a reactor round-robin (accepting the socket directly onto the target
   reactor's `io_context`). Only the cheap accept funnels; read/handler/write shard.
+
+See the reactor repo's `ARCHITECTURE.md` for the runtime internals; below is the HTTP
+request lifecycle that runs on top of it.
 
 ## The request lifecycle
 

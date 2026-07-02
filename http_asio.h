@@ -20,38 +20,36 @@
  * THE SOFTWARE.
  */
 
-// The Asio runtime + connection for Kronuz/http -- the transport layer, rewritten on
-// standalone Asio (io_context + C++20 coroutines + thread_pool) in place of the libev
-// Worker/BaseClient substrate. Everything above it is unchanged: the HttpHandler seam,
-// the radix router, http_message, http-parser (via RequestParser), the codings.
+// The Asio connection + HTTP service for Kronuz/http -- the transport layer. The generic
+// server runtime (the shared-nothing reactor pool, the accept/bind strategies, the
+// offload gate, and the graceful abort->stop->join shutdown) lives in Kronuz/reactor;
+// this file is what makes that runtime speak HTTP. Everything above it is unchanged: the
+// HttpHandler seam, the radix router, http_message, http-parser (via RequestParser), the
+// codings.
 //
-// The un-stallable model is native here: a connection is a coroutine, and offloading a
-// blocking handler is a single `co_await co_spawn(pool, ...)` -- the work runs on a
-// pool thread while the coroutine suspends, the reactor is free, and resumption lands
-// back on the connection's own io_context. No pause/resume/pending-input bookkeeping,
-// and no cross-thread completion handoff to get wrong: the coroutine is the single
-// owner of its request/response, so the ordering is structural.
+// The un-stallable model is native here: a connection is a coroutine (the reactor::Session
+// detail::serve_connection), and offloading a blocking handler is a single
+// `co_await co_spawn(reactor.pool(), ...)` -- the work runs on a pool thread while the
+// coroutine suspends, the reactor is free, and resumption lands back on the connection's
+// own io_context. No pause/resume/pending-input bookkeeping, and no cross-thread
+// completion handoff to get wrong: the coroutine is the single owner of its
+// request/response, so the ordering is structural.
 //
-// Scaling is the shared-nothing / thread-per-core model: N io_contexts on N threads,
-// each with an acceptor bound to one port via SO_REUSEPORT, plus a bounded thread_pool
-// for offload. Response compression is applied on the buffered response (the same
-// http_compression helpers as before). Conditional/range transforms slot in the same
-// way and are TODO in this scaffold. Request-body intake is dual-mode (the app chooses
-// per endpoint via on_request_body): buffered for small bodies, or TRUE INCREMENTAL
-// streaming to a sink for large/unbounded ones -- a multi-gigabyte RESTORE/bulk load
-// flows through in O(read-buffer) memory, never held whole.
+// Scaling is the runtime's shared-nothing / thread-per-core model: N io_contexts on N
+// threads, one port (SO_REUSEPORT or a portable shared acceptor), plus a bounded
+// thread_pool per reactor for offload. HttpAsioService is a thin adapter over
+// reactor::TcpServer. Response compression / conditional / range transforms are applied
+// on the buffered response (the http_* helpers). Request-body intake is dual-mode (the
+// app chooses per endpoint via wants_body_stream / on_request_body): buffered for small
+// bodies, or TRUE INCREMENTAL streaming for large/unbounded ones -- a multi-gigabyte
+// RESTORE/bulk load flows through in O(read-buffer) memory, never held whole, with the
+// ChannelBodyReader registered as a reactor::Abortable so shutdown can unwedge it.
 
 #pragma once
 
 #include <asio.hpp>
-#include <asio/experimental/awaitable_operators.hpp>
 #include <asio/experimental/concurrent_channel.hpp>
 
-#include <netinet/in.h>
-#include <sys/socket.h>
-
-#include <algorithm>
-#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <deque>
@@ -59,7 +57,6 @@
 #include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -69,20 +66,15 @@
 #include "http_message.h"
 #include "http_range.h"
 #include "http_request_parser.h"
+#include "reactor.h"
 
 namespace http {
 
-// SO_REUSEPORT as an Asio socket option (Asio ships reuse_address, not reuse_port).
-using asio_reuse_port = asio::detail::socket_option::boolean<SOL_SOCKET, SO_REUSEPORT>;
-
-// How the acceptor is bound. Mirrors the libev BindOptions so the API is stable across
-// the swap; reuse_port is what lets the N reactors share one port.
-struct AsioBindOptions {
-	std::string address;  // empty => all interfaces (0.0.0.0)
-	bool reuse_port = false;
-	bool tcp_nodelay = true;
-	int backlog = 1024;
-};
+// The reactor pool, accept plumbing, offload gate, and graceful shutdown live in the
+// generic Kronuz/reactor runtime now; http rides on it. The bind options are the
+// runtime's -- alias kept so existing callers (Xapiand, the tests, the bench) are
+// unchanged. reuse_port is what lets the N reactors share one port.
+using AsioBindOptions = reactor::BindOptions;
 
 // Response transforms applied on the buffered response before it goes on the wire, in
 // order: conditional (weak ETag / If-None-Match -> 304), then range (a byte Range ->
@@ -213,48 +205,6 @@ private:
 	}
 };
 
-// Offload admission for a reactor: a bounded window so a saturated pool sheds as 503
-// instead of growing an unbounded backlog (the libev Dispatcher's queue_limit).
-struct OffloadGate {
-	std::atomic<int> inflight{0};
-	int limit;
-	explicit OffloadGate(int limit_) : limit(limit_) {}
-	bool try_enter() {
-		if (inflight.fetch_add(1, std::memory_order_relaxed) >= limit) {
-			inflight.fetch_sub(1, std::memory_order_relaxed);
-			return false;
-		}
-		return true;
-	}
-	void leave() { inflight.fetch_sub(1, std::memory_order_relaxed); }
-};
-
-// One reactor: an io_context (the loop, one thread) + its own bounded worker pool
-// (shared-nothing) + the offload gate. A pool of size 0 means "always inline".
-struct AsioReactor {
-	asio::io_context io{1};
-	std::unique_ptr<asio::thread_pool> pool;   // null => inline
-	OffloadGate gate;
-	std::mutex readers_mtx;
-	std::vector<std::weak_ptr<BodyReader>> readers;   // in-flight streaming readers
-	AsioReactor(std::size_t workers, int queue_limit)
-		: pool(workers != 0 ? std::make_unique<asio::thread_pool>(workers) : nullptr),
-		  gate(queue_limit) {}
-
-	// Track a streaming reader so shutdown can unblock it; prunes expired entries.
-	void track_reader(const std::shared_ptr<BodyReader>& r) {
-		std::lock_guard<std::mutex> lk(readers_mtx);
-		readers.erase(std::remove_if(readers.begin(), readers.end(),
-			[](const std::weak_ptr<BodyReader>& w) { return w.expired(); }), readers.end());
-		readers.push_back(r);
-	}
-	// Abort every in-flight reader so a handler blocked mid-stream unwedges at shutdown.
-	void abort_readers() {
-		std::lock_guard<std::mutex> lk(readers_mtx);
-		for (auto& w : readers) { if (auto r = w.lock()) { r->abort(); } }
-	}
-};
-
 namespace detail {
 
 // The Asio-backed BodyReader: a bounded queue of raw body chunks bridging the reactor
@@ -264,7 +214,11 @@ namespace detail {
 // non-blocking: when the queue is full it yields via a short timer and retries, so a
 // slow consumer applies back-pressure (the socket read pauses) without ever blocking the
 // reactor thread. An empty chunk from finish() is the end-of-body marker.
-class ChannelBodyReader : public BodyReader {
+//
+// It is a reactor::Abortable as well as a BodyReader: the reactor tracks it via
+// Reactor::track() so TcpServer shutdown aborts it (the single abort() below satisfies
+// both interfaces) before io.stop(), waking a consumer even after the loop has stopped.
+class ChannelBodyReader : public BodyReader, public reactor::Abortable {
 public:
 	ChannelBodyReader(asio::any_io_executor ex, std::size_t capacity)
 		: ex_(std::move(ex)), cap_(capacity != 0 ? capacity : 1) {}
@@ -337,7 +291,7 @@ private:
 // wants_body_stream runs CONCURRENTLY: the handler on the pool pulls body chunks from a
 // flow-controlled BodyReader that the reactor feeds -- O(buffer) memory for any size.
 inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, HttpHandler* handler,
-                                              AsioReactor* reactor, const AsioResponseOptions* options) {
+                                              reactor::Reactor* reactor, const AsioResponseOptions* options) {
 	using asio::use_awaitable;
 	try {
 		asio::error_code opt_ec;
@@ -350,7 +304,7 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 		parser.set_headers_callback([handler, reactor](Request& req) -> RequestParser::BodyIntake {
 			req.extension = handler->create_extension(req);
 			RequestParser::BodyIntake intake;
-			if (reactor->pool != nullptr && handler->wants_body_stream(req)) {
+			if (reactor->pool() != nullptr && handler->wants_body_stream(req)) {
 				intake.stream = true;
 			} else {
 				intake.sink = handler->on_request_body(req);
@@ -379,9 +333,9 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 				bool keep_alive = request.keep_alive;
 				auto reader = std::make_shared<ChannelBodyReader>(ex, /*capacity=*/8);
 				request.body_reader = reader;
-				reactor->track_reader(reader);   // so shutdown can unblock a mid-stream read()
+				reactor->track(reader);   // so shutdown can unblock a mid-stream read()
 				AsioResponseWriter writer(request, options);
-				asio::any_io_executor hexec(reactor->pool->get_executor());
+				asio::any_io_executor hexec(reactor->pool()->get_executor());
 
 				// Feed the body (reactor, flow-controlled) and run the handler (pool)
 				// concurrently, then join. feed never throws -- a socket/parse error
@@ -459,26 +413,26 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 			AsioResponseWriter writer(request, options);
 			bool offloaded_503 = false;
 			try {
-				if (reactor->pool && handler->should_offload(request)) {
-					if (!reactor->gate.try_enter()) {
+				if (reactor->pool() && handler->should_offload(request)) {
+					if (!reactor->gate().try_enter()) {
 						writer.status(503);
 						writer.write("Service Unavailable\n");
 						writer.end();
 						offloaded_503 = true;
 					} else {
 						// THE UN-STALLABLE OFFLOAD: run handle() on the pool, resume here.
-						co_await asio::co_spawn(reactor->pool->get_executor(),
+						co_await asio::co_spawn(reactor->pool()->get_executor(),
 							[handler, &request, &writer]() -> asio::awaitable<void> {
 								handler->handle(request, writer);
 								co_return;
 							}, use_awaitable);
-						reactor->gate.leave();
+						reactor->gate().leave();
 					}
 				} else {
 					handler->handle(request, writer);   // inline on the reactor
 				}
 			} catch (...) {
-				if (reactor->pool && !offloaded_503) { reactor->gate.leave(); }
+				if (reactor->pool() && !offloaded_503) { reactor->gate().leave(); }
 				if (!writer.ended()) { handler->on_error(std::current_exception(), request, writer); }
 				if (!writer.ended()) {
 					writer.status(500);
@@ -498,76 +452,32 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 	socket.shutdown(asio::ip::tcp::socket::shutdown_send, ec);
 }
 
-inline asio::awaitable<void> accept_loop(AsioReactor* reactor, HttpHandler* handler,
-                                         const AsioResponseOptions* options,
-                                         unsigned short port, AsioBindOptions bind) {
-	using asio::ip::tcp;
-	auto ex = co_await asio::this_coro::executor;
-	tcp::acceptor acceptor(ex);
-	tcp::endpoint ep = bind.address.empty()
-		? tcp::endpoint(tcp::v4(), port)
-		: tcp::endpoint(asio::ip::make_address(bind.address), port);
-	acceptor.open(ep.protocol());
-	acceptor.set_option(tcp::acceptor::reuse_address(true));
-	if (bind.reuse_port) { acceptor.set_option(asio_reuse_port(true)); }
-	acceptor.bind(ep);
-	acceptor.listen(bind.backlog);
-	for (;;) {
-		tcp::socket socket = co_await acceptor.async_accept(asio::use_awaitable);
-		asio::co_spawn(ex, serve_connection(std::move(socket), handler, reactor, options), asio::detached);
-	}
-}
-
-// The no-SO_REUSEPORT path: a single acceptor (on reactor 0's loop) that binds the
-// port once and distributes accepted connections round-robin across all reactors. Each
-// new connection is accepted directly onto its target reactor's io_context, so only the
-// (cheap) accept runs here; the read/handler/write all run sharded on the chosen
-// reactor. This is the portable model -- macOS/BSD reject a second same-port bind
-// without SO_REUSEPORT, so N independent acceptors are a Linux-only optimization.
-inline asio::awaitable<void> shared_accept_loop(std::vector<AsioReactor*> reactors, HttpHandler* handler,
-                                                const AsioResponseOptions* options,
-                                                unsigned short port, AsioBindOptions bind) {
-	using asio::ip::tcp;
-	auto ex = co_await asio::this_coro::executor;
-	tcp::acceptor acceptor(ex);
-	tcp::endpoint ep = bind.address.empty()
-		? tcp::endpoint(tcp::v4(), port)
-		: tcp::endpoint(asio::ip::make_address(bind.address), port);
-	acceptor.open(ep.protocol());
-	acceptor.set_option(tcp::acceptor::reuse_address(true));
-	acceptor.bind(ep);
-	acceptor.listen(bind.backlog);
-	std::size_t next = 0;
-	for (;;) {
-		AsioReactor* r = reactors[next];
-		next = (next + 1 == reactors.size()) ? 0 : next + 1;
-		tcp::socket socket = co_await acceptor.async_accept(r->io, asio::use_awaitable);
-		asio::co_spawn(r->io, serve_connection(std::move(socket), handler, r, options), asio::detached);
-	}
-}
-
 }  // namespace detail
 
-// The HTTP service: N reactors (io_context + pool each) on N threads, bound to one
-// port -- via SO_REUSEPORT where available, else a shared acceptor that fans
-// connections out round-robin. Drives the application's HttpHandler.
+// The HTTP service: an application HttpHandler served over a reactor::TcpServer. The
+// server owns the runtime (N shared-nothing reactors on N threads, one port via
+// SO_REUSEPORT or a portable shared acceptor, per-reactor offload pool, graceful
+// shutdown); this class is the thin HTTP-shaped adapter -- it turns the handler + the
+// response options into the per-connection Session (detail::serve_connection) and
+// exposes the same surface callers had before the runtime was extracted.
 class HttpAsioService {
 public:
 	// `reactors` runtimes; each with `workers` offload threads (0 => inline) and an
 	// offload admission window of `queue_limit`.
 	HttpAsioService(HttpHandler& handler, std::size_t reactors, std::size_t workers, std::size_t queue_limit)
-		: handler_(handler), n_reactors_(reactors != 0 ? reactors : 1) {
-		for (std::size_t i = 0; i < n_reactors_; ++i) {
-			reactors_.push_back(std::make_unique<AsioReactor>(workers, static_cast<int>(queue_limit)));
-		}
-	}
-
-	~HttpAsioService() { stop(); }
+		: handler_(handler),
+		  server_(reactors, workers, static_cast<int>(queue_limit),
+		          [this](asio::ip::tcp::socket socket, reactor::Reactor& r) -> asio::awaitable<void> {
+			          // Not a coroutine itself: it returns serve_connection's awaitable,
+			          // so there is no closure-lifetime pitfall (the Session captures only
+			          // this, a stable pointer; the coroutine frame owns the socket).
+			          return detail::serve_connection(std::move(socket), &handler_, &r, &response_);
+		          }) {}
 
 	HttpAsioService(const HttpAsioService&) = delete;
 	HttpAsioService& operator=(const HttpAsioService&) = delete;
 
-	void set_bind_options(const AsioBindOptions& options) { bind_ = options; }
+	void set_bind_options(const AsioBindOptions& options) { server_.set_bind_options(options); }
 	void enable_compression(CompressionOptions options = {}) {
 		response_.compress = true;
 		response_.compression = std::move(options);
@@ -581,55 +491,21 @@ public:
 
 	// Bind + run all reactors (each on its own thread). Returns once the threads are
 	// launched; the caller keeps its thread and stops with stop().
-	void start(unsigned short port) {
-		// With SO_REUSEPORT (Linux) each reactor binds its own acceptor and the kernel
-		// load-balances; a single reactor needs no sharing. Otherwise (macOS/BSD, N>1)
-		// a second same-port bind is rejected, so one shared acceptor on reactor 0
-		// distributes connections round-robin across the reactors.
-		bool shared = !bind_.reuse_port && reactors_.size() > 1;
-		if (!shared) {
-			for (auto& r : reactors_) {
-				AsioReactor* rp = r.get();
-				unsigned short p = port;
-				threads_.emplace_back([this, rp, p] {
-					asio::co_spawn(rp->io, detail::accept_loop(rp, &handler_, &response_, p, bind_), asio::detached);
-					rp->io.run();
-				});
-			}
-			return;
-		}
-		std::vector<AsioReactor*> raw;
-		raw.reserve(reactors_.size());
-		for (auto& r : reactors_) { raw.push_back(r.get()); }
-		// Idle reactors (all but the acceptor's) have no pending work yet; a work guard
-		// keeps run() blocked until stop() instead of returning immediately.
-		for (auto& r : reactors_) { guards_.emplace_back(asio::make_work_guard(r->io)); }
-		for (auto& r : reactors_) {
-			AsioReactor* rp = r.get();
-			threads_.emplace_back([rp] { rp->io.run(); });
-		}
-		asio::co_spawn(raw[0]->io, detail::shared_accept_loop(raw, &handler_, &response_, port, bind_), asio::detached);
-	}
+	void start(unsigned short port) { server_.start(port); }
 
-	void stop() {
-		for (auto& r : reactors_) { r->abort_readers(); }   // unblock any mid-stream consumers
-		guards_.clear();
-		for (auto& r : reactors_) { r->io.stop(); }
-		for (auto& t : threads_) { if (t.joinable()) { t.join(); } }
-		threads_.clear();
-		for (auto& r : reactors_) { if (r->pool) { r->pool->stop(); r->pool->join(); } }
-	}
+	// Abort in-flight streams, stop the loops, join. Also runs from the destructor
+	// (server_'s own dtor), so a service going out of scope tears down cleanly.
+	void stop() { server_.stop(); }
 
-	std::size_t reactors() const { return n_reactors_; }
+	std::size_t reactors() const { return server_.reactors(); }
 
 private:
+	// Declared before server_: the Session captures &handler_/&response_, and member
+	// destruction is reverse-declaration, so server_ (its threads joined in ~TcpServer)
+	// is torn down before the handler and options it referenced.
 	HttpHandler& handler_;
-	std::size_t n_reactors_;
-	AsioBindOptions bind_{};
 	AsioResponseOptions response_{};
-	std::vector<std::unique_ptr<AsioReactor>> reactors_;
-	std::vector<std::thread> threads_;
-	std::vector<asio::executor_work_guard<asio::io_context::executor_type>> guards_;
+	reactor::TcpServer server_;
 };
 
 }  // namespace http

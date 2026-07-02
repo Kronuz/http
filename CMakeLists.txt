@@ -58,9 +58,25 @@ if(ASIO_INCLUDE_DIR STREQUAL "")
 	set(ASIO_INCLUDE_DIR "${asio_SOURCE_DIR}/asio/include")
 endif()
 
+# --- reactor: the generic Asio server runtime (shared reactor pool + accept + shutdown) ---
+# The reactor pool, the two accept/bind strategies, the offload gate, the abortable
+# registry, and the abort->stop->join shutdown were extracted from http_asio.h into
+# Kronuz/reactor so other Kronuz network services share one runtime. Header-only; rides
+# on the same standalone Asio (so no second Asio fetch -- just its include dir). Set
+# REACTOR_INCLUDE_DIR to use a local checkout instead of fetching (dev iteration).
+set(REACTOR_INCLUDE_DIR "" CACHE PATH "use an existing Kronuz/reactor dir instead of fetching")
+if(REACTOR_INCLUDE_DIR STREQUAL "")
+	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG main)
+	FetchContent_GetProperties(reactor)
+	if(NOT reactor_POPULATED)
+		FetchContent_Populate(reactor)
+	endif()
+	set(REACTOR_INCLUDE_DIR "${reactor_SOURCE_DIR}")
+endif()
+
 # --- the http framework (header-only) ---
 add_library(http INTERFACE)
-target_include_directories(http INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}" "${ASIO_INCLUDE_DIR}")
+target_include_directories(http INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}" "${ASIO_INCLUDE_DIR}" "${REACTOR_INCLUDE_DIR}")
 target_compile_features(http INTERFACE cxx_std_20)
 target_compile_definitions(http INTERFACE ASIO_STANDALONE)
 target_link_libraries(http INTERFACE http_parser::http_parser radix_router::radix_router compressors::compressors Threads::Threads)
