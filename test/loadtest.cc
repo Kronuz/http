@@ -185,6 +185,13 @@ static std::string gunzip(std::string_view s) {
 	return out;
 }
 
+static std::string raw_inflate(std::string_view s) {
+	std::string out;
+	DeflateDecompressData d(s.data(), s.size(), /*gzip=*/false);
+	for (auto it = d.begin(); it; ++it) { out.append(*it); }
+	return out;
+}
+
 
 // ---- the application: a fast route and a deliberately-slow route --------------
 static constexpr int SLOW_MS = 500;
@@ -541,6 +548,40 @@ int main() {
 		int n200 = count_status(res, 200);
 		std::printf("  [J] reuse_port: 2 reactors on one port -> %d/40 served 200\n", n200);
 		CHECK(n200 == 40, "every request is served with two reactors sharing the port (SO_REUSEPORT)");
+	}
+
+	// ---- K. Custom content-coding: an app registers "deflate" ------------------
+	// The library ships zstd/gzip; an app adds a coding it doesn't (raw "deflate")
+	// via CompressionOptions::add_coding, and the transport -- not the app -- then
+	// negotiates and applies it. App codings are preferred over the built-ins, so a
+	// client accepting "deflate, gzip" gets deflate.
+	{
+		const std::string& big = LoadHandler::big_body();
+		uint16_t port = find_free_port();
+		ServerFixture fx([&handler] {
+			auto svc = http::HttpService::create(handler, /*workers=*/4, /*queue_limit=*/64);
+			http::CompressionOptions opt;
+			opt.add_coding("deflate", [](std::string_view body) {
+				std::string out;
+				DeflateCompressData c(body.data(), body.size(), /*gzip=*/false);
+				for (auto it = c.begin(); it; ++it) { out.append(*it); }
+				return out;
+			});
+			svc->enable_compression(opt);
+			return svc;
+		}, port);
+
+		Resp df = do_request(port, "/big", "deflate");
+		std::printf("  [K] custom coding: /big %zuB -> deflate %zuB, app coding preferred over gzip\n",
+		            big.size(), df.body.size());
+		CHECK(df.status == 200 && df.header("Content-Encoding") == "deflate", "the app-registered deflate coding is negotiated");
+		CHECK(df.body.size() < big.size() && raw_inflate(df.body) == big, "deflate body is smaller and round-trips");
+
+		Resp both = do_request(port, "/big", "deflate, gzip");
+		CHECK(both.header("Content-Encoding") == "deflate", "an app coding is preferred over a built-in on a tie");
+
+		Resp gz = do_request(port, "/big", "gzip");
+		CHECK(gz.header("Content-Encoding") == "gzip" && gunzip(gz.body) == big, "the built-in gzip still works alongside the app coding");
 	}
 
 	std::printf("\n%s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);

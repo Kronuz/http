@@ -217,12 +217,12 @@ class HttpConnection : public BaseClient<HttpConnection> {
 			if (pending_.size() < opt.min_size) { return; }              // too small to bother
 			if (has_header("Content-Encoding")) { return; }              // handler already encoded
 			if (status_ == 204 || status_ == 304 || status_ == 206 || (status_ >= 100 && status_ < 200)) { return; }  // bodyless / a partial slice
-			std::string_view coding = negotiate_encoding(conn_->request_.header("Accept-Encoding"));
+			std::string coding = negotiate_encoding(conn_->request_.header("Accept-Encoding"), opt);
 			if (coding.empty()) { return; }                              // client accepts nothing we offer
-			std::string compressed = encode(coding, pending_, opt.zstd_level);
+			std::string compressed = encode(coding, pending_, opt);
 			if (compressed.empty() || compressed.size() >= pending_.size()) { return; }   // didn't help
 			pending_ = std::move(compressed);
-			headers_.emplace_back("Content-Encoding", std::string(coding));
+			headers_.emplace_back("Content-Encoding", std::move(coding));
 			if (!has_header("Vary")) { headers_.emplace_back("Vary", "Accept-Encoding"); }
 		}
 
