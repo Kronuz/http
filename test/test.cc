@@ -145,6 +145,27 @@ int main() {
 		http::Accept enc("gzip, deflate;q=0.5");     // token-only (Accept-Encoding shape)
 		CHECK(enc.best({"deflate", "gzip"}) == "gzip");
 		CHECK(enc.quality("br") == 0.0);
+
+		// media-range parameters are retained (a custom rendering hint like indent), and
+		// negotiate_match() hands back the matched client item so the app can read them.
+		http::Accept p("application/json; indent=4; charset=utf-8, application/x-msgpack;q=0.9");
+		auto m = p.negotiate_match(produce);
+		CHECK(m.media == "application/json" && m.item != nullptr);   // json (q=1) beats msgpack (q=0.9)
+		CHECK(m.item->param("indent") == "4");
+		CHECK(m.item->param("charset") == "utf-8");
+		CHECK(m.item->param("missing").empty());
+		CHECK(p.match("application/json")->param("indent") == "4");
+		CHECK(http::Accept("image/png").negotiate_match(produce).item == nullptr);   // 406: no match
+
+		// the AcceptCache parses once and returns a shared, immutable Accept
+		http::AcceptCache cache(2);
+		auto a1 = cache.get("application/json;indent=2");
+		auto a2 = cache.get("application/json;indent=2");
+		CHECK(a1.get() == a2.get());                                 // same header -> same cached parse
+		CHECK(a1->negotiate_match(produce).item->param("indent") == "2");
+		auto b1 = cache.get("text/html");
+		CHECK(cache.get("application/x-msgpack").get() != nullptr);  // third entry evicts LRU, still works
+		CHECK(b1->best(produce) == "text/html");
 	}
 
 	// --- conditional requests (weak ETag + If-None-Match) ---
