@@ -251,16 +251,21 @@ public:
 
 	ChannelBodyReader(const asio::any_io_executor& ex, std::size_t capacity) : ch_(ex, capacity) {}
 
-	// consumer (handler worker): blocking pull; false at end-of-body or on abort.
+	// consumer (handler worker): blocking pull; false at end-of-body or on abort. Once
+	// the end is reached it stays false forever (never blocks on an over-read), so a
+	// consumer that calls read() again after the last object -- e.g. a parser that flushes
+	// a trailing object then loops -- won't deadlock waiting on the drained channel.
 	bool read(std::string& chunk) override {
+		if (ended_) { return false; }
 		std::future<std::string> fut = ch_.async_receive(asio::use_future);
 		try {
 			std::string v = fut.get();
-			if (v.empty()) { return false; }   // end-of-body marker
+			if (v.empty()) { ended_ = true; return false; }   // end-of-body marker
 			chunk = std::move(v);
 			return true;
 		} catch (const std::exception&) {
-			return false;                       // channel closed (abort)
+			ended_ = true;                                     // channel closed (abort)
+			return false;
 		}
 	}
 
@@ -281,6 +286,7 @@ public:
 private:
 	channel_type ch_;
 	std::atomic<bool> aborted_{false};
+	bool ended_ = false;   // consumer-thread only: sticky end-of-body / closed
 };
 
 // Serve one connection: keep-alive loop of parse -> handler seam -> write. A normal
@@ -291,7 +297,6 @@ private:
 inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, HttpHandler* handler,
                                               AsioReactor* reactor, const AsioResponseOptions* options) {
 	using asio::use_awaitable;
-	using namespace asio::experimental::awaitable_operators;
 	try {
 		asio::error_code opt_ec;
 		socket.set_option(asio::ip::tcp::no_delay(true), opt_ec);
@@ -340,7 +345,13 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 				// aborts the reader so the handler's read() returns false and unblocks.
 				auto feed = [&]() -> asio::awaitable<void> {
 					asio::error_code fec;
-					while (!parser.complete()) {
+					for (;;) {
+						// Drain whatever body has been parsed so far -- including bytes that
+						// arrived in the same read as the headers (a small body completes
+						// during phase 1, so this must run before the complete() check).
+						std::string chunk = parser.take_pending_body();
+						if (!chunk.empty()) { co_await reader->push(std::move(chunk)); }
+						if (parser.complete()) { break; }
 						if (buffered.empty()) {
 							std::size_t n = co_await socket.async_read_some(asio::buffer(tmp),
 								asio::redirect_error(use_awaitable, fec));
@@ -350,17 +361,28 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 						std::size_t used = parser.feed(buffered.data(), buffered.size());
 						buffered.erase(0, used);
 						if (parser.errored()) { reader->abort(); co_return; }
-						std::string chunk = parser.take_pending_body();
-						if (!chunk.empty()) { co_await reader->push(std::move(chunk)); }
 					}
 					co_await reader->finish();   // end-of-body marker
 				};
-				auto run = [&]() -> asio::awaitable<void> {
-					try { handler->handle(request, writer); }
-					catch (...) { if (!writer.ended()) { handler->on_error(std::current_exception(), request, writer); } }
-					co_return;
-				};
-				co_await (feed() && asio::co_spawn(hexec, run(), use_awaitable));
+				// Run the handler on the POOL (a blocking read() pull), and feed the body
+				// on the reactor -- concurrently. The handler is spawned with an explicit
+				// pool executor + a completion handler that signals a done-channel; the
+				// reactor then feeds and co_awaits done. (co_spawn's executor argument
+				// guarantees the handler runs on the pool -- the awaitable_operators && did
+				// not, which ran the blocking handler on the reactor and deadlocked it.)
+				// feed never throws -- a socket/parse error aborts the reader so the
+				// handler's read() returns false and unblocks.
+				auto done = std::make_shared<asio::experimental::concurrent_channel<void(asio::error_code)>>(ex, 1);
+				asio::co_spawn(hexec,
+					[handler, &request, &writer]() -> asio::awaitable<void> {
+						try { handler->handle(request, writer); }
+						catch (...) { if (!writer.ended()) { handler->on_error(std::current_exception(), request, writer); } }
+						co_return;
+					},
+					[done](std::exception_ptr) { (void)done->try_send(asio::error_code{}); });
+
+				co_await feed();                                        // reactor: push the body
+				co_await done->async_receive(use_awaitable);            // wait for the handler (reactor free)
 
 				if (!writer.ended()) {
 					writer.status(500);

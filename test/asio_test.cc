@@ -103,8 +103,13 @@ struct ConcurrentStreamApp : http::HttpHandler {
 				for (unsigned char c : chunk) { sum += c; }
 				std::this_thread::sleep_for(std::chrono::milliseconds(2));   // slow consumer
 			}
+			// Over-read past the end: must return false immediately, never block (a parser
+			// that flushes a trailing item then loops does exactly this).
+			std::string extra;
+			bool over = req.body_reader->read(extra);
 			bool empty_body = req.body.empty();
-			resp.send(200, std::to_string(total) + " " + std::to_string(sum) + (empty_body ? " empty\n" : " buffered\n"));
+			resp.send(200, std::to_string(total) + " " + std::to_string(sum) +
+				(empty_body ? " empty" : " buffered") + (over ? " overread\n" : " end\n"));
 			return;
 		}
 		resp.send(404, "nope\n");
@@ -461,7 +466,19 @@ int main() {
 		check(restore.body.find(std::to_string(N)) != std::string::npos, "all bytes delivered (no loss under back-pressure)");
 		check(restore.body.find(std::to_string(expect_sum)) != std::string::npos, "checksum matches (data intact + ordered)");
 		check(restore.body.find("empty") != std::string::npos, "body streamed, request.body never buffered");
+		check(restore.body.find("end") != std::string::npos, "over-reading past the end returns false (never blocks)");
 		check(fast.status == 200 && fast_ms < 250.0, "reactor stays free: a fast request is served while a slow stream is back-pressured");
+
+		// A tiny body arrives in the SAME read as the headers (completes during header
+		// parsing) -- the stream must still deliver it, not drop it as already-complete.
+		std::string tiny = "hello world";
+		std::uint64_t tiny_sum = 0;
+		for (unsigned char c : tiny) { tiny_sum += c; }
+		auto sm = do_post(port, "/restore", tiny);
+		std::printf("  [K] tiny streamed body -> %d %s", sm.status, sm.body.c_str());
+		check(sm.status == 200 && sm.body.find(std::to_string(tiny.size())) != std::string::npos
+			&& sm.body.find(std::to_string(tiny_sum)) != std::string::npos,
+			"a body arriving with the headers is streamed, not dropped");
 	}
 
 	std::printf("\n%s (%d failures)\n", g_fail == 0 ? "PASS" : "FAIL", g_fail);
