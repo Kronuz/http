@@ -12,6 +12,7 @@
  */
 
 #include <atomic>
+#include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -19,10 +20,11 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 
 #include "http_handler.h"
 #include "http_router.h"
-#include "http_server.h"
+#include "http_asio.h"
 
 // A streaming request-body intake: counts NDJSON lines as the body arrives,
 // without ever holding the whole body in memory. The per-request count rides in
@@ -115,25 +117,30 @@ public:
 };
 
 
-static std::weak_ptr<http::HttpService> g_service;
-static void on_signal(int) { if (auto s = g_service.lock()) { s->stop(); } }
+static std::atomic<bool> g_stop{false};
+static void on_signal(int) { g_stop.store(true); }
 
 int main(int argc, char** argv) {
 	unsigned int port = (argc > 1) ? static_cast<unsigned int>(std::atoi(argv[1])) : 8080;
 
 	KvApp app;
-	auto service = http::HttpService::create(app);
-	g_service = service;
+	// The Asio transport: N shared-nothing reactors (thread-per-core), each with a
+	// small offload pool for the un-stallable path and a bounded offload window. The
+	// default bind (no SO_REUSEPORT) uses the portable shared-acceptor, so this runs
+	// the same on Linux and macOS.
+	std::size_t reactors = std::max(1u, std::thread::hardware_concurrency());
+	http::HttpAsioService service(app, reactors, /*workers=*/2, /*queue_limit=*/256);
 
 	std::signal(SIGINT, on_signal);
 	std::signal(SIGTERM, on_signal);
 
-	service->listen(port);
-	std::printf("kv_store: REST key/value server on http://127.0.0.1:%u/kv/ (Ctrl-C to stop)\n", port);
+	service.start(static_cast<unsigned short>(port));
+	std::printf("kv_store: REST key/value server on http://127.0.0.1:%u/kv/ (%zu reactors, Ctrl-C to stop)\n", port, reactors);
 	std::fflush(stdout);
 
-	service->run();
+	while (!g_stop.load()) { std::this_thread::sleep_for(std::chrono::milliseconds(100)); }
 
+	service.stop();
 	std::printf("kv_store: stopped.\n");
 	return 0;
 }

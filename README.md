@@ -1,6 +1,7 @@
 # http
 
-A generic HTTP/1.1 application layer on top of [Kronuz/server](https://github.com/Kronuz/server).
+A generic, extensible HTTP/1.1 application framework on
+[standalone Asio](https://think-async.com/Asio/) (C++20 coroutines).
 
 This is **Leg 2** of inverting Xapiand: it draws the seam where the application
 sits *above* the server. An application implements one interface —
@@ -11,10 +12,10 @@ struct HttpHandler {
 };
 ```
 
-— and the engine does everything else: a generic `HttpConnection` parses bytes
+— and the framework does everything else: an Asio coroutine connection parses bytes
 with **http-parser**, builds a `Request`, hands it to the handler, and frames the
-written response back over a `Kronuz/server` connection. The search engine becomes
-one `HttpHandler`; the demo is another.
+written response back over the socket. The search engine becomes one `HttpHandler`;
+the demo is another.
 
 The handler writes through a `ResponseWriter`, which serves both shapes with one
 interface and hides the HTTP/1.1 framing:
@@ -38,35 +39,39 @@ curl       localhost:8080/stream/5           # -> five lines (chunked)
 `examples/kv_store.cc` is a complete REST app in a `Router` of closures. It never
 names http-parser, a socket, or the event loop.
 
-## Why the seam has this shape (forward-compatibility)
+## Why the seam has this shape
 
 The handler takes a `Request` and writes a response — it is never a callback into
-the connection, and it never sees the parser, the socket, or the loop. That keeps
-three eventual migrations contained behind the seam, so none of them touch
+the connection, and it never sees the parser, the socket, or the loop. That value
+semantic keeps the moving parts contained behind the seam, so none of them touch
 application code:
 
-- **Parser (http-parser today).** Parsing lives only inside `HttpConnection` and
-  just *produces* a `Request`. The parser is the Joyent `http_parser` fork
+- **Parser (http-parser).** Parsing lives only inside the connection and just
+  *produces* a `Request`. The parser is the Joyent `http_parser` fork
   ([Kronuz/http-parser](https://github.com/Kronuz/http-parser)), chosen because it
   accepts arbitrary request methods — Xapiand's REST API uses custom verbs
   (`COUNT`, `INFO`, `DUMP`, `RESTORE`, …) that a stricter parser like llhttp
   rejects. Swapping it for another parser is contained here; the handler and the
   `Request`/`ResponseWriter` are parser-agnostic.
-- **Concurrency (inline or offloaded; coroutine-ready).** Completion is signalled
-  by `ResponseWriter::end()`, not by `handle()` returning. So a handler is free to
-  finish the response *later*. That is exactly what the **un-stallable model** uses:
-  give `HttpService` a worker count and it runs `handle()` on a per-reactor worker
-  pool (one in-flight per connection), so a slow or blocking handler never stalls
-  the loop — the worker drives the same writer and hands completion back to the
-  reactor via an `ev::async`; a full bounded queue answers 503. With no pool,
-  `handle()` runs inline on the reactor (the cheap fast path). The coroutine upgrade
-  is the same seam from the other direction: `handle()` becomes a `task<>` and the
-  *one* call site becomes `co_await handler.handle(...)`. None changes a handler's
-  logic, because the writer is the same. (See AGENTS.md for the offload invariants;
-  offloaded handlers must be thread-safe.)
-- **Reactor (libev, via Kronuz/server today).** The handler never sees the
-  reactor; an Asio port of `Kronuz/server` keeps `BaseClient`'s `on_read`/`write`
-  surface and so never reaches the HTTP layer or the app.
+- **Concurrency (inline or offloaded).** Completion is signalled by
+  `ResponseWriter::end()`, not by `handle()` returning, so a handler may finish the
+  response *later*. That is the **un-stallable model**: give the service a worker
+  count and each request that opts in (`should_offload`) runs `handle()` on the
+  reactor's Asio `thread_pool` while the reactor stays free — a single
+  `co_await co_spawn(pool, …)`, one in-flight per connection, resuming back on the
+  connection's `io_context`. A full bounded window answers 503. With no pool,
+  `handle()` runs inline on the reactor (the cheap fast path). Because completion is
+  the writer's `end()`, there is no pause/resume bookkeeping and no cross-thread
+  handoff — the coroutine owns the connection, so that race class cannot arise.
+- **Request body (buffered or streamed).** A handler opts into streaming per
+  endpoint (`on_request_body` returns a `BodySink`): the body then flows to the sink
+  chunk-by-chunk as it is parsed, never accumulated, so a multi-gigabyte `RESTORE`
+  or bulk load runs in O(read-buffer) memory. Otherwise the body is buffered into
+  `Request::body` (the convenient path for small requests).
+- **Runtime (Asio).** The handler never sees the reactor. The transport is N Asio
+  `io_context`s on N threads (thread-per-core, shared-nothing), all bound to one
+  port via `SO_REUSEPORT` where available, with a portable single-acceptor fallback
+  elsewhere (macOS/BSD). Swapping the runtime never reaches the HTTP layer or the app.
 
 The routing table (`Router`) is application configuration — what Xapiand's
 hardcoded `prepare()` method-switch becomes once search is an `HttpHandler`.
@@ -76,23 +81,24 @@ hardcoded `prepare()` method-switch becomes once search is an `HttpHandler`.
 | File | Role |
 |---|---|
 | `http_message.h` | `Request` and the `Response` value (for buffered handlers), plus `reason_phrase`. |
-| `http_handler.h` | `HttpHandler` (the seam) + `ResponseWriter` (buffered `send` / streamed `write`+`end`). |
+| `http_handler.h` | `HttpHandler` (the seam) + `ResponseWriter` (buffered `send` / streamed `write`+`end`) + `BodySink` (streamed request-body intake). |
 | `http_router.h` | `Router` — method/path dispatch, a thin binding over `Kronuz/radix-router`. |
 | `http_accept.h` | `Accept` — content negotiation (Accept / Accept-Encoding / …) per RFC 7231. |
 | `http_compression.h` | Transparent response compression — negotiate `Accept-Encoding` → zstd/gzip (Kronuz/compressors). |
 | `http_conditional.h` | Conditional requests — a weak ETag from the body + `If-None-Match` → `304 Not Modified`. |
 | `http_range.h` | Range requests — a single byte range → `206 Partial Content` (`Content-Range`), `416` if unsatisfiable. |
-| `http_dispatcher.h` | `Dispatcher` — a bounded worker pool (Kronuz/queue) for off-reactor handler work; `submit()` false = the 503 backpressure signal. |
-| `http_watchdog.h` | `StallWatchdog` — a monitor thread that flags the reactor loop if it stops ticking (offload observability). |
-| `http_connection.h` | The generic connection: http-parser parsing, HTTP/1.1 framing (Content-Length / chunked), and the single handler call site (inline or offloaded), over `BaseClient`. |
-| `http_server.h` | `HttpServer` (accept loop) + `HttpService` (the worker-tree root; owns the per-reactor `Dispatcher` + the optional `StallWatchdog`). |
+| `http_request_parser.h` | `RequestParser` — the transport-agnostic http-parser wrapper: received bytes → `Request` values, with buffered-or-streamed body intake. |
+| `http_asio.h` | The Asio transport: the connection as a C++20 coroutine (parse → handler seam → frame), the buffered `ResponseWriter` with compression, bounded offload, keep-alive, and `HttpAsioService` (N `io_context`s on N threads, one port). |
 
 ## Dependencies
 
 All via FetchContent, so the build is self-contained and version-pinned (no
 system/brew install):
 
-- [`Kronuz/server`](https://github.com/Kronuz/server) — reactor + TCP + connection FSM.
+- [standalone Asio](https://github.com/chriskohlhoff/asio) (`asio-1-36-0`) — the reactor + TCP + C++20-coroutine runtime. Header-only, `ASIO_STANDALONE` (no Boost).
 - [`Kronuz/http-parser`](https://github.com/Kronuz/http-parser) — the HTTP parser (accepts custom methods).
 - [`Kronuz/radix-router`](https://github.com/Kronuz/radix-router) — the radix-tree path router behind `Router`.
-- [`Kronuz/queue`](https://github.com/Kronuz/queue) — the bounded MPMC queue behind `Dispatcher` (via `Kronuz/server`).
+- [`Kronuz/compressors`](https://github.com/Kronuz/compressors) — the deflate/gzip + zstd codecs behind response compression.
+
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for how the pieces fit and the request
+lifecycle; [`AGENTS.md`](AGENTS.md) for the working notes and invariants.

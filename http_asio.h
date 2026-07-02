@@ -36,8 +36,10 @@
 // each with an acceptor bound to one port via SO_REUSEPORT, plus a bounded thread_pool
 // for offload. Response compression is applied on the buffered response (the same
 // http_compression helpers as before). Conditional/range transforms slot in the same
-// way and are TODO in this scaffold. Buffered request bodies only for now (the
-// streaming BodySink intake is a follow-up).
+// way and are TODO in this scaffold. Request-body intake is dual-mode (the app chooses
+// per endpoint via on_request_body): buffered for small bodies, or TRUE INCREMENTAL
+// streaming to a sink for large/unbounded ones -- a multi-gigabyte RESTORE/bulk load
+// flows through in O(read-buffer) memory, never held whole.
 
 #pragma once
 
@@ -191,8 +193,17 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 		asio::error_code opt_ec;
 		socket.set_option(asio::ip::tcp::no_delay(true), opt_ec);
 		RequestParser parser;
+		// The headers-complete hook: build the app's per-request extension, then let the
+		// app choose stream-vs-buffer. Returning a sink streams the body straight through
+		// (bounded memory, for a RESTORE/bulk load); nullptr buffers it into Request::body
+		// (small bodies). Runs on the reactor as the body is parsed -- exactly the old
+		// libev connection's model, now on Asio.
+		parser.set_headers_callback([handler](Request& req) -> std::unique_ptr<BodySink> {
+			req.extension = handler->create_extension(req);
+			return handler->on_request_body(req);
+		});
 		std::string buffered;
-		char tmp[8192];
+		char tmp[64 * 1024];
 
 		for (;;) {
 			while (!parser.complete()) {
@@ -208,7 +219,8 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 			Request request = parser.take();
 			parser.resume();
 			bool keep_alive = request.keep_alive;
-			request.extension = handler->create_extension(request);
+			// The extension and the body (streamed to the app's sink, or buffered into
+			// request.body) were already handled at headers-complete by the parser hook.
 
 			AsioResponseWriter writer(request, options);
 			bool offloaded_503 = false;
@@ -302,9 +314,9 @@ inline asio::awaitable<void> shared_accept_loop(std::vector<AsioReactor*> reacto
 
 }  // namespace detail
 
-// The HTTP service: N reactors (io_context + pool each) on N threads, all bound to one
-// port with SO_REUSEPORT. Drives the application's HttpHandler. The libev HttpService's
-// API, on Asio.
+// The HTTP service: N reactors (io_context + pool each) on N threads, bound to one
+// port -- via SO_REUSEPORT where available, else a shared acceptor that fans
+// connections out round-robin. Drives the application's HttpHandler.
 class HttpAsioService {
 public:
 	// `reactors` runtimes; each with `workers` offload threads (0 => inline) and an

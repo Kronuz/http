@@ -1,13 +1,14 @@
-# http: a generic HTTP/1.1 application layer on top of Kronuz/server.
+# http: a generic, extensible HTTP/1.1 application framework on standalone Asio.
 #
 #   cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
 #   ./build/kv_store 8080      # a REST app served through the HttpHandler seam
 #
-# Leg 2 of the "invert Xapiand" work: the application seam (HttpHandler: Request
-# -> Response) sits above a generic HttpConnection that parses with http-parser
-# and rides Kronuz/server's BaseClient. Search becomes one HttpHandler; the parser
-# (http-parser), the transport (Kronuz/server's reactor), and the handler's
-# concurrency model are all swappable behind that seam.
+# An application implements one interface -- HttpHandler (Request in, response
+# written out) -- and the framework does the rest: an Asio C++20-coroutine
+# connection parses with http-parser, routes on a radix tree, negotiates content
+# and encodings, streams or buffers the body, runs the handler (inline or offloaded
+# so a slow handler never stalls the loop), and frames the response. The search
+# engine becomes one HttpHandler; the demo is another.
 
 cmake_minimum_required(VERSION 3.16)
 project(http LANGUAGES C CXX)
@@ -20,9 +21,7 @@ if(NOT CMAKE_BUILD_TYPE)
 	set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# --- the generic server engine (reactor + TCP + connection FSM) ---
-FetchContent_Declare(server GIT_REPOSITORY https://github.com/Kronuz/server.git GIT_TAG main)
-FetchContent_MakeAvailable(server)
+find_package(Threads REQUIRED)
 
 # --- the radix-tree path router (transport-agnostic) ---
 FetchContent_Declare(radix_router GIT_REPOSITORY https://github.com/Kronuz/radix-router.git GIT_TAG main)
@@ -32,51 +31,68 @@ FetchContent_MakeAvailable(radix_router)
 # The Joyent http_parser fork, chosen over stricter parsers (e.g. llhttp) because
 # it accepts arbitrary request methods: Xapiand's REST API uses custom verbs
 # (COUNT, INFO, DUMP, RESTORE, ...) that a method-validating parser rejects. The
-# seam stays parser-agnostic, so this is contained inside HttpConnection.
+# seam stays parser-agnostic, so this is contained inside the connection.
 FetchContent_Declare(http_parser GIT_REPOSITORY https://github.com/Kronuz/http-parser.git GIT_TAG main)
 FetchContent_MakeAvailable(http_parser)
 
-# --- the http layer (header-only) ---
+# --- compressors (the deflate/gzip + zstd codecs) ---
+# Response compression (http_compression.h) negotiates Accept-Encoding and applies a
+# coding. The codecs are Kronuz/compressors (has compiled units + lz4/zstd/zlib
+# wiring). Previously reached transitively via Kronuz/server; now a direct dependency.
+FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG main)
+FetchContent_MakeAvailable(compressors)
+
+# --- standalone Asio (the runtime + transport substrate) ---
+# The reactor + TCP + C++20-coroutine transport (http_asio.h) rides on standalone
+# Asio. Fetched rather than taken from a system/brew prefix (dependency policy);
+# header-only, so ASIO_STANDALONE + the include path is all it needs -- the
+# coroutine support comes from -std=c++20. Set ASIO_INCLUDE_DIR to reuse an
+# existing checkout instead of fetching.
+set(ASIO_INCLUDE_DIR "" CACHE PATH "use an existing standalone Asio include dir instead of fetching")
+if(ASIO_INCLUDE_DIR STREQUAL "")
+	FetchContent_Declare(asio GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git GIT_TAG asio-1-36-0)
+	FetchContent_GetProperties(asio)
+	if(NOT asio_POPULATED)
+		FetchContent_Populate(asio)
+	endif()
+	set(ASIO_INCLUDE_DIR "${asio_SOURCE_DIR}/asio/include")
+endif()
+
+# --- the http framework (header-only) ---
 add_library(http INTERFACE)
-target_include_directories(http INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_include_directories(http INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}" "${ASIO_INCLUDE_DIR}")
 target_compile_features(http INTERFACE cxx_std_20)
-target_link_libraries(http INTERFACE server::server http_parser::http_parser radix_router::radix_router)
+target_compile_definitions(http INTERFACE ASIO_STANDALONE)
+target_link_libraries(http INTERFACE http_parser::http_parser radix_router::radix_router compressors::compressors Threads::Threads)
 add_library(http::http ALIAS http)
 
-# --- demo + tests (built only when this repo is top-level) ---
+# --- demo + benchmarks + tests (built only when this repo is top-level) ---
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	add_executable(kv_store examples/kv_store.cc)
 	target_link_libraries(kv_store PRIVATE http)
 
-	# A throughput benchmark for the Dispatcher's queue (single-queue vs sharded),
-	# to decide whether the per-reactor pool needs per-worker run queues.
-	add_executable(dispatcher_bench examples/dispatcher_bench.cc)
-	target_link_libraries(dispatcher_bench PRIVATE http)
+	# Raw-Asio throughput ceiling (no framework): the reference the framework is
+	# measured against. SO_REUSEPORT multi-reactor; run on Linux for real numbers.
+	add_executable(bench_asio examples/bench_asio.cc)
+	target_link_libraries(bench_asio PRIVATE http)
 
+	# Framework throughput: the same fixed response served through HttpAsioService +
+	# a trivial HttpHandler -- how close the framework gets to the raw ceiling.
 	add_executable(bench_http examples/bench_http.cc)
 	target_link_libraries(bench_http PRIVATE http)
 
 	enable_testing()
+
+	# Transport-agnostic unit tests: method dispatch, 404 vs 405, param capture.
 	add_executable(http_test test/test.cc)
 	target_link_libraries(http_test PRIVATE http)
 	add_test(NAME http COMMAND http_test)
 
-	# Drives a real server over TCP to prove the un-stallable model (a slow handler
-	# must not stall the loop) + 503 backpressure. Slower (~2s); still a ctest.
-	add_executable(http_loadtest test/loadtest.cc)
-	target_link_libraries(http_loadtest PRIVATE http)
-	add_test(NAME loadtest COMMAND http_loadtest)
-	set_tests_properties(loadtest PROPERTIES TIMEOUT 60)
-
-	# The Asio-based transport (http_asio.h) validation. Uses standalone Asio (found
-	# via the ASIO_INCLUDE_DIR hint, default the Homebrew prefix).
-	set(ASIO_INCLUDE_DIR "/opt/homebrew/include" CACHE PATH "standalone Asio include dir")
-	if(EXISTS "${ASIO_INCLUDE_DIR}/asio.hpp")
-		add_executable(asio_test test/asio_test.cc)
-		target_link_libraries(asio_test PRIVATE http)
-		target_include_directories(asio_test PRIVATE "${ASIO_INCLUDE_DIR}")
-		target_compile_definitions(asio_test PRIVATE ASIO_STANDALONE)
-		add_test(NAME asio COMMAND asio_test)
-		set_tests_properties(asio PROPERTIES TIMEOUT 60)
-	endif()
+	# The Asio transport (http_asio.h) end-to-end over real TCP: the un-stallable
+	# model, 503 backpressure, N reactors (both bind modes), keep-alive, compression,
+	# streaming request-body intake, and error mapping.
+	add_executable(asio_test test/asio_test.cc)
+	target_link_libraries(asio_test PRIVATE http)
+	add_test(NAME asio COMMAND asio_test)
+	set_tests_properties(asio PROPERTIES TIMEOUT 60)
 endif()

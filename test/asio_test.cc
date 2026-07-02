@@ -8,8 +8,10 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -52,6 +54,37 @@ struct App : http::HttpHandler {
 	}
 };
 
+// ---- streaming request-body app: counts an NDJSON body chunk-by-chunk without ever
+// buffering it, proving the gigabyte-safe path. The count lives in a ctx shared with
+// Request::user_data, so handle() reads it back after the sink is gone.
+struct BulkCtx { std::atomic<size_t> lines{0}; std::atomic<size_t> bytes{0}; };
+struct CountSink : http::BodySink {
+	std::shared_ptr<BulkCtx> ctx;
+	explicit CountSink(std::shared_ptr<BulkCtx> c) : ctx(std::move(c)) {}
+	void write(std::string_view chunk) override {
+		ctx->bytes.fetch_add(chunk.size(), std::memory_order_relaxed);
+		for (char c : chunk) { if (c == '\n') { ctx->lines.fetch_add(1, std::memory_order_relaxed); } }
+	}
+	void end() override {}
+};
+struct StreamApp : http::HttpHandler {
+	void handle(const http::Request& req, http::ResponseWriter& resp) override {
+		auto ctx = std::static_pointer_cast<BulkCtx>(req.user_data);
+		size_t lines = ctx ? ctx->lines.load() : 0;
+		// req.body must be EMPTY if the body streamed to the sink (never buffered).
+		bool streamed = req.body.empty();
+		resp.send(200, std::to_string(lines) + (streamed ? " streamed\n" : " buffered\n"));
+	}
+	std::unique_ptr<http::BodySink> on_request_body(http::Request& req) override {
+		if (req.path == "/bulk") {
+			auto ctx = std::make_shared<BulkCtx>();
+			req.user_data = ctx;
+			return std::make_unique<CountSink>(ctx);
+		}
+		return nullptr;   // every other route buffers into Request::body
+	}
+};
+
 // ---- client ----
 struct Resp { int status = 0; std::string body; double ms = 0; std::string headers; };
 
@@ -69,6 +102,39 @@ static Resp do_request(unsigned short port, const std::string& path, const std::
 	if (!accept_enc.empty()) { req += "Accept-Encoding: " + accept_enc + "\r\n"; }
 	req += "Connection: close\r\n\r\n";
 	::send(fd, req.data(), req.size(), 0);
+	std::string resp;
+	char b[8192];
+	for (;;) { ssize_t n = ::recv(fd, b, sizeof(b), 0); if (n <= 0) { break; } resp.append(b, static_cast<size_t>(n)); }
+	::close(fd);
+	if (resp.rfind("HTTP/1.1 ", 0) == 0) { r.status = std::atoi(resp.c_str() + 9); }
+	auto bp = resp.find("\r\n\r\n");
+	if (bp != std::string::npos) { r.headers = resp.substr(0, bp); r.body = resp.substr(bp + 4); }
+	r.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+	return r;
+}
+
+// POST a body with Content-Length, sending it in chunks so the server reads it
+// incrementally (exercising the streaming intake). Returns the response.
+static Resp do_post(unsigned short port, const std::string& path, const std::string& body) {
+	Resp r;
+	auto t0 = std::chrono::steady_clock::now();
+	int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0) { return r; }
+	sockaddr_in a{}; a.sin_family = AF_INET; a.sin_port = htons(port);
+	::inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+	timeval tv{.tv_sec = 15, .tv_usec = 0};
+	::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	if (::connect(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0) { ::close(fd); return r; }
+	std::string hdr = "POST " + path + " HTTP/1.1\r\nHost: x\r\nContent-Length: " +
+		std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n";
+	::send(fd, hdr.data(), hdr.size(), 0);
+	size_t off = 0;
+	while (off < body.size()) {
+		size_t n = std::min<size_t>(32 * 1024, body.size() - off);
+		ssize_t s = ::send(fd, body.data() + off, n, 0);
+		if (s <= 0) { break; }
+		off += static_cast<size_t>(s);
+	}
 	std::string resp;
 	char b[8192];
 	for (;;) { ssize_t n = ::recv(fd, b, sizeof(b), 0); if (n <= 0) { break; } resp.append(b, static_cast<size_t>(n)); }
@@ -239,6 +305,29 @@ int main() {
 		check(r.status == 500 && r.body == "mapped: boom\n", "on_error mapped the exception to 500");
 		auto nf = do_request(port, "/nope");
 		check(nf.status == 404, "unknown path -> 404 from the router");
+	}
+	// [H] Streaming request-body intake: a multi-MB NDJSON body streams to the app's
+	// sink chunk-by-chunk (never buffered) -- the gigabyte-safe path. The body is far
+	// larger than one read buffer, so it must span many reads; the app reports the line
+	// count and that Request::body stayed empty (proof it was not accumulated).
+	{
+		unsigned short port = free_port();
+		StreamApp sapp;
+		http::HttpAsioService svc(sapp, 1, 0, 64);
+		svc.start(port); wait_listen(port);
+		const int N = 200000;
+		std::string body;
+		body.reserve(N * 12);
+		for (int i = 0; i < N; ++i) { body += "{\"n\":"; body += std::to_string(i); body += "}\n"; }
+		auto r = do_post(port, "/bulk", body);
+		std::printf("  [H] streaming: POST /bulk %zu bytes -> %d, %s", body.size(), r.status, r.body.c_str());
+		check(r.status == 200, "streamed bulk body answered 200");
+		check(r.body.find(std::to_string(N)) != std::string::npos, "every line counted through the sink");
+		check(r.body.find("streamed") != std::string::npos, "body streamed to the sink, never buffered");
+		// A small body on a non-opted route still buffers into Request::body (dual mode):
+		// the sink is only returned for /bulk, so here handle() sees a non-empty body.
+		auto b = do_post(port, "/buffered", "one\ntwo\n");
+		check(b.status == 200 && b.body.find("buffered") != std::string::npos, "a non-opted route buffers into Request::body (dual mode)");
 	}
 
 	std::printf("\n%s (%d failures)\n", g_fail == 0 ? "PASS" : "FAIL", g_fail);

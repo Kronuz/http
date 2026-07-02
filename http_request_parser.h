@@ -22,28 +22,43 @@
 
 // RequestParser -- a transport-agnostic wrapper around Kronuz/http-parser that turns a
 // stream of received bytes into completed http::Request values. It owns the parser and
-// the partial header/body state and knows nothing of the reactor: any transport (the
-// libev connection, an Asio coroutine, a test) feeds it bytes and drains completed
-// requests. This is the seam that lets the HTTP protocol ride on any runtime -- the
-// parser callbacks (which used to live inside the libev HttpConnection) move here so
-// the Asio connection reuses them verbatim. Buffered body only (the streaming BodySink
-// intake stays a connection concern); pipelined requests are yielded one at a time.
+// the partial header/body state and knows nothing of the reactor: any transport (an
+// Asio coroutine, a test) feeds it bytes and drains completed requests. This is the
+// seam that lets the HTTP protocol ride on any runtime.
+//
+// Request-body intake is either buffered (small bodies, into Request::body) or STREAMED
+// (large/unbounded bodies): the transport installs a headers callback that runs at
+// headers-complete (method/path/headers known, no body byte yet) and may return a
+// BodySink. If it does, every body chunk is handed to the sink as it is parsed and
+// nothing is accumulated -- so a multi-gigabyte upload (a RESTORE, a bulk load) flows
+// through in O(read-buffer) memory, never held whole. Pipelined requests are yielded one
+// at a time.
 
 #pragma once
 
+#include <algorithm>
 #include <charconv>
 #include <cstddef>
+#include <functional>
+#include <memory>
 #include <string>
 #include <utility>
 
 #include <http_parser.h>
 
+#include "http_handler.h"
 #include "http_message.h"
 
 namespace http {
 
 class RequestParser {
 public:
+	// The headers-complete hook: given the finalized request (line + headers, no body
+	// yet), return a BodySink to stream the body into, or nullptr to buffer it into
+	// Request::body. This is where the transport builds the app's per-request extension
+	// and asks the handler whether to stream (create_extension -> on_request_body).
+	using HeadersCallback = std::function<std::unique_ptr<BodySink>(Request&)>;
+
 	RequestParser() {
 		http_parser_settings_init(&settings_);
 		settings_.on_url = &on_url_cb;
@@ -55,6 +70,9 @@ public:
 		http_parser_init(&parser_, HTTP_REQUEST);
 		parser_.data = this;
 	}
+
+	// Install the headers-complete hook (once per connection; it runs for every request).
+	void set_headers_callback(HeadersCallback cb) { headers_cb_ = std::move(cb); }
 
 	// Feed `len` received bytes. Returns the number consumed; a short count means a
 	// parse error (see errored()). When a full request has been parsed, complete()
@@ -77,6 +95,8 @@ public:
 	}
 
 	// Move out the completed request and reset for the next one on the same connection.
+	// The body sink (if the request streamed) is done -- end() already fired -- so it is
+	// released here; the app's own state lives on in Request::user_data.
 	Request take() {
 		Request out = std::move(request_);
 		request_.clear();
@@ -84,6 +104,7 @@ public:
 		cur_value_.clear();
 		reading_value_ = false;
 		complete_ = false;
+		body_sink_.reset();
 		return out;
 	}
 
@@ -97,6 +118,11 @@ public:
 	}
 
 private:
+	// Cap the up-front buffered-body reservation so a hostile/huge Content-Length can't
+	// force a giant allocation for a body the app chose to buffer. Beyond this the buffer
+	// still grows on demand; large bodies should opt into streaming (a BodySink).
+	static constexpr std::size_t kMaxBufferedReserve = 8u * 1024 * 1024;
+
 	http_parser parser_;
 	http_parser_settings settings_;
 	Request request_;
@@ -104,6 +130,8 @@ private:
 	std::string cur_value_;
 	bool reading_value_ = false;
 	bool complete_ = false;
+	HeadersCallback headers_cb_;
+	std::unique_ptr<BodySink> body_sink_;   // non-null => this request is streaming
 
 	void finalize() {
 		request_.method = http_method_str(static_cast<enum http_method>(parser_.method));
@@ -151,16 +179,27 @@ private:
 			c->reading_value_ = false;
 		}
 		c->finalize();
-		auto cl = c->content_length();
-		if (cl != 0) { c->request_.body.reserve(cl); }
+		// Let the transport build the extension and choose stream-vs-buffer. A sink means
+		// the body streams straight to the app (bounded memory); nullptr buffers it.
+		if (c->headers_cb_) { c->body_sink_ = c->headers_cb_(c->request_); }
+		if (!c->body_sink_) {
+			auto cl = c->content_length();
+			if (cl != 0) { c->request_.body.reserve(std::min(cl, kMaxBufferedReserve)); }
+		}
 		return 0;
 	}
 	static int on_body_cb(http_parser* p, const char* at, std::size_t len) {
-		self(p)->request_.body.append(at, len);
+		auto* c = self(p);
+		if (c->body_sink_) {
+			c->body_sink_->write(std::string_view(at, len));   // stream: never accumulated
+		} else {
+			c->request_.body.append(at, len);                  // buffer (small bodies)
+		}
 		return 0;
 	}
 	static int on_message_complete_cb(http_parser* p) {
 		auto* c = self(p);
+		if (c->body_sink_) { c->body_sink_->end(); }
 		c->complete_ = true;
 		http_parser_pause(p, 1);   // stop after this message so pipelined bytes wait for take()
 		return 0;
