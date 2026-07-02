@@ -43,6 +43,7 @@
 
 #pragma once
 
+#include <exception>
 #include <memory>
 #include <string_view>
 #include <utility>
@@ -137,6 +138,14 @@ public:
 	// even while every worker is busy. A handler classified cheap MUST be cheap and
 	// non-blocking -- it runs on the reactor and a slow one would stall the loop.
 	virtual bool should_offload(const Request& /*request*/) const { return true; }
+
+	// Map an exception that escaped handle() to a response. The connection's backstop
+	// calls this when handle() threw without having answered; the app rethrows the
+	// exception_ptr to inspect the type and writes a status + body through `resp` (its
+	// own error-to-status mapping). Anything it leaves unanswered falls back to a
+	// generic 500, so an app only handles the exceptions it cares about. This keeps
+	// error mapping an application concern while the transport owns the fallback.
+	virtual void on_error(std::exception_ptr /*error*/, const Request& /*request*/, ResponseWriter& /*resp*/) {}
 };
 
 }  // namespace http

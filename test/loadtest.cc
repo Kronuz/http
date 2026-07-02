@@ -584,6 +584,39 @@ int main() {
 		CHECK(gz.header("Content-Encoding") == "gzip" && gunzip(gz.body) == big, "the built-in gzip still works alongside the app coding");
 	}
 
+	// ---- L. Error mapping hook: app maps exceptions, transport owns the 500 -----
+	// A handler throws; its on_error() maps a known exception to a chosen status, and
+	// anything it doesn't map falls back to the connection's generic 500. This is how
+	// error-to-status stays an application concern without the app wrapping every
+	// handler in a try/catch. Runs on the offloaded path (a Dispatcher is configured).
+	{
+		struct NotThere {};   // an application exception type
+		struct ErrHandler : http::HttpHandler {
+			void handle(const http::Request& req, http::ResponseWriter& /*resp*/) override {
+				if (req.path == "/missing") { throw NotThere{}; }
+				throw std::runtime_error("boom");   // an exception the app does NOT map
+			}
+			void on_error(std::exception_ptr err, const http::Request& /*req*/, http::ResponseWriter& resp) override {
+				try {
+					std::rethrow_exception(err);
+				} catch (const NotThere&) {
+					resp.send(404, "Not Found\n");
+				} catch (...) {
+					// leave it: the connection's generic 500 backstop answers
+				}
+			}
+		};
+		ErrHandler eh;
+		uint16_t port = find_free_port();
+		ServerFixture fx([&eh] { return http::HttpService::create(eh, /*workers=*/2, /*queue_limit=*/16); }, port);
+
+		Resp mapped = do_request(port, "/missing", "");
+		Resp fallback = do_request(port, "/boom", "");
+		std::printf("  [L] error hook: mapped -> %d, unmapped -> %d\n", mapped.status, fallback.status);
+		CHECK(mapped.status == 404 && mapped.body == "Not Found\n", "on_error maps the app's exception to 404");
+		CHECK(fallback.status == 500, "an exception the app doesn't map falls back to the generic 500");
+	}
+
 	std::printf("\n%s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
 	return g_failures == 0 ? 0 : 1;
 }

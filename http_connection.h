@@ -495,10 +495,22 @@ private:
 		try {
 			handler_.handle(request_, writer_);
 		} catch (...) {
-			// Backstop: an app should map its own exceptions, but never leave a
-			// synchronous handler's connection hung on an unhandled throw.
-			if (!writer_.ended()) { writer_.send(500, "Internal Server Error\n"); }
+			answer_uncaught(std::current_exception());
 		}
+	}
+
+	// The uncaught-exception backstop, shared by the inline and offloaded paths: give
+	// the app a chance to map the exception to a response (its own error-to-status
+	// policy), then fall back to a generic 500 for anything it left unanswered. Never
+	// leaves a handler's connection hung on an unhandled throw.
+	void answer_uncaught(std::exception_ptr err) {
+		if (writer_.ended()) { return; }   // a response was already committed before the throw
+		try {
+			handler_.on_error(err, request_, writer_);
+		} catch (...) {
+			// An app error-mapper must not itself escape; ignore and use the fallback.
+		}
+		if (!writer_.ended()) { writer_.send(500, "Internal Server Error\n"); }
 	}
 
 	// Offloaded handler invocation (on a worker thread). The worker reads request_
@@ -509,7 +521,7 @@ private:
 		try {
 			handler_.handle(request_, writer_);
 		} catch (...) {
-			if (!writer_.ended()) { writer_.send(500, "Internal Server Error\n"); }
+			answer_uncaught(std::current_exception());
 		}
 		if (!writer_.ended()) { writer_.end(); }   // a handler that neither ended nor threw still completes
 		// The worker is done touching writer_. Now it is safe for the reactor to
