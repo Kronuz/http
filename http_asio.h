@@ -68,6 +68,7 @@ using asio_reuse_port = asio::detail::socket_option::boolean<SOL_SOCKET, SO_REUS
 // How the acceptor is bound. Mirrors the libev BindOptions so the API is stable across
 // the swap; reuse_port is what lets the N reactors share one port.
 struct AsioBindOptions {
+	std::string address;  // empty => all interfaces (0.0.0.0)
 	bool reuse_port = false;
 	bool tcp_nodelay = true;
 	int backlog = 1024;
@@ -257,7 +258,9 @@ inline asio::awaitable<void> accept_loop(AsioReactor* reactor, HttpHandler* hand
 	using asio::ip::tcp;
 	auto ex = co_await asio::this_coro::executor;
 	tcp::acceptor acceptor(ex);
-	tcp::endpoint ep(tcp::v4(), port);
+	tcp::endpoint ep = bind.address.empty()
+		? tcp::endpoint(tcp::v4(), port)
+		: tcp::endpoint(asio::ip::make_address(bind.address), port);
 	acceptor.open(ep.protocol());
 	acceptor.set_option(tcp::acceptor::reuse_address(true));
 	if (bind.reuse_port) { acceptor.set_option(asio_reuse_port(true)); }
