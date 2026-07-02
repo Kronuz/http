@@ -53,6 +53,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	add_executable(dispatcher_bench examples/dispatcher_bench.cc)
 	target_link_libraries(dispatcher_bench PRIVATE http)
 
+	add_executable(bench_http examples/bench_http.cc)
+	target_link_libraries(bench_http PRIVATE http)
+
 	enable_testing()
 	add_executable(http_test test/test.cc)
 	target_link_libraries(http_test PRIVATE http)
@@ -64,4 +67,16 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	target_link_libraries(http_loadtest PRIVATE http)
 	add_test(NAME loadtest COMMAND http_loadtest)
 	set_tests_properties(loadtest PROPERTIES TIMEOUT 60)
+
+	# The Asio-based transport (http_asio.h) validation. Uses standalone Asio (found
+	# via the ASIO_INCLUDE_DIR hint, default the Homebrew prefix).
+	set(ASIO_INCLUDE_DIR "/opt/homebrew/include" CACHE PATH "standalone Asio include dir")
+	if(EXISTS "${ASIO_INCLUDE_DIR}/asio.hpp")
+		add_executable(asio_test test/asio_test.cc)
+		target_link_libraries(asio_test PRIVATE http)
+		target_include_directories(asio_test PRIVATE "${ASIO_INCLUDE_DIR}")
+		target_compile_definitions(asio_test PRIVATE ASIO_STANDALONE)
+		add_test(NAME asio COMMAND asio_test)
+		set_tests_properties(asio PROPERTIES TIMEOUT 60)
+	endif()
 endif()
