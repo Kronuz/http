@@ -128,6 +128,9 @@ public:
 	// false once the body is fully delivered. Call from the handler (on its worker
 	// thread), never from the reactor.
 	virtual bool read(std::string& chunk) = 0;
+	// Unblock a pending read() (make it return false) -- the transport calls this on
+	// shutdown so a handler stuck mid-stream doesn't wedge the join. Default no-op.
+	virtual void abort() {}
 };
 
 

@@ -480,6 +480,31 @@ int main() {
 			&& sm.body.find(std::to_string(tiny_sum)) != std::string::npos,
 			"a body arriving with the headers is streamed, not dropped");
 	}
+	// [L] Shutdown while a stream is mid-flight must not hang: a client sends headers +
+	// a partial body (less than Content-Length) and holds; stop() aborts the reader so
+	// the handler blocked in read() unwedges and the pool join completes.
+	{
+		unsigned short port = free_port();
+		ConcurrentStreamApp capp;
+		auto* svc = new http::HttpAsioService(capp, 1, 4, 64);
+		svc->start(port); wait_listen(port);
+		int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+		sockaddr_in a{}; a.sin_family = AF_INET; a.sin_port = htons(port);
+		::inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+		::connect(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a));
+		std::string hdr = "POST /restore HTTP/1.1\r\nHost: x\r\nContent-Length: 1000000\r\n\r\npartial-body-then-hold";
+		::send(fd, hdr.data(), hdr.size(), 0);
+		std::this_thread::sleep_for(std::chrono::milliseconds(80));   // let the handler block in read()
+
+		std::atomic<bool> stopped{false};
+		std::thread stopper([svc, &stopped] { svc->stop(); stopped.store(true); });
+		for (int i = 0; i < 500 && !stopped.load(); ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); }
+		bool ok = stopped.load();
+		std::printf("  [L] stop() mid-stream -> %s\n", ok ? "returned" : "HUNG");
+		check(ok, "stop() returns while a stream is mid-flight (no shutdown deadlock)");
+		if (ok) { stopper.join(); delete svc; } else { stopper.detach(); }   // leak on hang so the suite continues
+		::close(fd);
+	}
 
 	std::printf("\n%s (%d failures)\n", g_fail == 0 ? "PASS" : "FAIL", g_fail);
 	return g_fail == 0 ? 0 : 1;

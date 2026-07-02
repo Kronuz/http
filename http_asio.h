@@ -50,11 +50,14 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 
+#include <algorithm>
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
+#include <deque>
 #include <exception>
-#include <future>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -232,61 +235,100 @@ struct AsioReactor {
 	asio::io_context io{1};
 	std::unique_ptr<asio::thread_pool> pool;   // null => inline
 	OffloadGate gate;
+	std::mutex readers_mtx;
+	std::vector<std::weak_ptr<BodyReader>> readers;   // in-flight streaming readers
 	AsioReactor(std::size_t workers, int queue_limit)
 		: pool(workers != 0 ? std::make_unique<asio::thread_pool>(workers) : nullptr),
 		  gate(queue_limit) {}
+
+	// Track a streaming reader so shutdown can unblock it; prunes expired entries.
+	void track_reader(const std::shared_ptr<BodyReader>& r) {
+		std::lock_guard<std::mutex> lk(readers_mtx);
+		readers.erase(std::remove_if(readers.begin(), readers.end(),
+			[](const std::weak_ptr<BodyReader>& w) { return w.expired(); }), readers.end());
+		readers.push_back(r);
+	}
+	// Abort every in-flight reader so a handler blocked mid-stream unwedges at shutdown.
+	void abort_readers() {
+		std::lock_guard<std::mutex> lk(readers_mtx);
+		for (auto& w : readers) { if (auto r = w.lock()) { r->abort(); } }
+	}
 };
 
 namespace detail {
 
-// The Asio-backed BodyReader: a bounded, thread-safe channel of raw body chunks. The
-// reactor coroutine pushes chunks and SUSPENDS when the channel is full (flow control /
-// back-pressure -> the socket read pauses, the reactor stays free); the handler, on its
-// worker thread, pulls them with a blocking read(). An empty chunk is the end-of-body
-// marker (real body chunks are never empty); abort() (a transport error) closes the
-// channel so a blocked read() returns false and the handler can see aborted().
+// The Asio-backed BodyReader: a bounded queue of raw body chunks bridging the reactor
+// (producer) and the handler's worker (consumer). The consumer blocks on a condition
+// variable -- NOT on the io_context -- so abort() (shutdown) can wake it directly, even
+// after the reactor's io_context has stopped. The producer (reactor coroutine) stays
+// non-blocking: when the queue is full it yields via a short timer and retries, so a
+// slow consumer applies back-pressure (the socket read pauses) without ever blocking the
+// reactor thread. An empty chunk from finish() is the end-of-body marker.
 class ChannelBodyReader : public BodyReader {
 public:
-	using channel_type = asio::experimental::concurrent_channel<void(asio::error_code, std::string)>;
+	ChannelBodyReader(asio::any_io_executor ex, std::size_t capacity)
+		: ex_(std::move(ex)), cap_(capacity != 0 ? capacity : 1) {}
 
-	ChannelBodyReader(const asio::any_io_executor& ex, std::size_t capacity) : ch_(ex, capacity) {}
-
-	// consumer (handler worker): blocking pull; false at end-of-body or on abort. Once
-	// the end is reached it stays false forever (never blocks on an over-read), so a
-	// consumer that calls read() again after the last object -- e.g. a parser that flushes
-	// a trailing object then loops -- won't deadlock waiting on the drained channel.
+	// consumer (handler worker): blocking pull. false at end-of-body or on abort; sticky
+	// at end, so an over-read (a parser flushing a trailing item then looping) never blocks.
 	bool read(std::string& chunk) override {
-		if (ended_) { return false; }
-		std::future<std::string> fut = ch_.async_receive(asio::use_future);
-		try {
-			std::string v = fut.get();
-			if (v.empty()) { ended_ = true; return false; }   // end-of-body marker
-			chunk = std::move(v);
+		std::unique_lock<std::mutex> lk(m_);
+		cv_.wait(lk, [this] { return !q_.empty() || closed_ || aborted_; });
+		if (!q_.empty()) {
+			chunk = std::move(q_.front());
+			q_.pop_front();
+			cv_.notify_all();   // wake the producer if it is waiting for space
 			return true;
-		} catch (const std::exception&) {
-			ended_ = true;                                     // channel closed (abort)
-			return false;
+		}
+		return false;           // closed + drained, or aborted
+	}
+
+	bool aborted() const {
+		std::lock_guard<std::mutex> lk(m_);
+		return aborted_;
+	}
+
+	// producer (reactor coroutine): enqueue a chunk, yielding the reactor while the queue
+	// is full (flow control). Returns early if aborted.
+	asio::awaitable<void> push(std::string chunk) {
+		for (;;) {
+			{
+				std::lock_guard<std::mutex> lk(m_);
+				if (aborted_) { co_return; }
+				if (q_.size() < cap_) {
+					q_.push_back(std::move(chunk));
+					cv_.notify_all();
+					co_return;
+				}
+			}
+			asio::steady_timer t(ex_, std::chrono::milliseconds(1));
+			co_await t.async_wait(asio::use_awaitable);   // reactor stays free; retry
 		}
 	}
-
-	bool aborted() const { return aborted_.load(std::memory_order_acquire); }
-
-	// producer (reactor coroutine): suspends when the channel is full.
-	asio::awaitable<void> push(std::string chunk) {
-		co_await ch_.async_send(asio::error_code{}, std::move(chunk), asio::use_awaitable);
-	}
 	asio::awaitable<void> finish() {
-		co_await ch_.async_send(asio::error_code{}, std::string{}, asio::use_awaitable);   // end marker
+		{
+			std::lock_guard<std::mutex> lk(m_);
+			closed_ = true;
+		}
+		cv_.notify_all();
+		co_return;
 	}
-	void abort() {
-		aborted_.store(true, std::memory_order_release);
-		ch_.close();
+	void abort() override {
+		{
+			std::lock_guard<std::mutex> lk(m_);
+			aborted_ = true;
+		}
+		cv_.notify_all();
 	}
 
 private:
-	channel_type ch_;
-	std::atomic<bool> aborted_{false};
-	bool ended_ = false;   // consumer-thread only: sticky end-of-body / closed
+	asio::any_io_executor ex_;
+	std::size_t cap_;
+	mutable std::mutex m_;
+	std::condition_variable cv_;
+	std::deque<std::string> q_;
+	bool closed_ = false;    // producer sent finish()
+	bool aborted_ = false;   // shutdown / transport abort
 };
 
 // Serve one connection: keep-alive loop of parse -> handler seam -> write. A normal
@@ -337,6 +379,7 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 				bool keep_alive = request.keep_alive;
 				auto reader = std::make_shared<ChannelBodyReader>(ex, /*capacity=*/8);
 				request.body_reader = reader;
+				reactor->track_reader(reader);   // so shutdown can unblock a mid-stream read()
 				AsioResponseWriter writer(request, options);
 				asio::any_io_executor hexec(reactor->pool->get_executor());
 
@@ -569,6 +612,7 @@ public:
 	}
 
 	void stop() {
+		for (auto& r : reactors_) { r->abort_readers(); }   // unblock any mid-stream consumers
 		guards_.clear();
 		for (auto& r : reactors_) { r->io.stop(); }
 		for (auto& t : threads_) { if (t.joinable()) { t.join(); } }

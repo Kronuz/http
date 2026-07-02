@@ -129,14 +129,22 @@ Chosen at headers-complete:
 - **Pull-streamed / concurrent** (`wants_body_stream` returns true, needs a worker
   pool): the framework runs `handle()` on a worker *concurrently* with the body read
   and gives it a `BodyReader` (`Request::body_reader`) to PULL raw chunks from.
-  `read()` blocks the worker until the next chunk; the reactor feeds through a bounded
-  `concurrent_channel` and suspends when full (flow control -> the reactor stays free,
-  back-pressure reaches the socket). O(buffer) memory for any size. The transport runs
-  `feed() && co_spawn(pool, handle)` (awaitable operators) and joins; feed never throws
-  (a socket/parse error `abort()`s the reader so the blocked `read()` returns false).
-  An empty chunk is the end-of-body marker. A streaming handler MUST drain the reader.
-  `asio_test [K]`: a 2 MB body through a slow consumer -- no loss under back-pressure +
-  a fast request served mid-stream (proving the reactor stays free).
+  `read()` blocks the worker on a condition variable until the next chunk; the reactor
+  feeds through a bounded queue and, when it is full, yields via a short timer and
+  retries (flow control -> the reactor stays free, back-pressure reaches the socket).
+  O(buffer) memory for any size. The handler is launched with an explicit
+  `co_spawn(pool_exec, handle, done_signal)` (so it really runs on the pool -- the
+  `&&`/awaitable-operators form ran it on the reactor and deadlocked); the reactor
+  feeds, then co_awaits the done signal. feed never throws (a socket/parse error
+  `abort()`s the reader so `read()` returns false). `read()` is sticky at end (an
+  over-read never blocks). The consumer waking on a condvar -- not the io_context --
+  is what lets shutdown work: `HttpAsioService::stop()` calls `AsioReactor::abort_readers()`
+  (a per-reactor registry of in-flight readers) so a handler blocked mid-stream unwedges
+  before the pool join, even after `io.stop()`. An empty chunk is the end-of-body marker;
+  a streaming handler MUST drain the reader.
+  `asio_test [K]` (2 MB through a slow consumer: no loss under back-pressure + a fast
+  request served mid-stream + an over-read returns false + a tiny body arriving with the
+  headers) and `[L]` (stop() while a stream is mid-flight must not hang).
 
 ## Response transforms (generic knobs)
 
