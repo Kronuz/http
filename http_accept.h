@@ -116,6 +116,11 @@ public:
 
 	bool empty() const { return items_.empty(); }
 
+	// The parsed items, in header order. Lets an application build its own ranked
+	// representation (mapping each media range to its own type model) instead of using
+	// best()/negotiate_match() -- e.g. to negotiate against per-resource stored variants.
+	const std::vector<AcceptItem>& items() const { return items_; }
+
 	// The quality (0..1) the client assigns to `media` ("application/json" or a
 	// bare token like "gzip"). 0 means "not acceptable". The most specific matching
 	// header entry wins (exact > type/* > */*).
