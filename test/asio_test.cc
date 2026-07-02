@@ -183,6 +183,18 @@ int main() {
 		std::printf("  [D] 3 reactors on one port -> %d/60 served\n", count_status(res, 200));
 		check(count_status(res, 200) == 60, "all served across shared-nothing reactors");
 	}
+	// [D2] N reactors WITHOUT SO_REUSEPORT -> the shared-acceptor path (portable; the
+	// macOS/BSD default, where a second same-port bind is rejected). One acceptor binds
+	// and fans connections out round-robin to all reactors.
+	{
+		unsigned short port = free_port();
+		http::HttpAsioService svc(app, 4, 4, 64);
+		http::AsioBindOptions b; b.reuse_port = false; svc.set_bind_options(b);
+		svc.start(port); wait_listen(port);
+		auto res = fire(port, "/fast", 60);
+		std::printf("  [D2] 4 reactors, shared acceptor (no reuse_port) -> %d/60 served\n", count_status(res, 200));
+		check(count_status(res, 200) == 60, "all served via the shared acceptor");
+	}
 	// [E] Keep-alive: three sequential requests on one connection.
 	{
 		unsigned short port = free_port();

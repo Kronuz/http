@@ -272,6 +272,34 @@ inline asio::awaitable<void> accept_loop(AsioReactor* reactor, HttpHandler* hand
 	}
 }
 
+// The no-SO_REUSEPORT path: a single acceptor (on reactor 0's loop) that binds the
+// port once and distributes accepted connections round-robin across all reactors. Each
+// new connection is accepted directly onto its target reactor's io_context, so only the
+// (cheap) accept runs here; the read/handler/write all run sharded on the chosen
+// reactor. This is the portable model -- macOS/BSD reject a second same-port bind
+// without SO_REUSEPORT, so N independent acceptors are a Linux-only optimization.
+inline asio::awaitable<void> shared_accept_loop(std::vector<AsioReactor*> reactors, HttpHandler* handler,
+                                                const AsioResponseOptions* options,
+                                                unsigned short port, AsioBindOptions bind) {
+	using asio::ip::tcp;
+	auto ex = co_await asio::this_coro::executor;
+	tcp::acceptor acceptor(ex);
+	tcp::endpoint ep = bind.address.empty()
+		? tcp::endpoint(tcp::v4(), port)
+		: tcp::endpoint(asio::ip::make_address(bind.address), port);
+	acceptor.open(ep.protocol());
+	acceptor.set_option(tcp::acceptor::reuse_address(true));
+	acceptor.bind(ep);
+	acceptor.listen(bind.backlog);
+	std::size_t next = 0;
+	for (;;) {
+		AsioReactor* r = reactors[next];
+		next = (next + 1 == reactors.size()) ? 0 : next + 1;
+		tcp::socket socket = co_await acceptor.async_accept(r->io, asio::use_awaitable);
+		asio::co_spawn(r->io, serve_connection(std::move(socket), handler, r, options), asio::detached);
+	}
+}
+
 }  // namespace detail
 
 // The HTTP service: N reactors (io_context + pool each) on N threads, all bound to one
@@ -299,20 +327,40 @@ public:
 		response_.compression = std::move(options);
 	}
 
-	// Bind + run all reactors (each on its own thread). Returns once every reactor is
-	// listening; the caller keeps its thread and stops with stop().
+	// Bind + run all reactors (each on its own thread). Returns once the threads are
+	// launched; the caller keeps its thread and stops with stop().
 	void start(unsigned short port) {
+		// With SO_REUSEPORT (Linux) each reactor binds its own acceptor and the kernel
+		// load-balances; a single reactor needs no sharing. Otherwise (macOS/BSD, N>1)
+		// a second same-port bind is rejected, so one shared acceptor on reactor 0
+		// distributes connections round-robin across the reactors.
+		bool shared = !bind_.reuse_port && reactors_.size() > 1;
+		if (!shared) {
+			for (auto& r : reactors_) {
+				AsioReactor* rp = r.get();
+				unsigned short p = port;
+				threads_.emplace_back([this, rp, p] {
+					asio::co_spawn(rp->io, detail::accept_loop(rp, &handler_, &response_, p, bind_), asio::detached);
+					rp->io.run();
+				});
+			}
+			return;
+		}
+		std::vector<AsioReactor*> raw;
+		raw.reserve(reactors_.size());
+		for (auto& r : reactors_) { raw.push_back(r.get()); }
+		// Idle reactors (all but the acceptor's) have no pending work yet; a work guard
+		// keeps run() blocked until stop() instead of returning immediately.
+		for (auto& r : reactors_) { guards_.emplace_back(asio::make_work_guard(r->io)); }
 		for (auto& r : reactors_) {
 			AsioReactor* rp = r.get();
-			unsigned short p = port;
-			threads_.emplace_back([this, rp, p] {
-				asio::co_spawn(rp->io, detail::accept_loop(rp, &handler_, &response_, p, bind_), asio::detached);
-				rp->io.run();
-			});
+			threads_.emplace_back([rp] { rp->io.run(); });
 		}
+		asio::co_spawn(raw[0]->io, detail::shared_accept_loop(raw, &handler_, &response_, port, bind_), asio::detached);
 	}
 
 	void stop() {
+		guards_.clear();
 		for (auto& r : reactors_) { r->io.stop(); }
 		for (auto& t : threads_) { if (t.joinable()) { t.join(); } }
 		threads_.clear();
@@ -328,6 +376,7 @@ private:
 	AsioResponseOptions response_{};
 	std::vector<std::unique_ptr<AsioReactor>> reactors_;
 	std::vector<std::thread> threads_;
+	std::vector<asio::executor_work_guard<asio::io_context::executor_type>> guards_;
 };
 
 }  // namespace http
