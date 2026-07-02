@@ -443,6 +443,11 @@ private:
 			request_.query = request_.target.substr(qpos + 1);
 		}
 
+		// The app's typed per-request extension (if any), built from the finalized
+		// request line + headers, before the streaming decision and offload check so
+		// both -- and handle() -- can use it.
+		request_.extension = handler_.create_extension(request_);
+
 		// Opt-in streaming intake: if the app returns a sink, body chunks go to it
 		// instead of being buffered. Otherwise reserve the buffer up front from
 		// Content-Length to avoid reallocations as the body arrives.

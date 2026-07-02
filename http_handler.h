@@ -121,6 +121,14 @@ public:
 	// decision can use the method, path, and headers (e.g. Content-Type).
 	virtual std::unique_ptr<BodySink> on_request_body(Request& /*request*/) { return nullptr; }
 
+	// Create this request's typed application extension (see RequestExtension), or
+	// nullptr (default) for none. Called once at headers-complete -- before
+	// on_request_body() and should_offload() -- so an app can build its per-request
+	// state (decoded body plumbing, parsed routes, timings) from the method/path/
+	// headers and read it back in handle() via Request::ext<T>(). This is how an app
+	// extends the request rather than carrying a parallel request object.
+	virtual std::unique_ptr<RequestExtension> create_extension(const Request& /*request*/) { return nullptr; }
+
 	// Per-request offload policy (only consulted when a Dispatcher is configured).
 	// Return true (default) to run this request on a worker thread -- correct for
 	// heavy or potentially-blocking handlers (e.g. a search). Return false to run it

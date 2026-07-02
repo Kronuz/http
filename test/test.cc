@@ -183,6 +183,40 @@ int main() {
 		CHECK(!http::parse_byte_range("bytes=abc-def", 100).recognized);    // malformed
 	}
 
+	// ---- typed per-request extension (RequestExtension) ----------------------
+	// The app subclasses RequestExtension for its per-request state; the connection
+	// builds it via create_extension() at headers-complete (mimicked here), and the
+	// handler reads it back through Request::ext<T>() -- no parallel request object.
+	{
+		struct MyState : http::RequestExtension {
+			std::string note;
+			int hits = 0;
+		};
+		struct ExtHandler : http::HttpHandler {
+			std::unique_ptr<http::RequestExtension> create_extension(const http::Request& req) override {
+				auto s = std::make_unique<MyState>();
+				s->note = "seen " + req.method + " " + req.path;
+				return s;
+			}
+			void handle(const http::Request& req, http::ResponseWriter& resp) override {
+				auto& st = req.ext<MyState>();   // the same object create_extension built
+				st.hits += 1;
+				resp.send(200, st.note + " x" + std::to_string(st.hits));
+			}
+		};
+		ExtHandler h;
+		http::Request req;
+		req.method = "GET";
+		req.target = req.path = "/x";
+		req.extension = h.create_extension(req);   // what finalize_request() does
+		CHECK(req.extension != nullptr);
+		RecordingWriter w;
+		h.handle(req, w);
+		CHECK(w.body_ == "seen GET /x x1");
+		req.clear();                               // connection reuse drops the extension
+		CHECK(req.extension == nullptr);
+	}
+
 	std::printf("\n%d checks, %d failures\n", g_checks, g_failures);
 	return g_failures == 0 ? 0 : 1;
 }

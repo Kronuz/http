@@ -41,6 +41,16 @@ namespace http {
 
 using Headers = std::vector<std::pair<std::string, std::string>>;
 
+// The base for an application's typed per-request state. The library owns the
+// Request; an application attaches its own working state (a decoded body, resolved
+// routes, timings, ...) by subclassing this and returning it from
+// HttpHandler::create_extension(). This is how an app EXTENDS the request instead of
+// keeping a parallel request object -- the library stays application-agnostic and the
+// app never duplicates the HTTP fields. Reused connections reset it between requests.
+struct RequestExtension {
+	virtual ~RequestExtension() = default;
+};
+
 inline bool iequal(std::string_view a, std::string_view b) {
 	if (a.size() != b.size()) { return false; }
 	for (size_t i = 0; i < a.size(); ++i) {
@@ -90,6 +100,17 @@ struct Request {
 	// carry what a streaming BodySink accumulated.
 	std::shared_ptr<void> user_data;
 
+	// Typed per-request application state (see RequestExtension). Created once at
+	// headers-complete by HttpHandler::create_extension(), before on_request_body()
+	// and should_offload() so both can use it; reset when the connection is reused.
+	// ext<T>() is the app's typed view of it (undefined if the wrong T or none set).
+	// It stays mutable even through a const Request: the HTTP fields are immutable
+	// during handle(), but the app's extension is its per-request working scratch.
+	std::unique_ptr<RequestExtension> extension;
+
+	template <typename T>
+	T& ext() const { return static_cast<T&>(*extension); }
+
 	std::string_view header(std::string_view name) const {
 		for (const auto& [k, v] : headers) {
 			if (iequal(k, name)) { return v; }
@@ -106,6 +127,7 @@ struct Request {
 		headers.clear(); body.clear();
 		http_major = 1; http_minor = 1; keep_alive = true;
 		user_data.reset();
+		extension.reset();
 	}
 };
 
