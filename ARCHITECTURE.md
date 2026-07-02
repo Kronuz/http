@@ -115,10 +115,28 @@ editing it:
 | `CompressionOptions::add_coding` | register a content-coding (the app owns the codec). |
 | `Accept` / `negotiate` | pick a media type from what the app can serialize. |
 
+## Response transforms
+
+At `serialize()` the buffered response passes through three optional transforms, in
+order, each a generic knob the app turns on (`enable_conditional` / `enable_ranges` /
+`enable_compression` on the service):
+
+1. **Conditional** (`http_conditional.h`) — a weak ETag `W/"<fnv1a64 hex>"` from the
+   body; if the request's `If-None-Match` already holds it, drop the body and answer
+   `304`. Runs first so the ETag identifies the resource, not the wire bytes.
+2. **Range** (`http_range.h`) — a single byte `Range` → `206 Partial Content` with
+   `Content-Range` (or `416` if unsatisfiable); a `206` is served uncompressed.
+3. **Compression** (`http_compression.h`) — negotiate `Content-Encoding` from
+   `Accept-Encoding` and compress with Kronuz/compressors; self-skips bodyless
+   statuses (204/304/1xx), a 206 slice, an already-encoded body, and a result that
+   didn't shrink.
+
+A `304` short-circuits range + compression; a `206` skips compression.
+
 ## Not yet here
 
-Response-side conditional (`http_conditional.h`) and range (`http_range.h`)
-transforms exist as protocol-layer helpers but are not yet auto-applied by the Asio
-`ResponseWriter` (compression is). True incremental *request* streaming is done;
-flow-controlled back-pressure to the socket when a sink is slow (pausing the read) is
-a later refinement — today a sink bounds its own buffering.
+Response-side *streaming* (chunked `Transfer-Encoding`) is not in the Asio writer yet
+— it buffers the whole response, so the transforms above always have the full body to
+work on, but a huge `DUMP` response is held in memory. True incremental *request*
+streaming is done; flow-controlled back-pressure to the socket when a sink is slow
+(pausing the read) is a later refinement — today a sink bounds its own buffering.

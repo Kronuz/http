@@ -58,8 +58,10 @@
 #include <vector>
 
 #include "http_compression.h"
+#include "http_conditional.h"
 #include "http_handler.h"
 #include "http_message.h"
+#include "http_range.h"
 #include "http_request_parser.h"
 
 namespace http {
@@ -76,11 +78,14 @@ struct AsioBindOptions {
 	int backlog = 1024;
 };
 
-// Response transforms applied on the buffered response before it goes on the wire.
-// Same shape as the libev ResponseOptions (compression via http_compression; the
-// conditional/range transforms slot in identically -- TODO in this scaffold).
+// Response transforms applied on the buffered response before it goes on the wire, in
+// order: conditional (weak ETag / If-None-Match -> 304), then range (a byte Range ->
+// 206 / 416), then compression (Accept-Encoding -> zstd/gzip). Same shape and policy as
+// the libev writer had.
 struct AsioResponseOptions {
 	bool compress = false;
+	bool conditional = false;   // derive a weak ETag + answer 304 on If-None-Match
+	bool ranges = false;        // serve a byte Range as 206 Partial Content
 	CompressionOptions compression{};
 };
 
@@ -101,8 +106,12 @@ public:
 	bool ended() const { return ended_; }
 	bool wants_close() const { return close_; }
 
-	// Apply the response transforms and frame the HTTP/1.1 response bytes.
+	// Apply the response transforms and frame the HTTP/1.1 response bytes. Transforms
+	// run in order: conditional (may flip to a bodyless 304) -> range (may flip to a
+	// 206 slice or 416) -> compression (self-skips 204/206/304 and tiny bodies).
 	std::string serialize(bool keep_alive) {
+		maybe_conditional();
+		if (status_ != 304) { maybe_range(); }
 		maybe_compress();
 		std::string out = "HTTP/1.1 ";
 		out += std::to_string(status_);
@@ -112,14 +121,14 @@ public:
 		for (const auto& [k, v] : headers_) {
 			out += k; out += ": "; out += v; out += "\r\n";
 		}
-		if (!has_header("Content-Length")) {
+		if (status_ != 304 && !has_header("Content-Length")) {   // 304 is defined bodyless
 			out += "Content-Length: ";
 			out += std::to_string(body_.size());
 			out += "\r\n";
 		}
 		out += (keep_alive && !close_) ? "Connection: keep-alive\r\n" : "Connection: close\r\n";
 		out += "\r\n";
-		out += body_;
+		if (status_ != 304) { out += body_; }
 		return out;
 	}
 
@@ -135,6 +144,50 @@ private:
 	bool has_header(std::string_view name) const {
 		for (const auto& [k, v] : headers_) { if (iequal(k, name)) { return true; } }
 		return false;
+	}
+
+	// Conditional GET: derive a weak ETag from the (uncompressed) body and, if the
+	// client's If-None-Match already holds it, drop the body and answer 304. Runs before
+	// range/compression so the ETag covers the resource, not the wire bytes. Buffered
+	// GET/HEAD 200s only; a handler that set its own ETag is left alone.
+	void maybe_conditional() {
+		if (options_ == nullptr || !options_->conditional) { return; }
+		if (status_ != 200) { return; }
+		const std::string& method = request_.method;
+		if (method != "GET" && method != "HEAD") { return; }
+		if (has_header("ETag")) { return; }
+		std::string etag = weak_etag(body_);
+		std::string_view inm = request_.header("If-None-Match");
+		if (!inm.empty() && if_none_match(inm, etag)) {
+			status_ = 304;
+			body_.clear();
+		}
+		headers_.emplace_back("ETag", std::move(etag));
+	}
+
+	// Range request: serve a single byte range of the buffered body as 206 Partial
+	// Content (Content-Range), or 416 if unsatisfiable; advertise Accept-Ranges: bytes.
+	// Buffered GET 200s only; a multi-range or unrecognized header serves the full 200.
+	// A 206 is left uncompressed (range + content-coding is a tar pit; ranges are for
+	// already-compressed media).
+	void maybe_range() {
+		if (options_ == nullptr || !options_->ranges) { return; }
+		if (status_ != 200 || request_.method != "GET") { return; }
+		if (!has_header("Accept-Ranges")) { headers_.emplace_back("Accept-Ranges", "bytes"); }
+		std::string_view spec = request_.header("Range");
+		if (spec.empty()) { return; }
+		const std::size_t total = body_.size();
+		ByteRange r = parse_byte_range(spec, total);
+		if (!r.recognized) { return; }
+		if (!r.satisfiable) {
+			status_ = 416;
+			body_.clear();
+			headers_.emplace_back("Content-Range", "bytes */" + std::to_string(total));
+			return;
+		}
+		headers_.emplace_back("Content-Range", "bytes " + std::to_string(r.start) + "-" + std::to_string(r.end) + "/" + std::to_string(total));
+		body_ = body_.substr(r.start, r.end - r.start + 1);
+		status_ = 206;
 	}
 
 	// Transparent response compression -- identical policy to the libev Writer.
@@ -338,6 +391,12 @@ public:
 		response_.compress = true;
 		response_.compression = std::move(options);
 	}
+	// A repeat GET of an unchanged resource costs a hash + a header instead of the body
+	// (weak ETag / If-None-Match -> 304).
+	void enable_conditional() { response_.conditional = true; }
+	// A buffered GET 200 advertises Accept-Ranges and serves a single byte Range as 206
+	// (or 416) -- what media players and resumable downloads use to seek.
+	void enable_ranges() { response_.ranges = true; }
 
 	// Bind + run all reactors (each on its own thread). Returns once the threads are
 	// launched; the caller keeps its thread and stops with stop().

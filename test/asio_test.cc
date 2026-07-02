@@ -164,6 +164,48 @@ static bool has_header(const std::string& hdrs, const std::string& name, const s
 	return low.find(nl) != std::string::npos;
 }
 
+// Extract a header's value from the raw header block (case-insensitive name match).
+static std::string header_value(const std::string& hdrs, const std::string& name) {
+	std::string low = hdrs, ln = name;
+	for (auto& c : low) { c = static_cast<char>(::tolower(c)); }
+	for (auto& c : ln) { c = static_cast<char>(::tolower(c)); }
+	auto p = low.find("\n" + ln + ":");
+	size_t vs;
+	if (p == std::string::npos) {
+		if (low.compare(0, ln.size() + 1, ln + ":") == 0) { vs = ln.size() + 1; } else { return ""; }
+	} else {
+		vs = p + 1 + ln.size() + 1;
+	}
+	auto ve = hdrs.find("\r\n", vs);
+	if (ve == std::string::npos) { ve = hdrs.size(); }
+	std::string v = hdrs.substr(vs, ve - vs);
+	size_t b = v.find_first_not_of(" \t");
+	return b == std::string::npos ? "" : v.substr(b);
+}
+
+// GET with one arbitrary extra header line ("Name: value").
+static Resp do_get_h(unsigned short port, const std::string& path, const std::string& extra) {
+	Resp r;
+	int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0) { return r; }
+	sockaddr_in a{}; a.sin_family = AF_INET; a.sin_port = htons(port);
+	::inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+	timeval tv{.tv_sec = 10, .tv_usec = 0};
+	::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	if (::connect(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0) { ::close(fd); return r; }
+	std::string req = "GET " + path + " HTTP/1.1\r\nHost: x\r\n";
+	if (!extra.empty()) { req += extra + "\r\n"; }
+	req += "Connection: close\r\n\r\n";
+	::send(fd, req.data(), req.size(), 0);
+	std::string resp; char b[8192];
+	for (;;) { ssize_t n = ::recv(fd, b, sizeof(b), 0); if (n <= 0) { break; } resp.append(b, static_cast<size_t>(n)); }
+	::close(fd);
+	if (resp.rfind("HTTP/1.1 ", 0) == 0) { r.status = std::atoi(resp.c_str() + 9); }
+	auto bp = resp.find("\r\n\r\n");
+	if (bp != std::string::npos) { r.headers = resp.substr(0, bp); r.body = resp.substr(bp + 4); }
+	return r;
+}
+
 static unsigned short free_port() {
 	int fd = ::socket(AF_INET, SOCK_STREAM, 0);
 	sockaddr_in a{}; a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_LOOPBACK); a.sin_port = 0;
@@ -328,6 +370,40 @@ int main() {
 		// the sink is only returned for /bulk, so here handle() sees a non-empty body.
 		auto b = do_post(port, "/buffered", "one\ntwo\n");
 		check(b.status == 200 && b.body.find("buffered") != std::string::npos, "a non-opted route buffers into Request::body (dual mode)");
+	}
+	// [I] Conditional GET: enable_conditional -> a first GET gets a weak ETag; a repeat
+	// with If-None-Match is answered 304 (bodyless).
+	{
+		unsigned short port = free_port();
+		http::HttpAsioService svc(app, 1, 4, 64);
+		svc.enable_conditional();
+		svc.start(port); wait_listen(port);
+		auto first = do_request(port, "/big");
+		std::string etag = header_value(first.headers, "ETag");
+		std::printf("  [I] conditional: /big -> %d, ETag=%s\n", first.status, etag.c_str());
+		check(first.status == 200 && !etag.empty() && etag.rfind("W/\"", 0) == 0, "first GET returns a weak ETag");
+		auto again = do_get_h(port, "/big", "If-None-Match: " + etag);
+		check(again.status == 304 && again.body.empty(), "If-None-Match on the same ETag -> 304, no body");
+		auto stale = do_get_h(port, "/big", "If-None-Match: W/\"deadbeef\"");
+		check(stale.status == 200 && !stale.body.empty(), "a non-matching ETag -> full 200");
+	}
+	// [J] Range: enable_ranges -> a byte Range is served 206 with Content-Range; an
+	// unsatisfiable range is 416.
+	{
+		unsigned short port = free_port();
+		http::HttpAsioService svc(app, 1, 4, 64);
+		svc.enable_ranges();
+		svc.start(port); wait_listen(port);
+		auto full = do_request(port, "/big");
+		size_t total = full.body.size();
+		auto part = do_get_h(port, "/big", "Range: bytes=0-9");
+		std::printf("  [J] range: bytes=0-9 -> %d, %zu bytes, %s\n", part.status, part.body.size(),
+			header_value(part.headers, "Content-Range").c_str());
+		check(part.status == 206 && part.body.size() == 10 && part.body == full.body.substr(0, 10), "bytes=0-9 -> 206 with the first 10 bytes");
+		check(header_value(part.headers, "Content-Range") == "bytes 0-9/" + std::to_string(total), "Content-Range reflects the slice + total");
+		check(has_header(full.headers, "Accept-Ranges", "bytes"), "a rangeable 200 advertises Accept-Ranges: bytes");
+		auto bad = do_get_h(port, "/big", "Range: bytes=" + std::to_string(total + 100) + "-");
+		check(bad.status == 416, "an unsatisfiable range -> 416");
 	}
 
 	std::printf("\n%s (%d failures)\n", g_fail == 0 ? "PASS" : "FAIL", g_fail);

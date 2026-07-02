@@ -136,30 +136,36 @@ sink bounds its own buffering.
 
 ## Response transforms (generic knobs)
 
-Compression is applied by the Asio `ResponseWriter` at `serialize()`. Conditional
-(`http_conditional.h`) and range (`http_range.h`) are protocol-layer helpers with unit
-coverage in `test/test.cc` but are **not yet auto-applied** by the Asio writer — wiring
-them into `serialize()` (order: conditional → range → compression) is the open
-follow-up.
+The Asio `ResponseWriter` applies three optional transforms at `serialize()`, in
+order **conditional → range → compression**, each enabled on the service
+(`enable_conditional()` / `enable_ranges()` / `enable_compression()`), all buffered
+GET-oriented (the Asio writer buffers the whole response):
 
-- **Compression** (`enable_compression`): negotiates `Content-Encoding` from
+- **Conditional** (`http_conditional.h`): a weak ETag `W/"<fnv1a64 hex>"` from the
+  body + `If-None-Match` → `304` (bodyless). Runs first so the ETag identifies the
+  resource, not the wire bytes; a handler that set its own `ETag` is left alone.
+  GET/HEAD 200s only.
+- **Range** (`http_range.h`): a single byte range → `206 Partial Content`
+  (`Content-Range`) / `416`; advertises `Accept-Ranges: bytes`. Forms `bytes=N-M`,
+  `bytes=N-`, `bytes=-N`; a multi-range/unrecognized header serves the full 200. A
+  206 is served uncompressed (range + content-coding is a tar pit). GET 200s only.
+- **Compression** (`http_compression.h`): negotiates `Content-Encoding` from
   `Accept-Encoding` (via `http::Accept`) and compresses with Kronuz/compressors,
-  setting `Content-Encoding` + `Vary` and a fresh `Content-Length`. Policy: compress
-  only when the client *explicitly* advertised a coding we produce (absent
-  `Accept-Encoding` → identity); skip below `min_size`, bodyless statuses
-  (204/304/1xx), an already-`Content-Encoding`'d response, and a result that didn't
-  shrink. zstd preferred over gzip; HTTP `deflate` intentionally omitted (raw-vs-zlib
-  ambiguity).
-- **Conditional** (helper): a weak ETag `W/"<fnv1a64 hex>"` from the body +
-  `If-None-Match` → `304` (bodyless). Runs before compression so the ETag identifies
-  the resource, not the wire bytes.
-- **Range** (helper): a single byte range → `206 Partial Content` / `416`; a 206 is
-  served uncompressed. Forms: `bytes=N-M`, `bytes=N-`, `bytes=-N`.
+  setting `Content-Encoding` + `Vary`. Policy: compress only when the client
+  *explicitly* advertised a coding we produce (absent `Accept-Encoding` → identity);
+  skip below `min_size`, bodyless statuses (204/304/1xx), a 206 slice, an
+  already-`Content-Encoding`'d response, and a result that didn't shrink. zstd
+  preferred over gzip; HTTP `deflate` intentionally omitted (raw-vs-zlib ambiguity).
+
+A `304` short-circuits range + compression; a `206` skips compression. `asio_test`
+[I]/[J] cover conditional/range; the parsers (`if_none_match`, `parse_byte_range`)
+also have direct unit coverage in `test/test.cc`.
 
 ## Roadmap
 
-- **Wire conditional + range into the Asio ResponseWriter** (compression is done).
-- **Flow-controlled request streaming** (pause the read when a slow sink fills).
+- **Response-side streaming** (chunked `Transfer-Encoding`) in the Asio writer — it
+  buffers the whole response today, so a huge `DUMP` is held in memory.
+- **Flow-controlled request back-pressure** (pause the read when a slow sink fills).
 - The Xapiand HTTP path already runs on this framework (`SearchApplication` is the
   `HttpHandler`); see the Xapiand repo for the manager integration.
 
