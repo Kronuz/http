@@ -44,6 +44,8 @@
 #pragma once
 
 #include <asio.hpp>
+#include <asio/experimental/awaitable_operators.hpp>
+#include <asio/experimental/concurrent_channel.hpp>
 
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -51,6 +53,7 @@
 #include <atomic>
 #include <cstddef>
 #include <exception>
+#include <future>
 #include <memory>
 #include <string>
 #include <thread>
@@ -236,29 +239,142 @@ struct AsioReactor {
 
 namespace detail {
 
-// Serve one connection: keep-alive loop of parse -> handler seam -> write. The handler
-// runs inline on the reactor, or (when a pool is configured and should_offload is true)
-// on the pool with the reactor free -- the un-stallable path.
+// The Asio-backed BodyReader: a bounded, thread-safe channel of raw body chunks. The
+// reactor coroutine pushes chunks and SUSPENDS when the channel is full (flow control /
+// back-pressure -> the socket read pauses, the reactor stays free); the handler, on its
+// worker thread, pulls them with a blocking read(). An empty chunk is the end-of-body
+// marker (real body chunks are never empty); abort() (a transport error) closes the
+// channel so a blocked read() returns false and the handler can see aborted().
+class ChannelBodyReader : public BodyReader {
+public:
+	using channel_type = asio::experimental::concurrent_channel<void(asio::error_code, std::string)>;
+
+	ChannelBodyReader(const asio::any_io_executor& ex, std::size_t capacity) : ch_(ex, capacity) {}
+
+	// consumer (handler worker): blocking pull; false at end-of-body or on abort.
+	bool read(std::string& chunk) override {
+		std::future<std::string> fut = ch_.async_receive(asio::use_future);
+		try {
+			std::string v = fut.get();
+			if (v.empty()) { return false; }   // end-of-body marker
+			chunk = std::move(v);
+			return true;
+		} catch (const std::exception&) {
+			return false;                       // channel closed (abort)
+		}
+	}
+
+	bool aborted() const { return aborted_.load(std::memory_order_acquire); }
+
+	// producer (reactor coroutine): suspends when the channel is full.
+	asio::awaitable<void> push(std::string chunk) {
+		co_await ch_.async_send(asio::error_code{}, std::move(chunk), asio::use_awaitable);
+	}
+	asio::awaitable<void> finish() {
+		co_await ch_.async_send(asio::error_code{}, std::string{}, asio::use_awaitable);   // end marker
+	}
+	void abort() {
+		aborted_.store(true, std::memory_order_release);
+		ch_.close();
+	}
+
+private:
+	channel_type ch_;
+	std::atomic<bool> aborted_{false};
+};
+
+// Serve one connection: keep-alive loop of parse -> handler seam -> write. A normal
+// request runs handle() inline on the reactor, or (pool + should_offload) on the pool
+// with the reactor free -- the un-stallable path. A request the handler marked
+// wants_body_stream runs CONCURRENTLY: the handler on the pool pulls body chunks from a
+// flow-controlled BodyReader that the reactor feeds -- O(buffer) memory for any size.
 inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, HttpHandler* handler,
                                               AsioReactor* reactor, const AsioResponseOptions* options) {
 	using asio::use_awaitable;
+	using namespace asio::experimental::awaitable_operators;
 	try {
 		asio::error_code opt_ec;
 		socket.set_option(asio::ip::tcp::no_delay(true), opt_ec);
+		auto ex = co_await asio::this_coro::executor;
 		RequestParser parser;
-		// The headers-complete hook: build the app's per-request extension, then let the
-		// app choose stream-vs-buffer. Returning a sink streams the body straight through
-		// (bounded memory, for a RESTORE/bulk load); nullptr buffers it into Request::body
-		// (small bodies). Runs on the reactor as the body is parsed -- exactly the old
-		// libev connection's model, now on Asio.
-		parser.set_headers_callback([handler](Request& req) -> std::unique_ptr<BodySink> {
+		// The headers-complete hook: build the app's per-request extension, then choose
+		// how to take the body -- concurrent pull streaming (needs a worker), push to an
+		// on_request_body sink, or buffer into Request::body.
+		parser.set_headers_callback([handler, reactor](Request& req) -> RequestParser::BodyIntake {
 			req.extension = handler->create_extension(req);
-			return handler->on_request_body(req);
+			RequestParser::BodyIntake intake;
+			if (reactor->pool != nullptr && handler->wants_body_stream(req)) {
+				intake.stream = true;
+			} else {
+				intake.sink = handler->on_request_body(req);
+			}
+			return intake;
 		});
 		std::string buffered;
 		char tmp[64 * 1024];
 
 		for (;;) {
+			// Phase 1: parse the request line + headers.
+			while (!parser.headers_done()) {
+				if (buffered.empty()) {
+					std::size_t n = co_await socket.async_read_some(asio::buffer(tmp), use_awaitable);
+					if (n == 0) { co_return; }
+					buffered.append(tmp, n);
+				}
+				std::size_t used = parser.feed(buffered.data(), buffered.size());
+				buffered.erase(0, used);
+				if (parser.errored()) { co_return; }
+			}
+
+			if (parser.streaming()) {
+				// ---- CONCURRENT PULL STREAMING ----
+				Request request = parser.take_headers();
+				bool keep_alive = request.keep_alive;
+				auto reader = std::make_shared<ChannelBodyReader>(ex, /*capacity=*/8);
+				request.body_reader = reader;
+				AsioResponseWriter writer(request, options);
+				asio::any_io_executor hexec(reactor->pool->get_executor());
+
+				// Feed the body (reactor, flow-controlled) and run the handler (pool)
+				// concurrently, then join. feed never throws -- a socket/parse error
+				// aborts the reader so the handler's read() returns false and unblocks.
+				auto feed = [&]() -> asio::awaitable<void> {
+					asio::error_code fec;
+					while (!parser.complete()) {
+						if (buffered.empty()) {
+							std::size_t n = co_await socket.async_read_some(asio::buffer(tmp),
+								asio::redirect_error(use_awaitable, fec));
+							if (fec || n == 0) { reader->abort(); co_return; }
+							buffered.append(tmp, n);
+						}
+						std::size_t used = parser.feed(buffered.data(), buffered.size());
+						buffered.erase(0, used);
+						if (parser.errored()) { reader->abort(); co_return; }
+						std::string chunk = parser.take_pending_body();
+						if (!chunk.empty()) { co_await reader->push(std::move(chunk)); }
+					}
+					co_await reader->finish();   // end-of-body marker
+				};
+				auto run = [&]() -> asio::awaitable<void> {
+					try { handler->handle(request, writer); }
+					catch (...) { if (!writer.ended()) { handler->on_error(std::current_exception(), request, writer); } }
+					co_return;
+				};
+				co_await (feed() && asio::co_spawn(hexec, run(), use_awaitable));
+
+				if (!writer.ended()) {
+					writer.status(500);
+					writer.write("Internal Server Error\n");
+					writer.end();
+				}
+				std::string out = writer.serialize(keep_alive);
+				co_await asio::async_write(socket, asio::buffer(out), use_awaitable);
+				if (!keep_alive || writer.wants_close()) { break; }
+				parser.reset();
+				continue;
+			}
+
+			// ---- BUFFERED / PUSH path ----
 			while (!parser.complete()) {
 				if (buffered.empty()) {
 					std::size_t n = co_await socket.async_read_some(asio::buffer(tmp), use_awaitable);

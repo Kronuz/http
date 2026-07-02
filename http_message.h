@@ -41,6 +41,8 @@ namespace http {
 
 using Headers = std::vector<std::pair<std::string, std::string>>;
 
+class BodyReader;   // http_handler.h -- the concurrent streaming pull seam (Request::body_reader)
+
 // The base for an application's typed per-request state. The library owns the
 // Request; an application attaches its own working state (a decoded body, resolved
 // routes, timings, ...) by subclassing this and returning it from
@@ -100,6 +102,11 @@ struct Request {
 	// carry what a streaming BodySink accumulated.
 	std::shared_ptr<void> user_data;
 
+	// Set by the framework when the handler opted into concurrent body streaming
+	// (wants_body_stream()); the handler PULLS raw body chunks from it (see BodyReader),
+	// on its worker, while the reactor feeds them flow-controlled. Null otherwise.
+	std::shared_ptr<BodyReader> body_reader;
+
 	// Typed per-request application state (see RequestExtension). Created once at
 	// headers-complete by HttpHandler::create_extension(), before on_request_body()
 	// and should_offload() so both can use it; reset when the connection is reused.
@@ -127,6 +134,7 @@ struct Request {
 		headers.clear(); body.clear();
 		http_major = 1; http_minor = 1; keep_alive = true;
 		user_data.reset();
+		body_reader.reset();
 		extension.reset();
 	}
 };

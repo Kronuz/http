@@ -16,7 +16,7 @@ routes, negotiates, frames, and writes. Header-only. Read `README.md` for the sh
 ```
 http_message.h        Request + the buffered Response value + reason_phrase().
 http_handler.h        HttpHandler (the seam) + ResponseWriter (buffered/streamed output)
-                      + BodySink (streamed request-body intake).
+                      + BodySink (push streaming) + BodyReader (concurrent pull streaming).
 http_router.h         Router — method/path dispatch; a thin binding over Kronuz/radix-router.
 http_accept.h         Accept — content negotiation (Accept / Accept-Encoding / …), RFC 7231.
 http_compression.h    Transparent response compression (Accept-Encoding → zstd/gzip).
@@ -116,23 +116,27 @@ reactors to one port:
   when `reuse_port` is off and there is more than one reactor. `asio_test [D2]` covers
   it.
 
-## Request-body intake (dual mode)
+## Request-body intake (three modes)
 
-The app chooses per endpoint via `on_request_body(Request&)`:
+Chosen at headers-complete:
 
-- **Buffered** (returns nullptr, the default): the body lands in `Request::body`. The
-  up-front reservation from `Content-Length` is capped (`kMaxBufferedReserve`) so a
-  hostile length can't force a giant allocation.
-- **Streamed** (returns a `BodySink`): body chunks go to the sink as parsed, nothing
-  accumulated — a multi-gigabyte `RESTORE`/bulk load runs in O(read-buffer) memory.
-  The decision is made at headers-complete (method/path/headers known, no body byte
-  yet). `asio_test [H]` streams a 2.4 MB NDJSON body and asserts `Request::body` stays
-  empty.
-
-The sink's `write()` runs on the reactor as bytes arrive, so a sink should do light
-work (enqueue/hash/write) and offload anything heavy. Flow-controlled back-pressure to
-the socket (pausing the read when the sink is slow) is a later refinement; today a
-sink bounds its own buffering.
+- **Buffered** (default): the body lands in `Request::body`. The up-front reservation
+  from `Content-Length` is capped (`kMaxBufferedReserve`) so a hostile length can't
+  force a giant allocation.
+- **Push-streamed** (`on_request_body` returns a `BodySink`): body chunks go to the
+  sink as parsed, on the reactor, nothing accumulated. For light per-chunk work.
+  `asio_test [H]` streams a 2.4 MB NDJSON body and asserts `Request::body` stays empty.
+- **Pull-streamed / concurrent** (`wants_body_stream` returns true, needs a worker
+  pool): the framework runs `handle()` on a worker *concurrently* with the body read
+  and gives it a `BodyReader` (`Request::body_reader`) to PULL raw chunks from.
+  `read()` blocks the worker until the next chunk; the reactor feeds through a bounded
+  `concurrent_channel` and suspends when full (flow control -> the reactor stays free,
+  back-pressure reaches the socket). O(buffer) memory for any size. The transport runs
+  `feed() && co_spawn(pool, handle)` (awaitable operators) and joins; feed never throws
+  (a socket/parse error `abort()`s the reader so the blocked `read()` returns false).
+  An empty chunk is the end-of-body marker. A streaming handler MUST drain the reader.
+  `asio_test [K]`: a 2 MB body through a slow consumer -- no loss under back-pressure +
+  a fast request served mid-stream (proving the reactor stays free).
 
 ## Response transforms (generic knobs)
 
@@ -165,9 +169,8 @@ also have direct unit coverage in `test/test.cc`.
 
 - **Response-side streaming** (chunked `Transfer-Encoding`) in the Asio writer — it
   buffers the whole response today, so a huge `DUMP` is held in memory.
-- **Flow-controlled request back-pressure** (pause the read when a slow sink fills).
 - The Xapiand HTTP path already runs on this framework (`SearchApplication` is the
-  `HttpHandler`); see the Xapiand repo for the manager integration.
+  `HttpHandler`); see the Xapiand repo for the manager integration + RESTORE streaming.
 
 ## Build / test
 

@@ -53,11 +53,19 @@ namespace http {
 
 class RequestParser {
 public:
+	// The transport's decision at headers-complete for how to take the body:
+	//   stream=true  -> CONCURRENT pull streaming (the handler pulls via a BodyReader);
+	//   sink!=null   -> push streaming (each chunk handed to the sink as parsed);
+	//   both empty   -> buffer into Request::body.
+	struct BodyIntake {
+		std::unique_ptr<BodySink> sink;
+		bool stream = false;
+	};
+
 	// The headers-complete hook: given the finalized request (line + headers, no body
-	// yet), return a BodySink to stream the body into, or nullptr to buffer it into
-	// Request::body. This is where the transport builds the app's per-request extension
-	// and asks the handler whether to stream (create_extension -> on_request_body).
-	using HeadersCallback = std::function<std::unique_ptr<BodySink>(Request&)>;
+	// yet), decide how to take the body. This is where the transport builds the app's
+	// per-request extension and asks the handler (wants_body_stream / on_request_body).
+	using HeadersCallback = std::function<BodyIntake(Request&)>;
 
 	RequestParser() {
 		http_parser_settings_init(&settings_);
@@ -84,6 +92,41 @@ public:
 
 	bool complete() const { return complete_; }
 
+	// True once the request line + headers are parsed (the body may still be arriving).
+	bool headers_done() const { return headers_done_; }
+
+	// True when the handler opted into concurrent pull streaming for this request. The
+	// transport then runs the handler while feeding body chunks it drains via
+	// take_pending_body(); the body is not in Request::body.
+	bool streaming() const { return pull_; }
+
+	// Move out the request at headers-complete (for the streaming path), keeping the
+	// parser feeding the body (chunks stage into pending_body_). The moved request has
+	// the method/path/headers/extension but no body.
+	Request take_headers() { return std::move(request_); }
+
+	// Drain the body bytes staged since the last call (streaming/pull mode only).
+	std::string take_pending_body() {
+		std::string out;
+		out.swap(pending_body_);
+		return out;
+	}
+
+	// Reset for the next request on the same connection (after a streamed request's
+	// response is written). Clears all per-request state and unpauses the parser.
+	void reset() {
+		request_.clear();
+		cur_field_.clear();
+		cur_value_.clear();
+		pending_body_.clear();
+		reading_value_ = false;
+		complete_ = false;
+		headers_done_ = false;
+		pull_ = false;
+		body_sink_.reset();
+		http_parser_pause(&parser_, 0);
+	}
+
 	// Unpause the parser after take(), so the next pipelined request on the same
 	// connection can be parsed. (on_message_complete pauses so exactly one request is
 	// produced per feed, leaving pipelined bytes buffered by the caller.)
@@ -104,6 +147,9 @@ public:
 		cur_value_.clear();
 		reading_value_ = false;
 		complete_ = false;
+		headers_done_ = false;
+		pull_ = false;
+		pending_body_.clear();
 		body_sink_.reset();
 		return out;
 	}
@@ -130,8 +176,11 @@ private:
 	std::string cur_value_;
 	bool reading_value_ = false;
 	bool complete_ = false;
+	bool headers_done_ = false;
+	bool pull_ = false;                     // concurrent pull streaming (body -> pending_body_)
 	HeadersCallback headers_cb_;
-	std::unique_ptr<BodySink> body_sink_;   // non-null => this request is streaming
+	std::string pending_body_;              // staged body bytes for the pull path
+	std::unique_ptr<BodySink> body_sink_;   // non-null => push streaming to the sink
 
 	void finalize() {
 		request_.method = http_method_str(static_cast<enum http_method>(parser_.method));
@@ -179,19 +228,26 @@ private:
 			c->reading_value_ = false;
 		}
 		c->finalize();
-		// Let the transport build the extension and choose stream-vs-buffer. A sink means
-		// the body streams straight to the app (bounded memory); nullptr buffers it.
-		if (c->headers_cb_) { c->body_sink_ = c->headers_cb_(c->request_); }
-		if (!c->body_sink_) {
+		// Let the transport build the extension and choose how to take the body:
+		// concurrent pull streaming, push to a sink, or buffer into Request::body.
+		if (c->headers_cb_) {
+			BodyIntake intake = c->headers_cb_(c->request_);
+			c->pull_ = intake.stream;
+			c->body_sink_ = std::move(intake.sink);
+		}
+		if (!c->pull_ && !c->body_sink_) {
 			auto cl = c->content_length();
 			if (cl != 0) { c->request_.body.reserve(std::min(cl, kMaxBufferedReserve)); }
 		}
+		c->headers_done_ = true;
 		return 0;
 	}
 	static int on_body_cb(http_parser* p, const char* at, std::size_t len) {
 		auto* c = self(p);
-		if (c->body_sink_) {
-			c->body_sink_->write(std::string_view(at, len));   // stream: never accumulated
+		if (c->pull_) {
+			c->pending_body_.append(at, len);                  // stage for the pull reader
+		} else if (c->body_sink_) {
+			c->body_sink_->write(std::string_view(at, len));   // push: never accumulated
 		} else {
 			c->request_.body.append(at, len);                  // buffer (small bodies)
 		}

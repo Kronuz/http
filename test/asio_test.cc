@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -82,6 +83,31 @@ struct StreamApp : http::HttpHandler {
 			return std::make_unique<CountSink>(ctx);
 		}
 		return nullptr;   // every other route buffers into Request::body
+	}
+};
+
+// ---- concurrent pull streaming: a handler that pulls the body from a BodyReader on its
+// worker (slowly), while the reactor feeds it flow-controlled. Also serves a fast route to
+// prove the reactor stays free during a back-pressured stream.
+struct ConcurrentStreamApp : http::HttpHandler {
+	bool wants_body_stream(const http::Request& r) override { return r.method == "POST" && r.path == "/restore"; }
+	bool should_offload(const http::Request&) const override { return true; }
+	void handle(const http::Request& req, http::ResponseWriter& resp) override {
+		if (req.path == "/fast") { resp.send(200, "fast\n"); return; }
+		if (req.path == "/restore" && req.body_reader) {
+			std::size_t total = 0;
+			std::uint64_t sum = 0;
+			std::string chunk;
+			while (req.body_reader->read(chunk)) {   // blocking pull on the worker
+				total += chunk.size();
+				for (unsigned char c : chunk) { sum += c; }
+				std::this_thread::sleep_for(std::chrono::milliseconds(2));   // slow consumer
+			}
+			bool empty_body = req.body.empty();
+			resp.send(200, std::to_string(total) + " " + std::to_string(sum) + (empty_body ? " empty\n" : " buffered\n"));
+			return;
+		}
+		resp.send(404, "nope\n");
 	}
 };
 
@@ -404,6 +430,38 @@ int main() {
 		check(has_header(full.headers, "Accept-Ranges", "bytes"), "a rangeable 200 advertises Accept-Ranges: bytes");
 		auto bad = do_get_h(port, "/big", "Range: bytes=" + std::to_string(total + 100) + "-");
 		check(bad.status == 416, "an unsatisfiable range -> 416");
+	}
+	// [K] Concurrent pull streaming: a slow-consuming streaming handler + a large body.
+	// Asserts no data loss under back-pressure (count + checksum) AND that the reactor
+	// stays free (a fast request on another connection is served mid-stream).
+	{
+		unsigned short port = free_port();
+		ConcurrentStreamApp capp;
+		http::HttpAsioService svc(capp, 1, 4, 64);   // 1 reactor, 4 workers (streaming needs a pool)
+		svc.start(port); wait_listen(port);
+
+		const std::size_t N = 2u * 1024 * 1024;   // 2 MB, >> the 8x64KB channel window
+		std::string body;
+		body.reserve(N);
+		std::uint64_t expect_sum = 0;
+		for (std::size_t i = 0; i < N; ++i) { char c = static_cast<char>(i & 0xff); body += c; expect_sum += static_cast<unsigned char>(c); }
+
+		Resp restore;
+		std::thread t([&] { restore = do_post(port, "/restore", body); });
+
+		std::this_thread::sleep_for(std::chrono::milliseconds(60));   // let /restore get going + back-pressure
+		auto t0 = std::chrono::steady_clock::now();
+		auto fast = do_request(port, "/fast");
+		double fast_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+		t.join();
+
+		std::printf("  [K] concurrent stream: /restore -> %d %s| /fast %.1f ms mid-stream\n",
+			restore.status, restore.body.c_str(), fast_ms);
+		check(restore.status == 200, "streamed restore answered 200");
+		check(restore.body.find(std::to_string(N)) != std::string::npos, "all bytes delivered (no loss under back-pressure)");
+		check(restore.body.find(std::to_string(expect_sum)) != std::string::npos, "checksum matches (data intact + ordered)");
+		check(restore.body.find("empty") != std::string::npos, "body streamed, request.body never buffered");
+		check(fast.status == 200 && fast_ms < 250.0, "reactor stays free: a fast request is served while a slow stream is back-pressured");
 	}
 
 	std::printf("\n%s (%d failures)\n", g_fail == 0 ? "PASS" : "FAIL", g_fail);

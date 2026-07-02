@@ -87,18 +87,25 @@ A saturated offload window sheds load as `503` instead of growing an unbounded q
 
 ### Bodies: bounded memory for any size
 
-Request-body intake is dual-mode, chosen by the app per endpoint:
+Request-body intake has three modes, chosen at headers-complete:
 
 - **Buffered** (default): the whole body lands in `Request::body`. Convenient for
   small requests; the up-front reservation from `Content-Length` is capped so a
   hostile length can't force a giant allocation.
-- **Streamed** (`on_request_body` returns a `BodySink`): each body chunk is handed to
-  the sink as it is parsed and **nothing is accumulated**. A multi-gigabyte `RESTORE`
-  or NDJSON bulk load flows through in O(read-buffer) memory — it is never held whole.
+- **Push-streamed** (`on_request_body` returns a `BodySink`): each body chunk is
+  handed to the sink as it is parsed, on the reactor, and nothing is accumulated.
+  For light per-chunk work (hashing, line-counting).
+- **Pull-streamed / concurrent** (`wants_body_stream` returns true): the framework
+  runs `handle()` on a worker *concurrently* with the body read and gives it a
+  `BodyReader` to PULL raw chunks from. `read()` blocks the worker until the next
+  chunk (or end); the reactor feeds chunks through a bounded, flow-controlled channel
+  and **suspends when it is full** (stays free to serve others, and back-pressure
+  reaches the socket). A multi-gigabyte `RESTORE`/bulk load is indexed as it arrives,
+  in O(buffer) memory. The app parses the chunks in its own format; the framework owns
+  the transport, the concurrency, and the back-pressure.
 
-The sink's `write()` runs on the reactor as bytes arrive, so a sink should do light
-work (enqueue, hash, write to disk) and offload anything heavy; that keeps the read
-side non-blocking.
+Push-streamed sinks run on the reactor, so keep their work light; heavy consumption
+belongs on the pull path (a worker).
 
 ## Extension points
 
@@ -109,7 +116,8 @@ editing it:
 |---|---|
 | `handle(request, writer)` | the request handler (route + respond). |
 | `create_extension(request)` | attach typed per-request state, built at headers-complete. |
-| `on_request_body(request)` | opt into streaming: return a `BodySink`, or nullptr to buffer. |
+| `on_request_body(request)` | opt into push streaming: return a `BodySink` (light per-chunk work on the reactor), or nullptr to buffer. |
+| `wants_body_stream(request)` | opt into concurrent pull streaming: `handle()` runs on a worker and pulls raw chunks from `Request::body_reader`, flow-controlled (O(buffer) memory). |
 | `should_offload(request)` | run this request on the offload pool vs inline. |
 | `on_error(exc, request, writer)` | map an exception to a response (default 500). |
 | `CompressionOptions::add_coding` | register a content-coding (the app owns the codec). |
@@ -137,6 +145,5 @@ A `304` short-circuits range + compression; a `206` skips compression.
 
 Response-side *streaming* (chunked `Transfer-Encoding`) is not in the Asio writer yet
 — it buffers the whole response, so the transforms above always have the full body to
-work on, but a huge `DUMP` response is held in memory. True incremental *request*
-streaming is done; flow-controlled back-pressure to the socket when a sink is slow
-(pausing the read) is a later refinement — today a sink bounds its own buffering.
+work on, but a huge `DUMP` response is held in memory. Request-side streaming (both
+push and concurrent pull, with flow control) is done.

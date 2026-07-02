@@ -111,6 +111,26 @@ public:
 };
 
 
+// Concurrent streaming intake -- the reusable "true streaming" path. When a handler
+// returns true from wants_body_stream(), the framework runs handle() on a worker
+// *concurrently* with the body read and hands it a BodyReader to PULL raw body chunks
+// from: read() blocks the worker until the next chunk arrives (or the body ends), while
+// the reactor feeds chunks with flow control -- it suspends when the reader's bounded
+// buffer is full, so a multi-gigabyte body flows through in O(buffer) memory, the
+// reactor stays free, and back-pressure reaches the socket. The application parses and
+// consumes the chunks in whatever format it owns (NDJSON, MsgPack, a file upload); the
+// framework owns the transport, the concurrency, and the back-pressure. This is the
+// abstract seam -- the transport provides the concrete (Asio-backed) implementation.
+class BodyReader {
+public:
+	virtual ~BodyReader() = default;
+	// Pull the next body chunk into `chunk`. Blocks until one is available; returns
+	// false once the body is fully delivered. Call from the handler (on its worker
+	// thread), never from the reactor.
+	virtual bool read(std::string& chunk) = 0;
+};
+
+
 class HttpHandler {
 public:
 	virtual ~HttpHandler() = default;
@@ -119,8 +139,19 @@ public:
 	// Opt in to streaming the request body: return a sink to receive it
 	// incrementally, or nullptr (default) to have it buffered into Request::body.
 	// Called once when the headers are complete, before any body byte, so the
-	// decision can use the method, path, and headers (e.g. Content-Type).
+	// decision can use the method, path, and headers (e.g. Content-Type). Ignored when
+	// wants_body_stream() returns true (that path takes precedence).
 	virtual std::unique_ptr<BodySink> on_request_body(Request& /*request*/) { return nullptr; }
+
+	// Opt in to CONCURRENT body streaming (the true-streaming path, for a large or
+	// unbounded body consumed by heavy work -- indexing a RESTORE). Return true and the
+	// framework runs handle() on a worker while it feeds the body, which the handler
+	// PULLS from Request::body_reader (see BodyReader) with flow control -- O(buffer)
+	// memory for any size. Decided at headers-complete (method/path/headers known).
+	// Default false: the body buffers into Request::body (or an on_request_body sink)
+	// and handle() runs after it is fully received. Takes precedence over
+	// on_request_body(). A streaming handler MUST drain body_reader to completion.
+	virtual bool wants_body_stream(const Request& /*request*/) { return false; }
 
 	// Create this request's typed application extension (see RequestExtension), or
 	// nullptr (default) for none. Called once at headers-complete -- before
