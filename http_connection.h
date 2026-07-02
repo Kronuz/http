@@ -308,6 +308,15 @@ class HttpConnection : public BaseClient<HttpConnection> {
 	std::string pending_input_;
 	std::atomic<bool> offloaded_{false};
 	std::atomic<bool> complete_keep_alive_{true};
+	// The worker signals completion (end()) while it still holds writer_, but the
+	// reactor must not reset writer_ for the next request until the worker has fully
+	// released it. So on the offload path end() records the completion here rather
+	// than waking the reactor directly; run_offloaded() fires the wake as its last
+	// act, once it is done touching writer_. in_offloaded_task_ marks that window so
+	// a handler that instead completes *after* run_offloaded() returns (a future
+	// async handler) still wakes the reactor immediately.
+	std::atomic<bool> completion_pending_{false};
+	std::atomic<bool> in_offloaded_task_{false};
 
 public:
 	HttpConnection(const std::shared_ptr<Worker>& parent, ev::loop_ref* loop, unsigned int flags, HttpHandler& handler, Dispatcher* dispatcher = nullptr, const ResponseOptions* response = nullptr)
@@ -387,7 +396,15 @@ private:
 	void response_finished(bool keep_alive) {
 		if (offloaded_.load(std::memory_order_acquire)) {
 			complete_keep_alive_.store(keep_alive, std::memory_order_relaxed);
-			complete_async_.send();   // thread-safe; wakes the reactor
+			// Defer the wake until run_offloaded() has released writer_ (its tail), so
+			// the reactor can't reset writer_ for the next request while the worker is
+			// still in run_offloaded(). If the handler completed after run_offloaded()
+			// already returned (a future async handler), the worker is gone -- wake now.
+			if (in_offloaded_task_.load(std::memory_order_acquire)) {
+				completion_pending_.store(true, std::memory_order_release);
+			} else {
+				complete_async_.send();   // thread-safe; wakes the reactor
+			}
 			return;
 		}
 		complete_response(keep_alive);
@@ -483,12 +500,21 @@ private:
 	// and drives writer_ (whose write path is thread-safe); it must NOT touch the
 	// reactor-owned connection state -- end() routes completion back via the async.
 	void run_offloaded() {
+		in_offloaded_task_.store(true, std::memory_order_release);
 		try {
 			handler_.handle(request_, writer_);
 		} catch (...) {
 			if (!writer_.ended()) { writer_.send(500, "Internal Server Error\n"); }
 		}
 		if (!writer_.ended()) { writer_.end(); }   // a handler that neither ended nor threw still completes
+		// The worker is done touching writer_. Now it is safe for the reactor to
+		// complete + reuse the connection: fire the wake end() deferred above (or, if
+		// a future async handler ended after we returned here, response_finished()
+		// already woke the reactor directly).
+		in_offloaded_task_.store(false, std::memory_order_release);
+		if (completion_pending_.exchange(false, std::memory_order_acq_rel)) {
+			complete_async_.send();
+		}
 	}
 
 	// Runs on the reactor when a worker signals completion: finish the response and
