@@ -42,6 +42,7 @@
 #include "http_handler.h"
 #include "http_router.h"
 #include "http_server.h"
+#include "reactor_pool.h"          // Kronuz/server: the multi-reactor runtime
 
 using clock_type = std::chrono::steady_clock;
 static double ms_since(clock_type::time_point t0) {
@@ -615,6 +616,30 @@ int main() {
 		std::printf("  [L] error hook: mapped -> %d, unmapped -> %d\n", mapped.status, fallback.status);
 		CHECK(mapped.status == 404 && mapped.body == "Not Found\n", "on_error maps the app's exception to 404");
 		CHECK(fallback.status == 500, "an exception the app doesn't map falls back to the generic 500");
+	}
+
+	// ---- M. ReactorPool: N reactors on one port via the runtime -----------------
+	// The multi-reactor runtime (Kronuz/server): ReactorPool spawns N HttpServices,
+	// each on its own thread + loop + pool (shared-nothing), all bound to one port
+	// with reuse_port. This is the protocol-agnostic scaling layer -- the pool knows
+	// nothing of HTTP; it just runs N of a Service. Every request is served.
+	{
+		uint16_t port = find_free_port();
+		ReactorPool<http::HttpService> pool(3, [&handler] {
+			auto svc = http::HttpService::create(handler, /*workers=*/4, /*queue_limit=*/64);
+			http::BindOptions bind;
+			bind.reuse_port = true;
+			svc->set_bind_options(bind);
+			return svc;
+		});
+		pool.start(port);   // returns once all 3 reactors are bound + listening
+
+		auto res = fire(port, "/fast", 60);
+		int n200 = count_status(res, 200);
+		std::printf("  [M] ReactorPool: %zu reactors on one port -> %d/60 served 200\n", pool.size(), n200);
+		CHECK(n200 == 60, "every request is served by the ReactorPool's N shared-nothing reactors");
+
+		pool.stop();
 	}
 
 	std::printf("\n%s (%d failures)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures);
