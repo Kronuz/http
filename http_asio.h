@@ -50,6 +50,7 @@
 #include <asio.hpp>
 #include <asio/experimental/concurrent_channel.hpp>
 
+#include <array>
 #include <condition_variable>
 #include <cstddef>
 #include <deque>
@@ -107,7 +108,9 @@ public:
 	// Apply the response transforms and frame the HTTP/1.1 response bytes. Transforms
 	// run in order: conditional (may flip to a bodyless 304) -> range (may flip to a
 	// 206 slice or 416) -> compression (self-skips 204/206/304 and tiny bodies).
-	std::string serialize(bool keep_alive) {
+	// Builds only the status line + headers; the body is written separately (scatter
+	// -gather) so it is never copied into this string. See has_body()/body().
+	std::string serialize_head(bool keep_alive) {
 		maybe_conditional();
 		if (status_ != 304) { maybe_range(); }
 		maybe_compress();
@@ -126,9 +129,12 @@ public:
 		}
 		out += (keep_alive && !close_) ? "Connection: keep-alive\r\n" : "Connection: close\r\n";
 		out += "\r\n";
-		if (status_ != 304) { out += body_; }
 		return out;
 	}
+
+	// The finalised body, valid after serialize_head(). Written as its own buffer.
+	bool has_body() const { return status_ != 304 && !body_.empty(); }
+	const std::string& body() const { return body_; }
 
 private:
 	const Request& request_;
@@ -386,8 +392,13 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 					writer.write("Internal Server Error\n");
 					writer.end();
 				}
-				std::string out = writer.serialize(keep_alive);
-				co_await asio::async_write(socket, asio::buffer(out), use_awaitable);
+				std::string head = writer.serialize_head(keep_alive);
+				if (writer.has_body()) {
+					std::array<asio::const_buffer, 2> bufs{ asio::buffer(head), asio::buffer(writer.body()) };
+					co_await asio::async_write(socket, bufs, use_awaitable);
+				} else {
+					co_await asio::async_write(socket, asio::buffer(head), use_awaitable);
+				}
 				if (!keep_alive || writer.wants_close()) { break; }
 				parser.reset();
 				continue;
@@ -420,12 +431,24 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 						writer.end();
 						offloaded_503 = true;
 					} else {
-						// THE UN-STALLABLE OFFLOAD: run handle() on the pool, resume here.
-						co_await asio::co_spawn(reactor->pool()->get_executor(),
-							[handler, &request, &writer]() -> asio::awaitable<void> {
-								handler->handle(request, writer);
-								co_return;
-							}, use_awaitable);
+						// THE UN-STALLABLE OFFLOAD: hop this coroutine onto the pool,
+						// run the (blocking) handler there so the reactor stays free,
+						// then hop back. Two posts instead of a co_spawn avoids
+						// allocating a nested coroutine frame for every request. The
+						// hop back must run even on exception, because the socket and
+						// writer belong to the reactor -- touching them from a pool
+						// thread would be a data race; so catch, hop back, rethrow.
+						std::exception_ptr eptr;
+						co_await asio::post(reactor->pool()->get_executor(), use_awaitable);
+						try {
+							handler->handle(request, writer);
+						} catch (...) {
+							eptr = std::current_exception();
+						}
+						co_await asio::post(ex, use_awaitable);
+						if (eptr) {
+							std::rethrow_exception(eptr);  // outer catch: leaves gate + maps error
+						}
 						reactor->gate().leave();
 					}
 				} else {
@@ -441,8 +464,13 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 				}
 			}
 
-			std::string out = writer.serialize(keep_alive);
-			co_await asio::async_write(socket, asio::buffer(out), use_awaitable);
+			std::string head = writer.serialize_head(keep_alive);
+			if (writer.has_body()) {
+				std::array<asio::const_buffer, 2> bufs{ asio::buffer(head), asio::buffer(writer.body()) };
+				co_await asio::async_write(socket, bufs, use_awaitable);
+			} else {
+				co_await asio::async_write(socket, asio::buffer(head), use_awaitable);
+			}
 			if (!keep_alive || writer.wants_close()) { break; }
 		}
 	} catch (const std::exception&) {
