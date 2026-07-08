@@ -151,9 +151,9 @@ order, each a generic knob the app turns on (`enable_conditional` / `enable_rang
 
 A `304` short-circuits range + compression; a `206` skips compression.
 
-## Not yet here
+## Limitations
 
 Response-side *streaming* (chunked `Transfer-Encoding`) is not in the Asio writer yet
 — it buffers the whole response, so the transforms above always have the full body to
-work on, but a huge `DUMP` response is held in memory. Request-side streaming (both
-push and concurrent pull, with flow control) is done.
+work on, but a huge response is held in memory. Request-side streaming (both push and
+concurrent pull, with flow control) is done.

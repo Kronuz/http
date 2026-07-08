@@ -3,8 +3,8 @@
 A generic, extensible HTTP/1.1 application framework on
 [standalone Asio](https://think-async.com/Asio/) (C++20 coroutines).
 
-This is **Leg 2** of inverting Xapiand: it draws the seam where the application
-sits *above* the server. An application implements one interface —
+It puts the application *above* the server behind a single seam: an application
+implements one interface —
 
 ```cpp
 struct HttpHandler {

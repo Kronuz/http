@@ -5,8 +5,8 @@ Orientation for anyone (human or agent) working on this library.
 ## What this is
 
 A generic, extensible HTTP/1.1 application framework on **standalone Asio** (C++20
-coroutines) — **Leg 2** of inverting Xapiand, the seam where the application sits
-*above* the server. An application implements one interface,
+coroutines). It puts the application *above* the server, behind one seam: the
+application implements one interface,
 `HttpHandler::handle(const Request&, ResponseWriter&)`, and the framework parses,
 routes, negotiates, frames, and writes. Header-only. Read `README.md` for the shape,
 `ARCHITECTURE.md` for the request lifecycle; this is the working notes.
@@ -180,12 +180,11 @@ A `304` short-circuits range + compression; a `206` skips compression. `asio_tes
 [I]/[J] cover conditional/range; the parsers (`if_none_match`, `parse_byte_range`)
 also have direct unit coverage in `test/test.cc`.
 
-## Roadmap
+## Limitations
 
-- **Response-side streaming** (chunked `Transfer-Encoding`) in the Asio writer — it
-  buffers the whole response today, so a huge `DUMP` is held in memory.
-- The Xapiand HTTP path already runs on this framework (`SearchApplication` is the
-  `HttpHandler`); see the Xapiand repo for the manager integration + RESTORE streaming.
+- **Response-side streaming** (chunked `Transfer-Encoding`) is not in the Asio writer
+  yet — it buffers the whole response, so a huge response is held in memory.
+  Request-side streaming (push and concurrent pull) is done.
 
 ## Build / test
 
