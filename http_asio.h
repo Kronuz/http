@@ -91,19 +91,30 @@ struct AsioResponseOptions {
 // The buffered ResponseWriter: the handler sets status/headers and writes the body;
 // on serialize() the transforms run and the HTTP/1.1 bytes are framed (Content-Length
 // + Connection are the transport's, everything else is the app's).
-class AsioResponseWriter : public ResponseWriter {
+class AsioResponseWriter : public ResponseWriter, public BufferedResponse {
 public:
 	AsioResponseWriter(const Request& request, const AsioResponseOptions* options)
 		: request_(request), options_(options) {}
 
-	void status(int code) override { status_ = code; }
+	void status(int code) override { status_ = code; started_ = true; }
 	void set_header(std::string_view name, std::string_view value) override { headers_.emplace_back(name, value); }
-	void write(std::string_view chunk) override { body_.append(chunk); }
+	void write(std::string_view chunk) override { started_ = true; body_.append(chunk); }
 	void end() override { ended_ = true; }
 	void set_close() override { close_ = true; }
 
 	bool ended() const { return ended_; }
 	bool wants_close() const { return close_; }
+
+	// BufferedResponse: read the app-level response back by reference (the transforms
+	// in serialize_head() run later, so this is the pre-transform view a logger wants).
+	int response_code() const override { return status_; }
+	bool response_started() const override { return started_; }
+	const Headers& response_headers() const override { return headers_; }
+	std::string_view response_body() const override { return body_; }
+	std::string_view response_content_type() const override {
+		for (const auto& [k, v] : headers_) { if (iequal(k, "Content-Type")) { return v; } }
+		return "text/plain; charset=utf-8";
+	}
 
 	// Apply the response transforms and frame the HTTP/1.1 response bytes. Transforms
 	// run in order: conditional (may flip to a bodyless 304) -> range (may flip to a
@@ -144,6 +155,7 @@ private:
 	std::string body_;
 	bool ended_ = false;
 	bool close_ = false;
+	bool started_ = false;
 
 	bool has_header(std::string_view name) const {
 		for (const auto& [k, v] : headers_) { if (iequal(k, name)) { return true; } }

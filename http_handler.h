@@ -95,6 +95,29 @@ public:
 };
 
 
+// A capability a ResponseWriter can advertise: it retains what it was given (status,
+// headers, body) so a middleware can read the response back by reference instead of
+// capturing a second copy. A writer that fully buffers its response (e.g. to compute
+// Content-Length) implements this at no extra cost; a streaming / non-buffering writer
+// does not, and a middleware that needs the bytes falls back to its own capture. The
+// returned views are valid until the response is serialized/sent, i.e. for as long as
+// the writer is alive after handle() returns.
+class BufferedResponse {
+public:
+	virtual ~BufferedResponse() = default;
+	// The status set so far (the writer's default until the handler sets one).
+	virtual int response_code() const = 0;
+	// Whether the handler began a response at all (set a status or wrote a byte).
+	virtual bool response_started() const = 0;
+	// The response headers, by reference.
+	virtual const Headers& response_headers() const = 0;
+	// The retained response body, by reference.
+	virtual std::string_view response_body() const = 0;
+	// The Content-Type value (or the writer's default if the handler set none).
+	virtual std::string_view response_content_type() const = 0;
+};
+
+
 // Optional opt-in streaming intake. An application returns a BodySink from
 // HttpHandler::on_request_body() to receive the request body incrementally
 // instead of having it buffered: the connection calls write() for each chunk as
