@@ -49,6 +49,7 @@
 
 #include <asio.hpp>
 #include <asio/experimental/concurrent_channel.hpp>
+#include <asio/experimental/awaitable_operators.hpp>
 
 #include <array>
 #include <condition_variable>
@@ -88,6 +89,54 @@ struct AsioResponseOptions {
 	CompressionOptions compression{};
 };
 
+namespace detail {
+// Owner-only timers/cancellation are detached before runtime destruction. Escaped
+// producers retain only the protocol exchange; their wakeup holds a weak control.
+class AsioDeferredControl : public reactor::Abortable, public std::enable_shared_from_this<AsioDeferredControl> {
+public:
+	static std::shared_ptr<AsioDeferredControl> create(asio::any_io_executor executor, DeferredOptions options) {
+		auto control = std::shared_ptr<AsioDeferredControl>(new AsioDeferredControl(std::move(executor)));
+		std::weak_ptr<AsioDeferredControl> weak = control;
+		control->exchange = std::make_shared<DeferredExchange>(std::move(options), [weak] { if (auto c = weak.lock()) { c->notify(); } });
+		return control;
+	}
+	void abort() override { exchange->close(ReplySettlement::Shutdown); }
+	void disable() noexcept {
+		std::lock_guard lock(gate_); active_ = false; executor_.reset(); timer_.reset(); cancellation_.reset();
+	}
+	asio::awaitable<void> wait() {
+		while (exchange->phase() == DeferredExchange::Phase::Waiting) {
+			timer_->expires_at(exchange->deadline());
+			asio::error_code error; co_await timer_->async_wait(asio::redirect_error(asio::use_awaitable, error));
+			if (!error) { exchange->close(ReplySettlement::TimedOut); }
+			else if (error != asio::error::operation_aborted) { exchange->close(ReplySettlement::Failed); }
+			else { auto cancellation = co_await asio::this_coro::cancellation_state; if (cancellation.cancelled() != asio::cancellation_type::none) { co_return; } }
+		}
+	}
+	asio::cancellation_slot write_cancellation() { return cancellation_->slot(); }
+	std::shared_ptr<DeferredExchange> exchange;
+private:
+	explicit AsioDeferredControl(asio::any_io_executor executor)
+		: executor_(executor), timer_(std::make_unique<asio::steady_timer>(executor)), cancellation_(std::make_unique<asio::cancellation_signal>()) {}
+	void notify() {
+		std::lock_guard lock(gate_);
+		if (!active_) { return; }
+		std::weak_ptr<AsioDeferredControl> weak = shared_from_this();
+		asio::post(*executor_, [weak] {
+			if (auto control = weak.lock()) {
+				{ std::lock_guard lock(control->gate_); if (!control->active_) { return; } }
+				control->timer_->cancel();
+				if (control->exchange->phase() == DeferredExchange::Phase::Closing) { control->cancellation_->emit(asio::cancellation_type::all); }
+			}
+		});
+	}
+	std::mutex gate_; bool active_ = true;
+	std::optional<asio::any_io_executor> executor_;
+	std::unique_ptr<asio::steady_timer> timer_;
+	std::unique_ptr<asio::cancellation_signal> cancellation_;
+};
+} // namespace detail
+
 // The buffered ResponseWriter: the handler sets status/headers and writes the body;
 // on serialize() the transforms run and the HTTP/1.1 bytes are framed (Content-Length
 // + Connection are the transport's, everything else is the app's).
@@ -95,12 +144,29 @@ class AsioResponseWriter : public ResponseWriter, public BufferedResponse {
 public:
 	AsioResponseWriter(const Request& request, const AsioResponseOptions* options)
 		: request_(request), options_(options) {}
+	AsioResponseWriter(const Request& request, const AsioResponseOptions* options, const asio::any_io_executor* executor, reactor::Reactor* reactor)
+		: request_(request), options_(options), executor_(executor), reactor_(reactor) {}
+	~AsioResponseWriter() override {
+		if (deferred_) { try { deferred_->exchange->close(ReplySettlement::Shutdown); } catch (...) {} deferred_->disable(); try { deferred_->exchange->settle(ReplySettlement::Shutdown); } catch (...) {} }
+	}
+	std::unique_ptr<DeferredReply> defer(DeferredOptions options) override {
+		if (!executor_) { return {}; }
+		if (started_ || ended_ || !headers_.empty() || close_ || deferred_) { throw std::logic_error("response authority already used"); }
+		auto control = detail::AsioDeferredControl::create(*executor_, std::move(options));
+		if (reactor_) { reactor_->track(control); }
+		auto capability = std::make_unique<DeferredReply>(control->exchange); deferred_ = std::move(control); return capability;
+	}
+	const std::shared_ptr<detail::AsioDeferredControl>& deferred() const noexcept { return deferred_; }
+	void adopt_deferred(Response response) {
+		if (!deferred_ || deferred_->exchange->phase() != detail::DeferredExchange::Phase::Writing) { throw std::logic_error("deferred response unavailable"); }
+		status_ = response.status; headers_ = std::move(response.headers); headers_.emplace_back("Content-Type", std::move(response.content_type)); body_ = std::move(response.body); close_ = response.close; started_ = ended_ = true;
+	}
 
-	void status(int code) override { status_ = code; started_ = true; }
-	void set_header(std::string_view name, std::string_view value) override { headers_.emplace_back(name, value); }
-	void write(std::string_view chunk) override { started_ = true; body_.append(chunk); }
-	void end() override { ended_ = true; }
-	void set_close() override { close_ = true; }
+	void status(int code) override { synchronous(); status_ = code; started_ = true; }
+	void set_header(std::string_view name, std::string_view value) override { synchronous(); headers_.emplace_back(name, value); }
+	void write(std::string_view chunk) override { synchronous(); started_ = true; body_.append(chunk); }
+	void end() override { synchronous(); ended_ = true; }
+	void set_close() override { synchronous(); close_ = true; }
 
 	bool ended() const { return ended_; }
 	bool wants_close() const { return close_; }
@@ -122,9 +188,7 @@ public:
 	// Builds only the status line + headers; the body is written separately (scatter
 	// -gather) so it is never copied into this string. See has_body()/body().
 	std::string serialize_head(bool keep_alive) {
-		maybe_conditional();
-		if (status_ != 304) { maybe_range(); }
-		maybe_compress();
+		if (!deferred_) { maybe_conditional(); if (status_ != 304) { maybe_range(); } maybe_compress(); }
 		std::string out = "HTTP/1.1 ";
 		out += std::to_string(status_);
 		out += ' ';
@@ -148,6 +212,10 @@ public:
 	const std::string& body() const { return body_; }
 
 private:
+	void synchronous() const { if (deferred_) { throw std::logic_error("response authority was deferred"); } }
+	const asio::any_io_executor* executor_ = nullptr;
+	reactor::Reactor* reactor_ = nullptr;
+	std::shared_ptr<detail::AsioDeferredControl> deferred_;
 	const Request& request_;
 	const AsioResponseOptions* options_;
 	int status_ = 200;
@@ -308,6 +376,43 @@ private:
 // with the reactor free -- the un-stallable path. A request the handler marked
 // wants_body_stream runs CONCURRENTLY: the handler on the pool pulls body chunks from a
 // flow-controlled BodyReader that the reactor feeds -- O(buffer) memory for any size.
+inline asio::awaitable<ReplySettlement> write_before_deadline(asio::ip::tcp::socket& socket,
+	std::array<asio::const_buffer, 2> buffers, std::chrono::steady_clock::time_point deadline) {
+	using namespace asio::experimental::awaitable_operators;
+	auto executor = co_await asio::this_coro::executor; asio::steady_timer timer(executor); timer.expires_at(deadline);
+	asio::error_code write_error, timer_error;
+	auto winner = co_await (asio::async_write(socket, buffers, asio::redirect_error(asio::use_awaitable, write_error)) || timer.async_wait(asio::redirect_error(asio::use_awaitable, timer_error)));
+	if (winner.index() == 0) { co_return write_error ? ReplySettlement::Disconnected : ReplySettlement::Written; }
+	co_return timer_error ? ReplySettlement::Failed : ReplySettlement::TimedOut;
+}
+inline asio::awaitable<bool> write_response(asio::ip::tcp::socket& socket, AsioResponseWriter& writer, bool keep_alive) {
+	auto control = writer.deferred();
+	if (control) {
+		if (control->exchange->phase() == DeferredExchange::Phase::Waiting) {
+			using namespace asio::experimental::awaitable_operators;
+			char probe = 0; asio::error_code read_error;
+			auto winner = co_await (control->wait() || socket.async_receive(asio::buffer(&probe, 1), asio::ip::tcp::socket::message_peek, asio::redirect_error(asio::use_awaitable, read_error)));
+			if (winner.index() == 1 && read_error && read_error != asio::error::eof && read_error != asio::error::operation_aborted) { control->exchange->close(ReplySettlement::Disconnected); }
+			// A sending half-close or pipelined byte preserves response interest.
+			if (control->exchange->phase() == DeferredExchange::Phase::Waiting) { co_await control->wait(); }
+		}
+		if (std::chrono::steady_clock::now() >= control->exchange->deadline()) { control->exchange->close(ReplySettlement::TimedOut); }
+		auto response = control->exchange->take_response();
+		if (!response) { control->exchange->settle(control->exchange->closing_reason()); co_return false; }
+		writer.adopt_deferred(std::move(*response));
+	}
+	std::string head = writer.serialize_head(keep_alive);
+	std::array<asio::const_buffer, 2> buffers{asio::buffer(head), writer.has_body() ? asio::buffer(writer.body()) : asio::const_buffer{}};
+	if (!control) { co_await asio::async_write(socket, buffers, asio::use_awaitable); co_return true; }
+	auto executor = co_await asio::this_coro::executor;
+	ReplySettlement outcome;
+	try {
+		outcome = co_await asio::co_spawn(executor, write_before_deadline(socket, buffers, control->exchange->deadline()), asio::bind_cancellation_slot(control->write_cancellation(), asio::use_awaitable));
+	} catch (...) { control->exchange->close(ReplySettlement::Failed); control->exchange->settle(ReplySettlement::Failed); throw; }
+	if (outcome != ReplySettlement::Written) { control->exchange->close(outcome); }
+	control->exchange->settle(outcome);
+	co_return outcome == ReplySettlement::Written && control->exchange->closing_reason() == ReplySettlement::Written;
+}
 inline asio::awaitable<void> invoke_handler(HttpHandler* handler, const Request& request, ResponseWriter& writer) {
 	handler->handle(request, writer); co_return;
 }
@@ -355,7 +460,7 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 				auto reader = std::make_shared<ChannelBodyReader>(ex, /*capacity=*/8);
 				request.body_reader = reader;
 				reactor->track(reader);   // so shutdown can unblock a mid-stream read()
-				AsioResponseWriter writer(request, options);
+				AsioResponseWriter writer(request, options, &ex, reactor);
 				asio::any_io_executor hexec(reactor->pool()->get_executor());
 
 				// Feed the body (reactor, flow-controlled) and run the handler (pool)
@@ -394,7 +499,7 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 				asio::co_spawn(hexec,
 					[handler, &request, &writer]() -> asio::awaitable<void> {
 						try { handler->handle(request, writer); }
-						catch (...) { if (!writer.ended()) { handler->on_error(std::current_exception(), request, writer); } }
+						catch (...) { if (writer.deferred()) { writer.deferred()->exchange->abandon(); } else if (!writer.ended()) { handler->on_error(std::current_exception(), request, writer); } }
 						co_return;
 					},
 					[done](std::exception_ptr) { (void)done->try_send(asio::error_code{}); });
@@ -402,18 +507,18 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 				co_await feed();                                        // reactor: push the body
 				co_await done->async_receive(use_awaitable);            // wait for the handler (reactor free)
 
-				if (!writer.ended()) {
+				if (!writer.deferred() && !writer.ended()) {
 					writer.status(500);
 					writer.write("Internal Server Error\n");
 					writer.end();
 				}
+				if (writer.deferred()) {
+				if (!co_await write_response(socket, writer, keep_alive)) { co_return; }
+			} else {
 				std::string head = writer.serialize_head(keep_alive);
-				if (writer.has_body()) {
-					std::array<asio::const_buffer, 2> bufs{ asio::buffer(head), asio::buffer(writer.body()) };
-					co_await asio::async_write(socket, bufs, use_awaitable);
-				} else {
-					co_await asio::async_write(socket, asio::buffer(head), use_awaitable);
-				}
+				std::array<asio::const_buffer, 2> buffers{asio::buffer(head), writer.has_body() ? asio::buffer(writer.body()) : asio::const_buffer{}};
+				co_await asio::async_write(socket, buffers, use_awaitable);
+			}
 				if (!keep_alive || writer.wants_close()) { break; }
 				parser.reset();
 				continue;
@@ -436,7 +541,7 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 			// The extension and the body (streamed to the app's sink, or buffered into
 			// request.body) were already handled at headers-complete by the parser hook.
 
-			AsioResponseWriter writer(request, options);
+			AsioResponseWriter writer(request, options, &ex, reactor);
 			bool offload_active = false;
 			try {
 				if (reactor->pool() && handler->should_offload(request)) {
@@ -457,20 +562,20 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 				}
 			} catch (...) {
 				if (offload_active) { reactor->gate().leave(); }
-				if (!writer.ended()) { handler->on_error(std::current_exception(), request, writer); }
-				if (!writer.ended()) {
+				if (writer.deferred()) { writer.deferred()->exchange->abandon(); } else if (!writer.ended()) { handler->on_error(std::current_exception(), request, writer); }
+				if (!writer.deferred() && !writer.ended()) {
 					writer.status(500);
 					writer.write("Internal Server Error\n");
 					writer.end();
 				}
 			}
 
-			std::string head = writer.serialize_head(keep_alive);
-			if (writer.has_body()) {
-				std::array<asio::const_buffer, 2> bufs{ asio::buffer(head), asio::buffer(writer.body()) };
-				co_await asio::async_write(socket, bufs, use_awaitable);
+			if (writer.deferred()) {
+				if (!co_await write_response(socket, writer, keep_alive)) { co_return; }
 			} else {
-				co_await asio::async_write(socket, asio::buffer(head), use_awaitable);
+				std::string head = writer.serialize_head(keep_alive);
+				std::array<asio::const_buffer, 2> buffers{asio::buffer(head), writer.has_body() ? asio::buffer(writer.body()) : asio::const_buffer{}};
+				co_await asio::async_write(socket, buffers, use_awaitable);
 			}
 			if (!keep_alive || writer.wants_close()) { break; }
 		}

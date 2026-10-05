@@ -157,3 +157,9 @@ Response-side *streaming* (chunked `Transfer-Encoding`) is not in the Asio write
 — it buffers the whole response, so the transforms above always have the full body to
 work on, but a huge response is held in memory. Request-side streaming (both push and
 concurrent pull, with flow control) is done.
+
+## Deferred response ownership
+
+The scoped ResponseWriter and Request cannot escape the handler. `defer()` transfers exclusive buffered response authority into a move-only capability backed by a mutex-protected exchange. Application submission retains owned response bytes and a reply lease; the transport retains the request lease and waits on its connection executor. Completion before waiting is observable, and returning from an offloaded handler releases its worker slot before waiting for the reply.
+
+The exchange advances Waiting → Ready → Writing → Written, or enters Closing for deadline, disconnect, abandonment or shutdown. Closing retains all leases until the original socket operation has been canceled and reaped. Settlement is exactly once; hooks and lease destructors execute outside the lock. Escaped capabilities retain closed metadata, not a socket, stack writer or live executor. One bounded response is accepted, keep-alive handlers remain ordered, and sending half-close remains valid. Deferred response transforms are disabled.

@@ -96,11 +96,21 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	target_link_libraries(offload_test PRIVATE http)
 	add_test(NAME offload COMMAND offload_test)
 	set_tests_properties(offload PROPERTIES TIMEOUT 15)
+	add_executable(http_deferred_test test/deferred_test.cc)
+	target_include_directories(http_deferred_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+	target_link_libraries(http_deferred_test PRIVATE Threads::Threads)
+	add_test(NAME deferred COMMAND http_deferred_test)
+	set_tests_properties(deferred PROPERTIES TIMEOUT 60)
 
 	# Transport-agnostic unit tests: method dispatch, 404 vs 405, param capture.
 	add_executable(http_test test/test.cc)
 	target_link_libraries(http_test PRIVATE http)
 	add_test(NAME http COMMAND http_test)
+
+	add_executable(deferred_asio_test test/deferred_asio_test.cc)
+	target_link_libraries(deferred_asio_test PRIVATE http)
+	add_test(NAME deferred_asio COMMAND deferred_asio_test)
+	set_tests_properties(deferred_asio PROPERTIES TIMEOUT 60)
 
 	# The Asio transport (http_asio.h) end-to-end over real TCP: the un-stallable
 	# model, 503 backpressure, N reactors (both bind modes), keep-alive, compression,

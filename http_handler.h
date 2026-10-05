@@ -31,12 +31,10 @@
 // framing -- it picks Content-Length for a buffered body and chunked transfer
 // encoding once a response streams.
 //
-// Forward-compatibility: the writer is also what makes the handler async-ready.
-// end() is the completion signal, not "handle() returned" -- so a handler may
-// hand the writer to a worker thread (the un-stallable model: heavy work never
-// runs on the reactor) or, later, become a coroutine whose body is `co_await`ed,
-// and the connection finishes the response when end() is finally called. Today
-// handlers run synchronously and call end() inline; nothing here assumes that.
+// The scoped writer and request must not escape handle(). For delayed replies,
+// transfer response authority with defer() and retain only the owned capability.
+// Synchronous handlers call end() before returning; offloaded handlers complete
+// before the transport resumes.
 //
 // A ready-made HttpHandler that dispatches by method + path -- the application's
 // routing table -- lives in http_router.h (the radix-tree Router).
@@ -49,6 +47,7 @@
 #include <utility>
 
 #include "http_message.h"
+#include "http_deferred.h"
 
 namespace http {
 
@@ -70,6 +69,9 @@ public:
 	virtual void end() = 0;
 	// Close the connection after this response (overrides keep-alive).
 	virtual void set_close() = 0;
+	// Transfer response authority to an owned capability, when supported.
+	// Existing synchronous writers remain source-compatible.
+	virtual std::unique_ptr<DeferredReply> defer(DeferredOptions) { return {}; }
 
 	// ---- buffered conveniences (non-virtual) ----
 	void content_type(std::string_view ct) { set_header("Content-Type", ct); }

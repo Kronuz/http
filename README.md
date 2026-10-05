@@ -53,16 +53,7 @@ application code:
   (`COUNT`, `INFO`, `DUMP`, `RESTORE`, …) that a stricter parser like llhttp
   rejects. Swapping it for another parser is contained here; the handler and the
   `Request`/`ResponseWriter` are parser-agnostic.
-- **Concurrency (inline or offloaded).** Completion is signalled by
-  `ResponseWriter::end()`, not by `handle()` returning, so a handler may finish the
-  response *later*. That is the **un-stallable model**: give the service a worker
-  count and each request that opts in (`should_offload`) runs `handle()` on the
-  reactor's Asio `thread_pool` while the reactor stays free — a single
-  `co_await co_spawn(pool, …)`, one in-flight per connection, resuming back on the
-  connection's `io_context`. A full bounded window answers 503. With no pool,
-  `handle()` runs inline on the reactor (the cheap fast path). Because completion is
-  the writer's `end()`, there is no pause/resume bookkeeping and no cross-thread
-  handoff — the coroutine owns the connection, so that race class cannot arise.
+- **Concurrency (inline or offloaded).** A handler selected by `should_offload` runs on the reactor's bounded worker pool; excess requests receive 503. Inline handlers run on the reactor and must remain nonblocking. The scoped writer and request remain valid only during the handler call. Delayed work transfers exclusive reply authority through `ResponseWriter::defer()` and retains the returned move-only `DeferredReply`, never the writer or request. The connection awaits one reply before handling the next keep-alive request.
 - **Request body (buffered or streamed).** A handler opts into streaming per
   endpoint (`on_request_body` returns a `BodySink`): the body then flows to the sink
   chunk-by-chunk as it is parsed, never accumulated, so a multi-gigabyte `RESTORE`
@@ -104,3 +95,9 @@ system/brew install):
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for how the pieces fit and the request
 lifecycle; [`AGENTS.md`](AGENTS.md) for the working notes and invariants.
+
+## Owned delayed replies
+
+`defer(DeferredOptions)` returns an owned capability when supported, or null for an existing synchronous transport. Call it before writing any response fields. Supply a finite steady-clock deadline and bounded header/body limits. `complete(Response, reply_retention)` moves one buffered response into the transport and reports acceptance; acceptance does not establish delivery. Request retention and accepted reply retention remain held until the original socket operation completes or is canceled and reaped.
+
+Settlement runs once, outside the exchange lock, with Written, TimedOut, Disconnected, Abandoned, Shutdown or Failed. Written means the local write completed, not that the client received or acted on it. Dropping an unanswered capability abandons the reply; dropping it after acceptance preserves the accepted response. Late submission after shutdown returns Closed without accessing the retired runtime. A sending half-close preserves response interest. Deferred replies skip compression, range and conditional transforms so their owned buffers and limits remain stable. Framing headers are transport-owned.

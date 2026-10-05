@@ -58,10 +58,8 @@ library does not.
 - **The handler is parser/transport/concurrency-agnostic.** It gets a `Request` and
   writes a `ResponseWriter`. It never sees the parser, the socket, or the loop. Don't
   leak any of those across the seam.
-- **Completion is `ResponseWriter::end()`, not "handle() returned".** This is
-  load-bearing: it lets a handler finish the response *later* — off the offload pool
-  — with no handler-code change. Do not reintroduce "the response is done when
-  handle() returns".
+- **Scoped response ownership.** Synchronous handlers finish before returning. Deferred handlers transfer authority through `ResponseWriter::defer()` and retain only the owned capability. Never retain a stack writer or Request. Original socket IO must be reaped before releasing request or reply leases; acceptance is distinct from delivery.
+
 - **Routing is application config.** `Router` (per-method radix trees + 404/405) is
   what Xapiand's hardcoded `prepare()` method-switch becomes.
 

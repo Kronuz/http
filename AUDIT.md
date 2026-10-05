@@ -15,3 +15,7 @@ Qualification artifacts remain in the Detent workspace's ignored `.scratch/http-
 The buffered exception path released an offload reservation whenever a pool existed, including inline handlers that never acquired one. This underflows the gate and permits excess worker work. The transport now records successful acquisition and releases exactly that reservation on success or exception.
 
 A real TCP regression uses one worker and one admission slot. Against the isolated previous revision, an inline exception returns 500 but both subsequent held requests are accepted; the excess request is not shed. With the reservation guard, the held request returns 200 and the excess request receives 503 before the held request is released. The regression is retained as `offload_test`; baseline comparison logs are in Detent `.scratch/http-offload-gate-before.log` and `.scratch/http-offload-gate-after.log`.
+
+## Deferred reply footprint
+
+The owned deferred capability adds 32 bytes to the scoped Asio writer on this Intel macOS build: 96 bytes before and 128 bytes afterward. The Response value remains 88 bytes. Deferred exchange, timer and cancellation control are allocated only when `defer()` is called; body buffers and admission leases are separately bounded. The synchronous transport keeps its direct write coroutine path. These object-size measurements establish no latency, throughput, power or cost improvement.
