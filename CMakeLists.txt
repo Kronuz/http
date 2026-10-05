@@ -92,6 +92,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	target_link_libraries(bench_http PRIVATE http)
 
 	enable_testing()
+	add_executable(offload_test test/offload_test.cc)
+	target_link_libraries(offload_test PRIVATE http)
+	add_test(NAME offload COMMAND offload_test)
+	set_tests_properties(offload PROPERTIES TIMEOUT 15)
 
 	# Transport-agnostic unit tests: method dispatch, 404 vs 405, param capture.
 	add_executable(http_test test/test.cc)

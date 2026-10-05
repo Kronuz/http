@@ -9,3 +9,9 @@ The corrected path explicitly spawns a handler coroutine on the worker executor 
 On the same native macOS fixture, 40 fast requests under four 500 ms slow requests observe a maximum of 1,931.2 ms before and 2.8 ms afterward. Sixteen slow requests at a four-slot limit change from sixteen accepted requests to four accepted and twelve 503 responses. The existing suite changes from four failures to zero. These are one paired fixture run, not production tail, throughput, cost or power measurements.
 
 Qualification artifacts remain in the Detent workspace's ignored `.scratch/http-offload-before-tests.log` and `.scratch/http-offload-after-tests.log`. The isolated comparison changes only executor selection in archived baseline headers, so the result does not depend on the deferred-response implementation.
+
+## Inline exception admission
+
+The buffered exception path released an offload reservation whenever a pool existed, including inline handlers that never acquired one. This underflows the gate and permits excess worker work. The transport now records successful acquisition and releases exactly that reservation on success or exception.
+
+A real TCP regression uses one worker and one admission slot. Against the isolated previous revision, an inline exception returns 500 but both subsequent held requests are accepted; the excess request is not shed. With the reservation guard, the held request returns 200 and the excess request receives 503 before the held request is released. The regression is retained as `offload_test`; baseline comparison logs are in Detent `.scratch/http-offload-gate-before.log` and `.scratch/http-offload-gate-after.log`.

@@ -437,25 +437,26 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 			// request.body) were already handled at headers-complete by the parser hook.
 
 			AsioResponseWriter writer(request, options);
-			bool offloaded_503 = false;
+			bool offload_active = false;
 			try {
 				if (reactor->pool() && handler->should_offload(request)) {
 					if (!reactor->gate().try_enter()) {
 						writer.status(503);
 						writer.write("Service Unavailable\n");
 						writer.end();
-						offloaded_503 = true;
 					} else {
 						// co_spawn selects the worker executor for the coroutine body;
 						// awaiting post() alone preserves the parent executor.
+						offload_active = true;
 						co_await asio::co_spawn(reactor->pool()->get_executor(), invoke_handler(handler, request, writer), use_awaitable);
 						reactor->gate().leave();
+						offload_active = false;
 					}
 				} else {
 					handler->handle(request, writer);   // inline on the reactor
 				}
 			} catch (...) {
-				if (reactor->pool() && !offloaded_503) { reactor->gate().leave(); }
+				if (offload_active) { reactor->gate().leave(); }
 				if (!writer.ended()) { handler->on_error(std::current_exception(), request, writer); }
 				if (!writer.ended()) {
 					writer.status(500);
