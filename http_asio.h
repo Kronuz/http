@@ -308,6 +308,9 @@ private:
 // with the reactor free -- the un-stallable path. A request the handler marked
 // wants_body_stream runs CONCURRENTLY: the handler on the pool pulls body chunks from a
 // flow-controlled BodyReader that the reactor feeds -- O(buffer) memory for any size.
+inline asio::awaitable<void> invoke_handler(HttpHandler* handler, const Request& request, ResponseWriter& writer) {
+	handler->handle(request, writer); co_return;
+}
 inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, HttpHandler* handler,
                                               reactor::Reactor* reactor, const AsioResponseOptions* options) {
 	using asio::use_awaitable;
@@ -443,24 +446,9 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 						writer.end();
 						offloaded_503 = true;
 					} else {
-						// THE UN-STALLABLE OFFLOAD: hop this coroutine onto the pool,
-						// run the (blocking) handler there so the reactor stays free,
-						// then hop back. Two posts instead of a co_spawn avoids
-						// allocating a nested coroutine frame for every request. The
-						// hop back must run even on exception, because the socket and
-						// writer belong to the reactor -- touching them from a pool
-						// thread would be a data race; so catch, hop back, rethrow.
-						std::exception_ptr eptr;
-						co_await asio::post(reactor->pool()->get_executor(), use_awaitable);
-						try {
-							handler->handle(request, writer);
-						} catch (...) {
-							eptr = std::current_exception();
-						}
-						co_await asio::post(ex, use_awaitable);
-						if (eptr) {
-							std::rethrow_exception(eptr);  // outer catch: leaves gate + maps error
-						}
+						// co_spawn selects the worker executor for the coroutine body;
+						// awaiting post() alone preserves the parent executor.
+						co_await asio::co_spawn(reactor->pool()->get_executor(), invoke_handler(handler, request, writer), use_awaitable);
 						reactor->gate().leave();
 					}
 				} else {
