@@ -104,7 +104,7 @@ Settlement runs once, outside the exchange lock, with Written, TimedOut, Disconn
 
 ### Optional HTTPS transport
 
-`http_asio_tls.h` adds `tls_connection_factory(shared_context, handshake_deadline, maximum_handshakes)`, passed as the optional fifth `HttpAsioService` constructor argument. Link OpenSSL only when using this adapter. The caller configures certificates and verification policy. Incoming TLS allocation is capped by a shared handshake limit (64 by default), and each handshake has one absolute deadline (five seconds by default). The factory retains the context through original operations.
+`http_asio_tls.h` adds `tls_connection_factory(shared_context, handshake_deadline, maximum_handshakes, maximum_connections)`, passed as the optional fifth `HttpAsioService` constructor argument. Link OpenSSL only when using this adapter. The caller configures certificates and verification policy. Incoming TLS allocation is capped by a shared handshake limit (64 by default) and total connection limit (1024 by default), and each handshake has one absolute deadline (five seconds by default). The factory retains the context through original operations.
 
 The common HTTP parser and response path operate on the plaintext stream. A deferred response retains one owned read-ahead byte across its write, then returns that byte to the next request. Fatal read errors notify the current deferred exchange. The original four-argument TCP service API remains available without an OpenSSL dependency.
 

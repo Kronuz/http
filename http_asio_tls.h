@@ -9,29 +9,38 @@ namespace http {
 namespace detail {
 struct TlsAdmission {
 	std::atomic<std::size_t> pending{0};
-	std::size_t maximum;
-	explicit TlsAdmission(std::size_t bound) : maximum(bound) {}
+	std::atomic<std::size_t> active{0};
+	std::size_t maximum, connections;
+	TlsAdmission(std::size_t bound, std::size_t connection_bound)
+		: maximum(bound), connections(connection_bound) {}
 };
 inline asio::awaitable<void>
 serve_tls_connection(asio::ip::tcp::socket socket, HttpHandler *handler, reactor::Reactor *reactor,
 					 const AsioResponseOptions *options, std::shared_ptr<asio::ssl::context> context,
 					 std::chrono::milliseconds deadline, std::shared_ptr<TlsAdmission> admission) {
 	// Admission precedes TLS allocation and is shared across reactor threads.
-	if (admission->pending.fetch_add(1) >= admission->maximum) {
-		admission->pending.fetch_sub(1);
+	if (admission->active.fetch_add(1) >= admission->connections) {
+		admission->active.fetch_sub(1);
 		co_return;
 	}
 	struct Lease {
 		std::shared_ptr<TlsAdmission> owner;
+		bool handshake = false;
 		~Lease() {
-			if (owner)
+			if (handshake)
 				owner->pending.fetch_sub(1);
+			owner->active.fetch_sub(1);
 		}
 		void release() {
 			owner->pending.fetch_sub(1);
-			owner.reset();
+			handshake = false;
 		}
 	} lease{admission};
+	if (admission->pending.fetch_add(1) >= admission->maximum) {
+		admission->pending.fetch_sub(1);
+		co_return;
+	}
+	lease.handshake = true;
 	// Keep the context and stream alive through every original operation.
 	asio::ssl::stream<asio::ip::tcp::socket> stream(std::move(socket), *context);
 	asio::steady_timer timer(stream.get_executor(), deadline);
@@ -51,11 +60,12 @@ serve_tls_connection(asio::ip::tcp::socket socket, HttpHandler *handler, reactor
 inline HttpAsioService::ConnectionFactory
 tls_connection_factory(std::shared_ptr<asio::ssl::context> context,
 					   std::chrono::milliseconds handshake_deadline = std::chrono::seconds(5),
-					   std::size_t maximum_handshakes = 64) {
-	if (!context || handshake_deadline <= std::chrono::milliseconds::zero() || !maximum_handshakes) {
+					   std::size_t maximum_handshakes = 64, std::size_t maximum_connections = 1024) {
+	if (!context || handshake_deadline <= std::chrono::milliseconds::zero() || !maximum_handshakes ||
+		!maximum_connections) {
 		throw std::invalid_argument("TLS connection configuration");
 	}
-	auto admission = std::make_shared<detail::TlsAdmission>(maximum_handshakes);
+	auto admission = std::make_shared<detail::TlsAdmission>(maximum_handshakes, maximum_connections);
 	return [context = std::move(context), handshake_deadline,
 			admission](asio::ip::tcp::socket socket, HttpHandler *handler, reactor::Reactor *reactor,
 					   const AsioResponseOptions *options) {
