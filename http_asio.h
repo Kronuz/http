@@ -504,8 +504,20 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 					},
 					[done](std::exception_ptr) { (void)done->try_send(asio::error_code{}); });
 
-				co_await feed();                                        // reactor: push the body
-				co_await done->async_receive(use_awaitable);            // wait for the handler (reactor free)
+				std::exception_ptr feed_error;
+				try { co_await feed(); } catch (...) {
+					feed_error = std::current_exception(); reader->abort();
+					asio::error_code ignored; socket.lowest_layer().close(ignored);
+				}
+				auto cancellation = co_await asio::this_coro::cancellation_state;
+				const bool canceled = cancellation.cancelled() != asio::cancellation_type::none;
+				// The pool handler owns references to request/writer. Cancellation
+				// cannot release either until that original handler has returned.
+				co_await asio::this_coro::reset_cancellation_state(asio::disable_cancellation());
+				co_await done->async_receive(use_awaitable);
+				if (feed_error) { std::rethrow_exception(feed_error); }
+				if (canceled || reactor->stopping()) { co_return; }
+				co_await asio::this_coro::reset_cancellation_state(asio::enable_terminal_cancellation());
 
 				if (!writer.deferred() && !writer.ended()) {
 					writer.status(500);

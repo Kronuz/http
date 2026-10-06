@@ -101,3 +101,7 @@ lifecycle; [`AGENTS.md`](AGENTS.md) for the working notes and invariants.
 `defer(DeferredOptions)` returns an owned capability when supported, or null for an existing synchronous transport. Call it before writing any response fields. Supply a finite steady-clock deadline and bounded header/body limits. `complete(Response, reply_retention)` moves one buffered response into the transport and reports acceptance; acceptance does not establish delivery. Request retention and accepted reply retention remain held until the original socket operation completes or is canceled and reaped.
 
 Settlement runs once, outside the exchange lock, with Written, TimedOut, Disconnected, Abandoned, Shutdown or Failed. Written means the local write completed, not that the client received or acted on it. Dropping an unanswered capability abandons the reply; dropping it after acceptance preserves the accepted response. Late submission after shutdown returns Closed without accessing the retired runtime. A sending half-close preserves response interest. Deferred replies skip compression, range and conditional transforms so their owned buffers and limits remain stable. Framing headers are transport-owned.
+
+### Streaming request retirement
+
+Shutdown aborts the body reader, then joins the original pool handler with cleanup cancellation disabled. The request and response writer remain alive until the handler returns, including after a canceled body read. This uses the reactor session completion barrier in reactor `863bed0`.
