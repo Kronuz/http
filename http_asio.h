@@ -56,6 +56,7 @@
 #include <cstddef>
 #include <deque>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -376,7 +377,8 @@ private:
 // with the reactor free -- the un-stallable path. A request the handler marked
 // wants_body_stream runs CONCURRENTLY: the handler on the pool pulls body chunks from a
 // flow-controlled BodyReader that the reactor feeds -- O(buffer) memory for any size.
-inline asio::awaitable<ReplySettlement> write_before_deadline(asio::ip::tcp::socket& socket,
+template<class Stream>
+inline asio::awaitable<ReplySettlement> write_before_deadline(Stream& socket,
 	std::array<asio::const_buffer, 2> buffers, std::chrono::steady_clock::time_point deadline) {
 	using namespace asio::experimental::awaitable_operators;
 	auto executor = co_await asio::this_coro::executor; asio::steady_timer timer(executor); timer.expires_at(deadline);
@@ -385,16 +387,60 @@ inline asio::awaitable<ReplySettlement> write_before_deadline(asio::ip::tcp::soc
 	if (winner.index() == 0) { co_return write_error ? ReplySettlement::Disconnected : ReplySettlement::Written; }
 	co_return timer_error ? ReplySettlement::Failed : ReplySettlement::TimedOut;
 }
-inline asio::awaitable<bool> write_response(asio::ip::tcp::socket& socket, AsioResponseWriter& writer, bool keep_alive) {
+// A deferred response keeps one owned plaintext read alive across its write.
+// Consumed pipelined input is returned to the parser, never discarded by a race.
+template<class Stream>
+class ConnectionInput : public std::enable_shared_from_this<ConnectionInput<Stream>> {
+public:
+	explicit ConnectionInput(Stream& stream) : stream_(stream), done_(stream.get_executor()) {}
+	void monitor(const std::shared_ptr<AsioDeferredControl>& control) {
+		observer_ = control;
+		if (ready_ && error_ && error_ != asio::error::eof) {
+			control->exchange->close(ReplySettlement::Disconnected); return;
+		}
+		if (pending_ || ready_) { return; }
+		pending_ = true;
+		auto owner = this->shared_from_this();
+		try {
+			stream_.async_read_some(asio::buffer(&byte_, 1), [owner](asio::error_code error, std::size_t size) {
+				owner->pending_ = false; owner->ready_ = true; owner->error_ = error; owner->size_ = size;
+				owner->done_.cancel();
+				if (error && error != asio::error::eof) {
+					if (auto c = owner->observer_.lock()) { c->exchange->close(ReplySettlement::Disconnected); }
+				}
+			});
+		} catch (...) { pending_ = false; throw; }
+	}
+	asio::awaitable<std::size_t> read(asio::mutable_buffer output) {
+		co_await drain();
+		if (ready_) {
+			ready_ = false;
+			if (size_) { *static_cast<char*>(output.data()) = byte_; co_return 1; }
+			if (error_) { throw asio::system_error(error_); }
+			co_return 0;
+		}
+		co_return co_await stream_.async_read_some(output, asio::use_awaitable);
+	}
+	asio::awaitable<void> drain() {
+		while (pending_) {
+			done_.expires_at(std::chrono::steady_clock::time_point::max());
+			asio::error_code error; co_await done_.async_wait(asio::redirect_error(asio::use_awaitable, error));
+		}
+	}
+private:
+	Stream& stream_; asio::steady_timer done_;
+	char byte_ = 0; std::size_t size_ = 0; asio::error_code error_;
+	bool pending_ = false, ready_ = false;
+	std::weak_ptr<AsioDeferredControl> observer_;
+};
+template<class Stream>
+inline asio::awaitable<bool> write_response(Stream& socket, AsioResponseWriter& writer, bool keep_alive,
+	const std::shared_ptr<ConnectionInput<Stream>>& input) {
 	auto control = writer.deferred();
 	if (control) {
 		if (control->exchange->phase() == DeferredExchange::Phase::Waiting) {
-			using namespace asio::experimental::awaitable_operators;
-			char probe = 0; asio::error_code read_error;
-			auto winner = co_await (control->wait() || socket.async_receive(asio::buffer(&probe, 1), asio::ip::tcp::socket::message_peek, asio::redirect_error(asio::use_awaitable, read_error)));
-			if (winner.index() == 1 && read_error && read_error != asio::error::eof && read_error != asio::error::operation_aborted) { control->exchange->close(ReplySettlement::Disconnected); }
-			// A sending half-close or pipelined byte preserves response interest.
-			if (control->exchange->phase() == DeferredExchange::Phase::Waiting) { co_await control->wait(); }
+			input->monitor(control);
+			co_await control->wait();
 		}
 		if (std::chrono::steady_clock::now() >= control->exchange->deadline()) { control->exchange->close(ReplySettlement::TimedOut); }
 		auto response = control->exchange->take_response();
@@ -416,12 +462,13 @@ inline asio::awaitable<bool> write_response(asio::ip::tcp::socket& socket, AsioR
 inline asio::awaitable<void> invoke_handler(HttpHandler* handler, const Request& request, ResponseWriter& writer) {
 	handler->handle(request, writer); co_return;
 }
-inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, HttpHandler* handler,
+template<class Stream>
+inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::shared_ptr<ConnectionInput<Stream>>& input, HttpHandler* handler,
                                               reactor::Reactor* reactor, const AsioResponseOptions* options) {
 	using asio::use_awaitable;
 	try {
 		asio::error_code opt_ec;
-		socket.set_option(asio::ip::tcp::no_delay(true), opt_ec);
+		socket.lowest_layer().set_option(asio::ip::tcp::no_delay(true), opt_ec);
 		auto ex = co_await asio::this_coro::executor;
 		RequestParser parser;
 		// The headers-complete hook: build the app's per-request extension, then choose
@@ -444,7 +491,7 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 			// Phase 1: parse the request line + headers.
 			while (!parser.headers_done()) {
 				if (buffered.empty()) {
-					std::size_t n = co_await socket.async_read_some(asio::buffer(tmp), use_awaitable);
+					std::size_t n = co_await input->read(asio::buffer(tmp));
 					if (n == 0) { co_return; }
 					buffered.append(tmp, n);
 				}
@@ -476,8 +523,8 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 						if (!chunk.empty()) { co_await reader->push(std::move(chunk)); }
 						if (parser.complete()) { break; }
 						if (buffered.empty()) {
-							std::size_t n = co_await socket.async_read_some(asio::buffer(tmp),
-								asio::redirect_error(use_awaitable, fec));
+							std::size_t n = 0;
+							try { n = co_await input->read(asio::buffer(tmp)); } catch (const asio::system_error& e) { fec = e.code(); }
 							if (fec || n == 0) { reader->abort(); co_return; }
 							buffered.append(tmp, n);
 						}
@@ -525,7 +572,7 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 					writer.end();
 				}
 				if (writer.deferred()) {
-				if (!co_await write_response(socket, writer, keep_alive)) { co_return; }
+				if (!co_await write_response(socket, writer, keep_alive, input)) { co_return; }
 			} else {
 				std::string head = writer.serialize_head(keep_alive);
 				std::array<asio::const_buffer, 2> buffers{asio::buffer(head), writer.has_body() ? asio::buffer(writer.body()) : asio::const_buffer{}};
@@ -539,7 +586,7 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 			// ---- BUFFERED / PUSH path ----
 			while (!parser.complete()) {
 				if (buffered.empty()) {
-					std::size_t n = co_await socket.async_read_some(asio::buffer(tmp), use_awaitable);
+					std::size_t n = co_await input->read(asio::buffer(tmp));
 					buffered.append(tmp, n);
 				}
 				std::size_t used = parser.feed(buffered.data(), buffered.size());
@@ -583,7 +630,7 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 			}
 
 			if (writer.deferred()) {
-				if (!co_await write_response(socket, writer, keep_alive)) { co_return; }
+				if (!co_await write_response(socket, writer, keep_alive, input)) { co_return; }
 			} else {
 				std::string head = writer.serialize_head(keep_alive);
 				std::array<asio::const_buffer, 2> buffers{asio::buffer(head), writer.has_body() ? asio::buffer(writer.body()) : asio::const_buffer{}};
@@ -594,8 +641,17 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 	} catch (const std::exception&) {
 		// client hangup / read-write error -- drop the connection
 	}
-	asio::error_code ec;
-	socket.shutdown(asio::ip::tcp::socket::shutdown_send, ec);
+}
+
+template<class Stream>
+inline asio::awaitable<void> serve_connection(Stream socket, HttpHandler* handler,
+    reactor::Reactor* reactor, const AsioResponseOptions* options) {
+	auto input = std::make_shared<ConnectionInput<Stream>>(socket);
+	try { co_await serve_connection_body(socket, input, handler, reactor, options); } catch (...) {}
+	asio::error_code error; socket.lowest_layer().close(error);
+	// The socket and input slot outlive completion of the original read.
+	co_await asio::this_coro::reset_cancellation_state(asio::disable_cancellation());
+	co_await input->drain();
 }
 
 }  // namespace detail
@@ -608,15 +664,19 @@ inline asio::awaitable<void> serve_connection(asio::ip::tcp::socket socket, Http
 // exposes the same surface callers had before the runtime was extracted.
 class HttpAsioService {
 public:
+	using ConnectionFactory = std::function<asio::awaitable<void>(asio::ip::tcp::socket,
+		HttpHandler*, reactor::Reactor*, const AsioResponseOptions*)>;
 	// `reactors` runtimes; each with `workers` offload threads (0 => inline) and an
 	// offload admission window of `queue_limit`.
-	HttpAsioService(HttpHandler& handler, std::size_t reactors, std::size_t workers, std::size_t queue_limit)
-		: handler_(handler),
+	HttpAsioService(HttpHandler& handler, std::size_t reactors, std::size_t workers, std::size_t queue_limit,
+		ConnectionFactory connection = {})
+		: handler_(handler), connection_(std::move(connection)),
 		  server_(reactors, workers, static_cast<int>(queue_limit),
 		          [this](asio::ip::tcp::socket socket, reactor::Reactor& r) -> asio::awaitable<void> {
 			          // Not a coroutine itself: it returns serve_connection's awaitable,
 			          // so there is no closure-lifetime pitfall (the Session captures only
 			          // this, a stable pointer; the coroutine frame owns the socket).
+			          if (connection_) { return connection_(std::move(socket), &handler_, &r, &response_); }
 			          return detail::serve_connection(std::move(socket), &handler_, &r, &response_);
 		          }) {}
 
@@ -651,6 +711,7 @@ private:
 	// is torn down before the handler and options it referenced.
 	HttpHandler& handler_;
 	AsioResponseOptions response_{};
+	ConnectionFactory connection_;
 	reactor::TcpServer server_;
 };
 
