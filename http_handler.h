@@ -44,12 +44,32 @@
 #include <exception>
 #include <memory>
 #include <string_view>
+#include <stdexcept>
+#include <string>
 #include <utility>
 
 #include "http_message.h"
 #include "http_deferred.h"
 
 namespace http {
+
+// Header admission rejects before consuming a body or invoking handle(). Keep
+// the invalid_argument base so existing synchronous callers retain their catch.
+enum class RejectionContent { Text, Json };
+class RequestRejected : public std::invalid_argument {
+	static std::string checked(int status, std::string_view body) {
+		if (status < 400 || status > 599 || body.size() > 512) { throw std::invalid_argument("request rejection shape"); }
+		return std::string(body);
+	}
+public:
+	RequestRejected(int status, std::string_view body, RejectionContent content = RejectionContent::Text)
+		: std::invalid_argument(checked(status, body)), status_(status), content_(content) {}
+	int status() const noexcept { return status_; }
+	const char* content_type() const noexcept { return content_ == RejectionContent::Json ? "application/json" : "text/plain"; }
+private:
+	int status_;
+	RejectionContent content_;
+};
 
 // The output side of the seam. A handler sets the status and headers, then
 // streams the body with one or more write() calls, then end(). The buffered

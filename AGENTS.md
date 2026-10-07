@@ -195,3 +195,7 @@ ctest --test-dir build              # http (unit) + asio (transport, ~2s)
 #   curl -XPOST localhost:8080/bulk --data-binary @big.ndjson        # streamed request body
 ./build/bench_http 8080 4 &  ./build/bench_asio 8081 4 &             # framework vs raw ceiling
 ```
+
+`HttpAsioService` preserves the existing ConnectionFactory and constructor APIs. An additive TimedConnectionFactory receives reactor's acceptance timestamp and an explicit sixth constructor argument sets a global connection cap before destination dispatch. `set_connection_limit()` and `connection_stats()` expose the same gate for existing factories. The timed path requires the matching reactor connection-admission API; upgrade the sibling reactor headers together when adopting it.
+
+For TLS, `tls_connection_factory_timed()` uses the original accept timestamp so destination queue wait consumes the handshake deadline. Pass it with an explicit service connection bound. The original `tls_connection_factory()` remains source-compatible and keeps its destination-side handshake/idle-connection limits; without a service-level gate it does not bound sockets queued before the factory starts. TLS allocation follows capacity and elapsed-deadline checks. Transport leases survive original serving IO and refund on retirement.

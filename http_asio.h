@@ -88,6 +88,9 @@ struct AsioResponseOptions {
 	bool conditional = false;   // derive a weak ETag + answer 304 on If-None-Match
 	bool ranges = false;        // serve a byte Range as 206 Partial Content
 	CompressionOptions compression{};
+	// Disabled for existing consumers. Authority opts into an absolute request
+	// network deadline so trickled headers/body bytes cannot renew admission.
+	std::chrono::milliseconds request_timeout{0};
 };
 
 namespace detail {
@@ -421,6 +424,18 @@ public:
 		}
 		co_return co_await stream_.async_read_some(output, asio::use_awaitable);
 	}
+	asio::awaitable<std::size_t> read(asio::mutable_buffer output, std::chrono::steady_clock::time_point deadline) {
+		if (deadline == std::chrono::steady_clock::time_point::max()) { co_return co_await read(output); }
+		using namespace asio::experimental::awaitable_operators;
+		auto winner = co_await (read_completed(output) || expire_read(deadline));
+		if (winner.index() == 0) {
+			auto result = std::get<0>(winner);
+			if (result.failure) { std::rethrow_exception(result.failure); }
+			co_return result.bytes;
+		}
+		auto error = std::get<1>(winner);
+		throw asio::system_error(error ? error : asio::error::timed_out);
+	}
 	asio::awaitable<void> drain() {
 		while (pending_) {
 			done_.expires_at(std::chrono::steady_clock::time_point::max());
@@ -428,6 +443,22 @@ public:
 		}
 	}
 private:
+	struct ReadCompletion { std::size_t bytes; std::exception_ptr failure; };
+	asio::awaitable<ReadCompletion> read_completed(asio::mutable_buffer output) {
+		try { co_return ReadCompletion{co_await read(output), {}}; }
+		catch (...) { co_return ReadCompletion{0, std::current_exception()}; }
+	}
+	asio::awaitable<asio::error_code> expire_read(std::chrono::steady_clock::time_point deadline) {
+		asio::steady_timer timer(stream_.get_executor()); timer.expires_at(deadline);
+		asio::error_code error; co_await timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
+		if (!error) {
+			// The deferred monitor may own a callback-based original read outside
+			// this coroutine's cancellation slot. Cancel that socket operation too,
+			// then the OR join and connection drain retain its storage until reap.
+			asio::error_code ignored; stream_.lowest_layer().cancel(ignored);
+		}
+		co_return error;
+	}
 	Stream& stream_; asio::steady_timer done_;
 	char byte_ = 0; std::size_t size_ = 0; asio::error_code error_;
 	bool pending_ = false, ready_ = false;
@@ -466,6 +497,7 @@ template<class Stream>
 inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::shared_ptr<ConnectionInput<Stream>>& input, HttpHandler* handler,
                                               reactor::Reactor* reactor, const AsioResponseOptions* options) {
 	using asio::use_awaitable;
+	std::optional<RequestRejected> rejected;
 	try {
 		asio::error_code opt_ec;
 		socket.lowest_layer().set_option(asio::ip::tcp::no_delay(true), opt_ec);
@@ -488,10 +520,13 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 		char tmp[64 * 1024];
 
 		for (;;) {
+			const auto request_deadline = options && options->request_timeout.count() > 0
+				? std::chrono::steady_clock::now() + options->request_timeout
+				: std::chrono::steady_clock::time_point::max();
 			// Phase 1: parse the request line + headers.
 			while (!parser.headers_done()) {
 				if (buffered.empty()) {
-					std::size_t n = co_await input->read(asio::buffer(tmp));
+					std::size_t n = co_await input->read(asio::buffer(tmp), request_deadline);
 					if (n == 0) { co_return; }
 					buffered.append(tmp, n);
 				}
@@ -524,7 +559,7 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 						if (parser.complete()) { break; }
 						if (buffered.empty()) {
 							std::size_t n = 0;
-							try { n = co_await input->read(asio::buffer(tmp)); } catch (const asio::system_error& e) { fec = e.code(); }
+							try { n = co_await input->read(asio::buffer(tmp), request_deadline); } catch (const asio::system_error& e) { fec = e.code(); }
 							if (fec || n == 0) { reader->abort(); co_return; }
 							buffered.append(tmp, n);
 						}
@@ -576,7 +611,9 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 			} else {
 				std::string head = writer.serialize_head(keep_alive);
 				std::array<asio::const_buffer, 2> buffers{asio::buffer(head), writer.has_body() ? asio::buffer(writer.body()) : asio::const_buffer{}};
-				co_await asio::async_write(socket, buffers, use_awaitable);
+				if (request_deadline == std::chrono::steady_clock::time_point::max()) {
+					co_await asio::async_write(socket, buffers, use_awaitable);
+				} else if (co_await write_before_deadline(socket, buffers, request_deadline) != ReplySettlement::Written) { co_return; }
 			}
 				if (!keep_alive || writer.wants_close()) { break; }
 				parser.reset();
@@ -586,7 +623,7 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 			// ---- BUFFERED / PUSH path ----
 			while (!parser.complete()) {
 				if (buffered.empty()) {
-					std::size_t n = co_await input->read(asio::buffer(tmp));
+					std::size_t n = co_await input->read(asio::buffer(tmp), request_deadline);
 					buffered.append(tmp, n);
 				}
 				std::size_t used = parser.feed(buffered.data(), buffered.size());
@@ -594,6 +631,7 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 				if (parser.errored()) { co_return; }
 			}
 
+			if (std::chrono::steady_clock::now() >= request_deadline) { co_return; }
 			Request request = parser.take();
 			parser.resume();
 			bool keep_alive = request.keep_alive;
@@ -634,13 +672,27 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 			} else {
 				std::string head = writer.serialize_head(keep_alive);
 				std::array<asio::const_buffer, 2> buffers{asio::buffer(head), writer.has_body() ? asio::buffer(writer.body()) : asio::const_buffer{}};
-				co_await asio::async_write(socket, buffers, use_awaitable);
+				if (request_deadline == std::chrono::steady_clock::time_point::max()) {
+					co_await asio::async_write(socket, buffers, use_awaitable);
+				} else if (co_await write_before_deadline(socket, buffers, request_deadline) != ReplySettlement::Written) { co_return; }
 			}
 			if (!keep_alive || writer.wants_close()) { break; }
 		}
+	} catch (const RequestRejected& error) {
+		rejected.emplace(error);
 	} catch (const std::exception&) {
 		// client hangup / read-write error -- drop the connection
 	}
+	if (rejected) {
+		// Parser/body ownership has already unwound. The bounded error body
+		// consumes no publisher reservation and cannot wait on a slow reader.
+		std::string text(rejected->what());
+		std::string head = "HTTP/1.1 " + std::to_string(rejected->status()) + " " + reason_phrase(rejected->status()) +
+			"\r\nContent-Type: " + std::string(rejected->content_type()) + "\r\nContent-Length: " + std::to_string(text.size()) + "\r\nConnection: close\r\n\r\n";
+		std::array<asio::const_buffer, 2> buffers{asio::buffer(head), asio::buffer(text)};
+		co_await write_before_deadline(socket, buffers, std::chrono::steady_clock::now() + std::chrono::seconds(1));
+	}
+
 }
 
 template<class Stream>
@@ -666,24 +718,42 @@ class HttpAsioService {
 public:
 	using ConnectionFactory = std::function<asio::awaitable<void>(asio::ip::tcp::socket,
 		HttpHandler*, reactor::Reactor*, const AsioResponseOptions*)>;
+	using TimedConnectionFactory = std::function<asio::awaitable<void>(asio::ip::tcp::socket,
+		HttpHandler*, reactor::Reactor*, const AsioResponseOptions*, reactor::SessionContext)>;
 	// `reactors` runtimes; each with `workers` offload threads (0 => inline) and an
 	// offload admission window of `queue_limit`.
 	HttpAsioService(HttpHandler& handler, std::size_t reactors, std::size_t workers, std::size_t queue_limit,
 		ConnectionFactory connection = {})
+		: HttpAsioService(handler, reactors, workers, queue_limit, TimedConnectionFactory{
+			[connection = std::move(connection)](asio::ip::tcp::socket socket, HttpHandler* handler,
+				reactor::Reactor* reactor, const AsioResponseOptions* options, reactor::SessionContext) {
+				if (connection) { return connection(std::move(socket), handler, reactor, options); }
+				return detail::serve_connection(std::move(socket), handler, reactor, options);
+			}}, 0) {}
+	// Explicit sixth argument keeps existing five-argument brace calls unambiguous.
+	HttpAsioService(HttpHandler& handler, std::size_t reactors, std::size_t workers, std::size_t queue_limit,
+		TimedConnectionFactory connection, std::size_t maximum_connections)
 		: handler_(handler), connection_(std::move(connection)),
-		  server_(reactors, workers, static_cast<int>(queue_limit),
-		          [this](asio::ip::tcp::socket socket, reactor::Reactor& r) -> asio::awaitable<void> {
-			          // Not a coroutine itself: it returns serve_connection's awaitable,
-			          // so there is no closure-lifetime pitfall (the Session captures only
-			          // this, a stable pointer; the coroutine frame owns the socket).
-			          if (connection_) { return connection_(std::move(socket), &handler_, &r, &response_); }
-			          return detail::serve_connection(std::move(socket), &handler_, &r, &response_);
-		          }) {}
+		  server_(reactors, workers, static_cast<int>(queue_limit), reactor::TimedSession{
+			[this](asio::ip::tcp::socket socket, reactor::Reactor& reactor, reactor::SessionContext context) {
+				if (connection_) { return connection_(std::move(socket), &handler_, &reactor, &response_, context); }
+				return detail::serve_connection(std::move(socket), &handler_, &reactor, &response_);
+			}}, maximum_connections) {}
 
 	HttpAsioService(const HttpAsioService&) = delete;
 	HttpAsioService& operator=(const HttpAsioService&) = delete;
 
 	void set_bind_options(const AsioBindOptions& options) { server_.set_bind_options(options); }
+	void set_connection_limit(std::size_t maximum) { server_.set_connection_limit(maximum); }
+	reactor::ConnectionStats connection_stats() const noexcept { return server_.connection_stats(); }
+	std::shared_ptr<const reactor::ConnectionAdmission> connection_observer() const noexcept { return server_.connection_observer(); }
+	void set_request_timeout(std::chrono::milliseconds timeout) {
+		if (started_) { throw std::logic_error("request network timeout must be set before startup"); }
+		if (timeout < std::chrono::milliseconds::zero() || timeout > std::chrono::hours(24)) {
+			throw std::invalid_argument("request network timeout must be between zero and 24 hours");
+		}
+		response_.request_timeout = timeout;
+	}
 	void enable_compression(CompressionOptions options = {}) {
 		response_.compress = true;
 		response_.compression = std::move(options);
@@ -696,8 +766,8 @@ public:
 	void enable_ranges() { response_.ranges = true; }
 
 	// Bind + run all reactors (each on its own thread). Returns once the threads are
-	// launched; the caller keeps its thread and stops with stop().
-	void start(unsigned short port) { server_.start(port); }
+	// listening; the caller keeps its thread and stops with stop().
+	void start(unsigned short port) { started_ = true; server_.start(port); }
 
 	// Abort in-flight streams, stop the loops, join. Also runs from the destructor
 	// (server_'s own dtor), so a service going out of scope tears down cleanly.
@@ -711,7 +781,8 @@ private:
 	// is torn down before the handler and options it referenced.
 	HttpHandler& handler_;
 	AsioResponseOptions response_{};
-	ConnectionFactory connection_;
+	bool started_ = false;
+	TimedConnectionFactory connection_;
 	reactor::TcpServer server_;
 };
 

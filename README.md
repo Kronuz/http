@@ -111,3 +111,13 @@ The common HTTP parser and response path operate on the plaintext stream. A defe
 ### Streaming request retirement
 
 Shutdown aborts the body reader, then joins the original pool handler with cleanup cancellation disabled. The request and response writer remain alive until the handler returns, including after a canceled body read. This uses the reactor session completion barrier in reactor `863bed0`.
+
+`HttpAsioService` preserves the existing ConnectionFactory and constructor APIs. An additive TimedConnectionFactory receives reactor's acceptance timestamp and an explicit sixth constructor argument sets a global connection cap before destination dispatch. `set_connection_limit()` and `connection_stats()` expose the same gate for existing factories. The timed path requires the matching reactor connection-admission API; upgrade the sibling reactor headers together when adopting it.
+
+For TLS, `tls_connection_factory_timed()` uses the original accept timestamp so destination queue wait consumes the handshake deadline. Pass it with an explicit service connection bound. The original `tls_connection_factory()` remains source-compatible and keeps its destination-side handshake/idle-connection limits; without a service-level gate it does not bound sockets queued before the factory starts. TLS allocation follows capacity and elapsed-deadline checks. Transport leases survive original serving IO and refund on retirement.
+
+`HttpAsioService::set_request_timeout()` optionally sets one absolute header/body deadline per request, with a maximum of 24 hours and zero disabling it. Set it before starting the service. Fragments do not renew the deadline; buffered replies use the remaining budget. Deferred replies retain their own independently specified deadline. This extension does not add a deadline to arbitrary direct streaming writes.
+
+Handlers can throw `http::RequestRejected(status, body, content)` from header/body admission to send a bounded rejection before consuming the request body. Status must be 400–599 and body at most 512 bytes; content selects fixed text or JSON framing. The transport closes after writing the rejection, with a one-second write bound. The exception derives from `std::invalid_argument` for existing admission catches.
+
+`connection_observer()` returns read-only shared transport admission state for background metrics. The observer outlives the HTTP service safely. These transport extensions require the matching reactor headers (`a0bc26c` or newer); existing HTTP call signatures remain available.
