@@ -17,15 +17,10 @@ with **http-parser**, builds a `Request`, hands it to the handler, and frames th
 written response back over the socket. The search engine becomes one `HttpHandler`;
 the demo is another.
 
-The handler writes through a `ResponseWriter`, which serves both shapes with one
-interface and hides the HTTP/1.1 framing:
+The handler writes through a `ResponseWriter`, which hides HTTP/1.1 framing. `send()` and ordinary `write()` calls use the buffered Asio path. Large asynchronous responses transfer authority through the optional [owned streaming capability](OWNED_STREAMING.md), with independent immutable chunks, producer backpressure and original socket completion before retirement.
 
 ```cpp
-resp.send(200, body);              // buffered: the writer sets Content-Length
-// or
-resp.status(200);                  // streamed: multiple writes -> chunked encoding,
-for (auto& row : rows) resp.write(row);   // so a DUMP or a large result set never
-resp.end();                        // has to sit in memory all at once
+resp.send(200, body); // Buffered response with Content-Length.
 ```
 
 ```sh
@@ -33,7 +28,7 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
 ./build/kv_store 8080          # a REST key/value app, served through the seam
 curl -XPUT localhost:8080/kv/greeting -d 'hello'
 curl       localhost:8080/kv/greeting        # -> hello (Content-Length)
-curl       localhost:8080/stream/5           # -> five lines (chunked)
+curl       localhost:8080/stream/5           # -> five lines (buffered demo)
 ```
 
 `examples/kv_store.cc` is a complete REST app in a `Router` of closures. It never

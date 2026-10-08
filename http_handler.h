@@ -50,6 +50,7 @@
 
 #include "http_message.h"
 #include "http_deferred.h"
+#include "http_owned_stream.h"
 
 namespace http {
 
@@ -92,6 +93,8 @@ public:
 	// Transfer response authority to an owned capability, when supported.
 	// Existing synchronous writers remain source-compatible.
 	virtual std::unique_ptr<DeferredReply> defer(DeferredOptions) { return {}; }
+	// Optional independently owned finite-body streaming capability.
+	virtual OwnedStreamCapability stream(StreamOptions) { return {}; }
 
 	// ---- buffered conveniences (non-virtual) ----
 	void content_type(std::string_view ct) { set_header("Content-Type", ct); }

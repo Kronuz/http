@@ -180,9 +180,7 @@ also have direct unit coverage in `test/test.cc`.
 
 ## Limitations
 
-- **Response-side streaming** (chunked `Transfer-Encoding`) is not in the Asio writer
-  yet — it buffers the whole response, so a huge response is held in memory.
-  Request-side streaming (push and concurrent pull) is done.
+- Ordinary Asio `write()` calls remain buffered. Optional response-side streaming uses `ResponseWriter::stream()` and its independently owned capability; exact-length and bounded chunked modes are described in `OWNED_STREAMING.md`. Request-side push and concurrent pull streaming remain available.
 
 ## Build / test
 

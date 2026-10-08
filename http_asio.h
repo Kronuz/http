@@ -62,6 +62,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <type_traits>
+#include <charconv>
 
 #include "http_compression.h"
 #include "http_conditional.h"
@@ -70,6 +72,7 @@
 #include "http_range.h"
 #include "http_request_parser.h"
 #include "reactor.h"
+#include "http_owned_stream_asio.h"
 
 namespace http {
 
@@ -151,16 +154,40 @@ public:
 	AsioResponseWriter(const Request& request, const AsioResponseOptions* options, const asio::any_io_executor* executor, reactor::Reactor* reactor)
 		: request_(request), options_(options), executor_(executor), reactor_(reactor) {}
 	~AsioResponseWriter() override {
+		if (stream_) { try { stream_->exchange->close(ReplySettlement::Shutdown); } catch (...) {} stream_->disable(); try { stream_->exchange->settle(); } catch (...) {} }
 		if (deferred_) { try { deferred_->exchange->close(ReplySettlement::Shutdown); } catch (...) {} deferred_->disable(); try { deferred_->exchange->settle(ReplySettlement::Shutdown); } catch (...) {} }
 	}
 	std::unique_ptr<DeferredReply> defer(DeferredOptions options) override {
 		if (!executor_) { return {}; }
-		if (started_ || ended_ || !headers_.empty() || close_ || deferred_) { throw std::logic_error("response authority already used"); }
+		if (started_ || ended_ || !headers_.empty() || close_ || deferred_ || stream_) { throw std::logic_error("response authority already used"); }
 		auto control = detail::AsioDeferredControl::create(*executor_, std::move(options));
 		if (reactor_) { reactor_->track(control); }
 		auto capability = std::make_unique<DeferredReply>(control->exchange); deferred_ = std::move(control); return capability;
 	}
 	const std::shared_ptr<detail::AsioDeferredControl>& deferred() const noexcept { return deferred_; }
+	OwnedStreamCapability stream(StreamOptions options) override {
+		if (!executor_)
+			return {};
+		if (started_ || ended_ || !headers_.empty() || close_ || deferred_ || stream_)
+			throw std::logic_error("response authority already used");
+		options.allow_keep_alive = options.allow_keep_alive && request_.keep_alive;
+		auto resource = options.resource;
+		auto control = detail::AsioOwnedStreamControl::create(*executor_, std::move(options));
+		if (reactor_)
+			reactor_->track(control);
+		auto capability = detail::make_resource_unique<OwnedStreamReply>(resource, control->exchange);
+		stream_ = std::move(control);
+		return capability;
+	}
+	const std::shared_ptr<detail::AsioOwnedStreamControl> &owned_stream() const noexcept { return stream_; }
+	bool is_deferred() const noexcept { return deferred_ || stream_; }
+	void abandon_deferred() {
+		if (deferred_)
+			deferred_->exchange->abandon();
+		if (stream_)
+			stream_->exchange->close(ReplySettlement::Abandoned);
+	}
+
 	void adopt_deferred(Response response) {
 		if (!deferred_ || deferred_->exchange->phase() != detail::DeferredExchange::Phase::Writing) { throw std::logic_error("deferred response unavailable"); }
 		status_ = response.status; headers_ = std::move(response.headers); headers_.emplace_back("Content-Type", std::move(response.content_type)); body_ = std::move(response.body); close_ = response.close; started_ = ended_ = true;
@@ -173,7 +200,7 @@ public:
 	void set_close() override { synchronous(); close_ = true; }
 
 	bool ended() const { return ended_; }
-	bool wants_close() const { return close_; }
+	bool wants_close() const { return close_ || (stream_ && stream_->exchange->close_after()); }
 
 	// BufferedResponse: read the app-level response back by reference (the transforms
 	// in serialize_head() run later, so this is the pre-transform view a logger wants).
@@ -216,10 +243,11 @@ public:
 	const std::string& body() const { return body_; }
 
 private:
-	void synchronous() const { if (deferred_) { throw std::logic_error("response authority was deferred"); } }
+	void synchronous() const { if (is_deferred()) { throw std::logic_error("response authority was deferred"); } }
 	const asio::any_io_executor* executor_ = nullptr;
 	reactor::Reactor* reactor_ = nullptr;
 	std::shared_ptr<detail::AsioDeferredControl> deferred_;
+	std::shared_ptr<detail::AsioOwnedStreamControl> stream_;
 	const Request& request_;
 	const AsioResponseOptions* options_;
 	int status_ = 200;
@@ -380,9 +408,9 @@ private:
 // with the reactor free -- the un-stallable path. A request the handler marked
 // wants_body_stream runs CONCURRENTLY: the handler on the pool pulls body chunks from a
 // flow-controlled BodyReader that the reactor feeds -- O(buffer) memory for any size.
-template<class Stream>
+template<class Stream, std::size_t N>
 inline asio::awaitable<ReplySettlement> write_before_deadline(Stream& socket,
-	std::array<asio::const_buffer, 2> buffers, std::chrono::steady_clock::time_point deadline) {
+	std::array<asio::const_buffer, N> buffers, std::chrono::steady_clock::time_point deadline) {
 	using namespace asio::experimental::awaitable_operators;
 	auto executor = co_await asio::this_coro::executor; asio::steady_timer timer(executor); timer.expires_at(deadline);
 	asio::error_code write_error, timer_error;
@@ -396,8 +424,10 @@ template<class Stream>
 class ConnectionInput : public std::enable_shared_from_this<ConnectionInput<Stream>> {
 public:
 	explicit ConnectionInput(Stream& stream) : stream_(stream), done_(stream.get_executor()) {}
-	void monitor(const std::shared_ptr<AsioDeferredControl>& control) {
-		observer_ = control;
+	template<class Control>
+	void monitor(const std::shared_ptr<Control>& control) {
+		if constexpr (std::is_same_v<Control, AsioDeferredControl>) observer_ = control;
+		else { static_assert(std::is_same_v<Control, AsioOwnedStreamControl>); owned_observer_ = control; }
 		if (ready_ && error_ && error_ != asio::error::eof) {
 			control->exchange->close(ReplySettlement::Disconnected); return;
 		}
@@ -410,6 +440,7 @@ public:
 				owner->done_.cancel();
 				if (error && error != asio::error::eof) {
 					if (auto c = owner->observer_.lock()) { c->exchange->close(ReplySettlement::Disconnected); }
+					if (auto c = owner->owned_observer_.lock()) { c->exchange->close(ReplySettlement::Disconnected); }
 				}
 			});
 		} catch (...) { pending_ = false; throw; }
@@ -463,10 +494,66 @@ private:
 	char byte_ = 0; std::size_t size_ = 0; asio::error_code error_;
 	bool pending_ = false, ready_ = false;
 	std::weak_ptr<AsioDeferredControl> observer_;
+	std::weak_ptr<AsioOwnedStreamControl> owned_observer_;
 };
-template<class Stream>
-inline asio::awaitable<bool> write_response(Stream& socket, AsioResponseWriter& writer, bool keep_alive,
-	const std::shared_ptr<ConnectionInput<Stream>>& input) {
+template <class Stream>
+inline asio::awaitable<bool> write_owned_response(Stream &socket,
+												  const std::shared_ptr<AsioOwnedStreamControl> &control,
+												  const std::shared_ptr<ConnectionInput<Stream>> &input) {
+	input->monitor(control);
+	auto executor = co_await asio::this_coro::executor;
+	while (true) {
+		if (std::chrono::steady_clock::now() >= control->exchange->deadline())
+			control->exchange->close(ReplySettlement::TimedOut);
+		if (control->exchange->settle())
+			co_return control->exchange->closing_reason() == ReplySettlement::Written;
+		auto original = control->exchange->take_write();
+		if (!original) {
+			co_await control->wait();
+			auto cancellation = co_await asio::this_coro::cancellation_state;
+			if (cancellation.cancelled() != asio::cancellation_type::none)
+				control->exchange->close(ReplySettlement::Shutdown);
+			continue;
+		}
+		const auto serial = original->serial;
+		std::array<char, 32> chunk_head;
+		std::string_view prefix, suffix;
+		if (original->terminal)
+			prefix = "0\r\n\r\n";
+		else if (original->chunked && !original->chunk.bytes.empty()) {
+			auto number = std::to_chars(chunk_head.data(), chunk_head.data() + chunk_head.size() - 2,
+										original->chunk.bytes.size(), 16);
+			if (number.ec != std::errc{})
+				throw std::logic_error("HTTP chunk length overflow");
+			*number.ptr++ = '\r';
+			*number.ptr++ = '\n';
+			prefix = {chunk_head.data(), static_cast<std::size_t>(number.ptr - chunk_head.data())};
+			suffix = "\r\n";
+		}
+		std::array<asio::const_buffer, 4> buffers{asio::buffer(original->head), asio::buffer(prefix),
+												  asio::buffer(original->chunk.bytes), asio::buffer(suffix)};
+		ReplySettlement outcome;
+		try {
+			outcome = co_await asio::co_spawn(
+				executor, write_before_deadline(socket, buffers, control->exchange->deadline()),
+				asio::bind_cancellation_slot(control->write_cancellation(), asio::use_awaitable));
+		} catch (...) {
+			original.reset();
+			control->exchange->complete_write(serial, ReplySettlement::Failed);
+			control->exchange->close(ReplySettlement::Failed);
+			control->exchange->settle();
+			throw;
+		}
+		// The OR join has reaped the original socket operation. Only now may
+		// its immutable body owner retire and wake the next producer turn.
+		original.reset();
+		control->exchange->complete_write(serial, outcome);
+	}
+}
+template <class Stream>
+inline asio::awaitable<bool> write_response(Stream &socket, AsioResponseWriter &writer, bool keep_alive,
+											const std::shared_ptr<ConnectionInput<Stream>> &input) {
+	if (auto stream = writer.owned_stream()) { co_return co_await write_owned_response(socket, stream, input); }
 	auto control = writer.deferred();
 	if (control) {
 		if (control->exchange->phase() == DeferredExchange::Phase::Waiting) {
@@ -581,7 +668,7 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 				asio::co_spawn(hexec,
 					[handler, &request, &writer]() -> asio::awaitable<void> {
 						try { handler->handle(request, writer); }
-						catch (...) { if (writer.deferred()) { writer.deferred()->exchange->abandon(); } else if (!writer.ended()) { handler->on_error(std::current_exception(), request, writer); } }
+						catch (...) { if (writer.is_deferred()) { writer.abandon_deferred(); } else if (!writer.ended()) { handler->on_error(std::current_exception(), request, writer); } }
 						co_return;
 					},
 					[done](std::exception_ptr) { (void)done->try_send(asio::error_code{}); });
@@ -601,12 +688,12 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 				if (canceled || reactor->stopping()) { co_return; }
 				co_await asio::this_coro::reset_cancellation_state(asio::enable_terminal_cancellation());
 
-				if (!writer.deferred() && !writer.ended()) {
+				if (!writer.is_deferred() && !writer.ended()) {
 					writer.status(500);
 					writer.write("Internal Server Error\n");
 					writer.end();
 				}
-				if (writer.deferred()) {
+				if (writer.is_deferred()) {
 				if (!co_await write_response(socket, writer, keep_alive, input)) { co_return; }
 			} else {
 				std::string head = writer.serialize_head(keep_alive);
@@ -659,15 +746,15 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 				}
 			} catch (...) {
 				if (offload_active) { reactor->gate().leave(); }
-				if (writer.deferred()) { writer.deferred()->exchange->abandon(); } else if (!writer.ended()) { handler->on_error(std::current_exception(), request, writer); }
-				if (!writer.deferred() && !writer.ended()) {
+				if (writer.is_deferred()) { writer.abandon_deferred(); } else if (!writer.ended()) { handler->on_error(std::current_exception(), request, writer); }
+				if (!writer.is_deferred() && !writer.ended()) {
 					writer.status(500);
 					writer.write("Internal Server Error\n");
 					writer.end();
 				}
 			}
 
-			if (writer.deferred()) {
+			if (writer.is_deferred()) {
 				if (!co_await write_response(socket, writer, keep_alive, input)) { co_return; }
 			} else {
 				std::string head = writer.serialize_head(keep_alive);
