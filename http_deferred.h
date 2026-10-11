@@ -134,6 +134,19 @@ class DeferredExchange {
 		notify(wake);
 		return result;
 	}
+	bool observe_peer_disconnect() {
+		std::function<void()> wake;
+		{
+			std::lock_guard lock(mutex_);
+			if (phase_ == Phase::Writing || phase_ == Phase::Closing || phase_ == Phase::Settled)
+				return false;
+			phase_ = Phase::Closing;
+			reason_ = ReplySettlement::Disconnected;
+			wake = wake_;
+		}
+		notify(wake);
+		return true;
+	}
 	bool close(ReplySettlement reason) {
 		std::function<void()> wake;
 		{
@@ -225,9 +238,7 @@ class DeferredExchange {
 			}
 		}
 	}
-	ReplySubmit validate(const Response &response) const {
-		return validate_reply(response, options_.limits);
-	}
+	ReplySubmit validate(const Response &response) const { return validate_reply(response, options_.limits); }
 	mutable std::mutex mutex_;
 	DeferredOptions options_;
 	std::function<void()> wake_;

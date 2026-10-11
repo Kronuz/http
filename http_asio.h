@@ -429,7 +429,7 @@ public:
 		if constexpr (std::is_same_v<Control, AsioDeferredControl>) observer_ = control;
 		else { static_assert(std::is_same_v<Control, AsioOwnedStreamControl>); owned_observer_ = control; }
 		if (ready_ && error_ && error_ != asio::error::eof) {
-			control->exchange->close(ReplySettlement::Disconnected); return;
+			control->exchange->observe_peer_disconnect(); return;
 		}
 		if (pending_ || ready_) { return; }
 		pending_ = true;
@@ -439,8 +439,8 @@ public:
 				owner->pending_ = false; owner->ready_ = true; owner->error_ = error; owner->size_ = size;
 				owner->done_.cancel();
 				if (error && error != asio::error::eof) {
-					if (auto c = owner->observer_.lock()) { c->exchange->close(ReplySettlement::Disconnected); }
-					if (auto c = owner->owned_observer_.lock()) { c->exchange->close(ReplySettlement::Disconnected); }
+					if (auto c = owner->observer_.lock()) { c->exchange->observe_peer_disconnect(); }
+					if (auto c = owner->owned_observer_.lock()) { c->exchange->observe_peer_disconnect(); }
 				}
 			});
 		} catch (...) { pending_ = false; throw; }

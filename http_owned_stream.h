@@ -174,6 +174,24 @@ class OwnedStreamExchange : public std::enable_shared_from_this<OwnedStreamExcha
 		notify(wake);
 		return true;
 	}
+	bool observe_peer_disconnect() {
+		std::function<void()> wake;
+		{
+			std::lock_guard lock(mutex_);
+			if (closed())
+				return false;
+			// A peer read closure does not cancel an accepted final write.
+			if (!pending_ && phase_ == Phase::Streaming &&
+				((expected_ && accepted_ == *expected_) ||
+				 (finished_ && (terminal_writing_ || terminal_sent_))))
+				return false;
+			phase_ = Phase::Closing;
+			reason_ = ReplySettlement::Disconnected;
+			wake = wake_;
+		}
+		notify(wake);
+		return true;
+	}
 	bool close(ReplySettlement outcome) {
 		std::function<void()> wake;
 		{

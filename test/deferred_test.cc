@@ -60,6 +60,34 @@ void held_write() {
 	check(capability.complete({}) == ReplySubmit::Closed && wakeups == 2,
 		  "escaped capability performs no wakeup after settlement");
 }
+void peer_disconnect() {
+	using namespace http;
+	for (auto reason : {ReplySettlement::Written, ReplySettlement::Disconnected, ReplySettlement::TimedOut,
+						ReplySettlement::Abandoned, ReplySettlement::Shutdown}) {
+		unsigned settlements = 0;
+		auto o = options();
+		o.on_settled = [&](ReplySettlement actual) {
+			check(actual == reason, "peer observation preserves authentic write or explicit cancellation");
+			++settlements;
+		};
+		auto exchange = std::make_shared<detail::DeferredExchange>(std::move(o), [] {});
+		DeferredReply producer(exchange);
+		check(producer.complete({}) == ReplySubmit::Accepted, "response admitted");
+		auto original = exchange->take_response();
+		check(original.has_value() && !exchange->observe_peer_disconnect(),
+			  "peer closure retains final original");
+		check(settlements == 0, "peer closure does not settle outstanding write");
+		if (reason != ReplySettlement::Written && reason != ReplySettlement::Disconnected)
+			check(exchange->close(reason), "explicit cancellation overrides peer observation");
+		original.reset();
+		check(exchange->settle(reason == ReplySettlement::Disconnected ? reason : ReplySettlement::Written),
+			  "authentic original completion settles response");
+		check(settlements == 1, "one settlement");
+	}
+	auto exchange = std::make_shared<detail::DeferredExchange>(options(), [] {});
+	check(exchange->observe_peer_disconnect(), "disconnect before response closes waiting exchange");
+	check(exchange->settle(ReplySettlement::Disconnected), "waiting disconnect settles");
+}
 void races() {
 	using namespace http;
 	for (unsigned iteration = 0; iteration < 500; ++iteration) {
@@ -136,6 +164,7 @@ void limits_and_abandonment() {
 } // namespace
 int main() {
 	held_write();
+	peer_disconnect();
 	races();
 	limits_and_abandonment();
 	std::cout << "deferred ownership failures: " << failures << '\n';

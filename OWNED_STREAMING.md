@@ -22,6 +22,8 @@ Producer -> Owned chunk slot -> Original socket write
 
 The transport retains the original chunk, header and exchange until socket IO completes, including after cancellation. `close()` changes intent and the first terminal reason; it cannot settle an outstanding write. Stale or duplicate write-completion serials cannot release a newer original. Settlement runs the application hook once while request retention is still alive, then releases that retention. Hooks execute outside the exchange lock. Destroying a capability before `finish()` abandons its response; destroying it after an accepted finish preserves the pending final writes.
 
+Peer read closure is observed separately from explicit cancellation. A fully admitted exact-length response can finish its outstanding final write and producer finish; a chunked response must complete its terminal chunk. Authentic successful completion permits Written even if peer closure was observed first. Partial responses and failed writes remain Disconnected, and timeout, abandonment and shutdown retain their cancellation precedence. A producer that never finishes remains bounded by its deadline.
+
 Asio joins the write/deadline race before releasing payload ownership. Shutdown uses reactor's session barrier, preserving original socket operations until their completion callbacks and coroutine cleanup have run. Escaped producer capabilities retain protocol controls, while executor wakeups use weak ownership and disable before transport teardown.
 
 ## Allocation boundary and footprint

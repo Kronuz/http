@@ -83,6 +83,101 @@ void publication() {
 	chunk.reset();
 	check(exchange->settle() && settled == 1 && writable == 1);
 }
+void peer_disconnect() {
+	for (bool chunked : {false, true}) {
+		for (auto reason :
+			 {ReplySettlement::Written, ReplySettlement::Disconnected, ReplySettlement::TimedOut,
+			  ReplySettlement::Abandoned, ReplySettlement::Shutdown}) {
+			unsigned settled = 0;
+			auto policy = options();
+			policy.reply.on_settled = [&](ReplySettlement actual) {
+				check(actual == reason);
+				++settled;
+			};
+			auto exchange = std::make_shared<detail::OwnedStreamExchange>(std::move(policy), [] {});
+			OwnedStreamReply producer(exchange);
+			check((chunked ? producer.start_chunked({}) : producer.start({}, 4)) == StreamSubmit::Accepted);
+			auto body = std::make_shared<const std::string>("data");
+			std::weak_ptr<const std::string> alive = body;
+			check(producer.publish({body, *body}) == StreamSubmit::Accepted);
+			body.reset();
+			check(producer.finish() == StreamSubmit::Accepted);
+			auto original = exchange->take_write();
+			check(original.has_value());
+			if (chunked) {
+				// The body alone is not a complete chunked response.
+				check(exchange->complete_write(original->serial, ReplySettlement::Written));
+				original.reset();
+				original = exchange->take_write();
+				check(original && original->terminal);
+			}
+			check(!exchange->observe_peer_disconnect());
+			check(!exchange->settle() && settled == 0);
+			if (!chunked)
+				check(!alive.expired());
+			if (reason != ReplySettlement::Written && reason != ReplySettlement::Disconnected)
+				check(exchange->close(reason));
+			check(exchange->complete_write(original->serial, reason == ReplySettlement::Disconnected
+																 ? reason
+																 : ReplySettlement::Written));
+			original.reset();
+			check(alive.expired());
+			check(exchange->settle() && settled == 1 && !exchange->settle());
+		}
+	}
+	{
+		auto exchange = std::make_shared<detail::OwnedStreamExchange>(options(), [] {});
+		OwnedStreamReply producer(exchange);
+		check(producer.start({}, 4) == StreamSubmit::Accepted);
+		auto body = std::make_shared<const std::string>("data");
+		check(producer.publish({body, *body}) == StreamSubmit::Accepted);
+		auto original = exchange->take_write();
+		check(original && !exchange->observe_peer_disconnect() && !exchange->settle());
+		check(exchange->complete_write(original->serial, ReplySettlement::Written));
+		original.reset();
+		check(!exchange->settle());
+		check(producer.finish() == StreamSubmit::Accepted);
+		check(exchange->settle() && exchange->closing_reason() == ReplySettlement::Written);
+	}
+	for (bool chunked : {false, true}) {
+		auto exchange = std::make_shared<detail::OwnedStreamExchange>(options(), [] {});
+		OwnedStreamReply producer(exchange);
+		check((chunked ? producer.start_chunked({}) : producer.start({}, 4)) == StreamSubmit::Accepted);
+		auto body = std::make_shared<const std::string>(chunked ? "data" : "da");
+		check(producer.publish({body, *body}) == StreamSubmit::Accepted);
+		if (chunked)
+			check(producer.finish() == StreamSubmit::Accepted);
+		auto original = exchange->take_write();
+		check(original && exchange->observe_peer_disconnect() && !exchange->settle());
+		check(exchange->complete_write(original->serial, ReplySettlement::Written));
+		original.reset();
+		check(exchange->settle() && exchange->closing_reason() == ReplySettlement::Disconnected);
+	}
+}
+void peer_completion_boundaries() {
+	for (auto bytes : {0u, 4u}) {
+		for (bool finish : {false, true}) {
+			auto exchange = std::make_shared<detail::OwnedStreamExchange>(options(), [] {});
+			OwnedStreamReply producer(exchange);
+			check(producer.start({}, bytes) == StreamSubmit::Accepted);
+			if (bytes) {
+				auto body = std::make_shared<const std::string>(bytes, 'x');
+				check(producer.publish({body, *body}) == StreamSubmit::Accepted);
+			}
+			auto original = exchange->take_write();
+			check(original && exchange->complete_write(original->serial, ReplySettlement::Written));
+			original.reset();
+			check(!exchange->observe_peer_disconnect() && !exchange->settle());
+			if (finish) {
+				check(producer.finish() == StreamSubmit::Accepted);
+				check(exchange->settle() && exchange->closing_reason() == ReplySettlement::Written);
+			} else {
+				check(exchange->close(ReplySettlement::TimedOut));
+				check(exchange->settle() && exchange->closing_reason() == ReplySettlement::TimedOut);
+			}
+		}
+	}
+}
 void limits() {
 	auto policy = options();
 	policy.maximum_bytes = 3;
@@ -131,6 +226,8 @@ void chunked() {
 int main() {
 	try {
 		held_original();
+		peer_disconnect();
+		peer_completion_boundaries();
 		publication();
 		limits();
 		chunked();
