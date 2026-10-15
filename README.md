@@ -1,5 +1,7 @@
 # http
 
+[![CI](https://github.com/Kronuz/http/actions/workflows/ci.yml/badge.svg)](https://github.com/Kronuz/http/actions/workflows/ci.yml)
+
 A generic, extensible HTTP/1.1 application framework on
 [standalone Asio](https://think-async.com/Asio/) (C++20 coroutines).
 
