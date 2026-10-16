@@ -31,6 +31,35 @@ The only file that knows Asio is `http_asio.h` (and the generic `reactor` runtim
 rides on). The only file that knows the parser is `http_request_parser.h`. Everything
 else is plain C++ over the `Request` / `ResponseWriter` values.
 
+## Why the seam has this shape
+
+The handler takes a `Request` and writes a response — it is never a callback into
+the connection, and it never sees the parser, the socket, or the loop. That value
+semantic keeps the moving parts contained behind the seam, so none of them touch
+application code:
+
+- **Parser (http-parser).** Parsing lives only inside the connection and just
+  *produces* a `Request`. The parser is the Joyent `http_parser` fork
+  ([Kronuz/http-parser](https://github.com/Kronuz/http-parser)), chosen because it
+  accepts arbitrary request methods — Xapiand's REST API uses custom verbs
+  (`COUNT`, `INFO`, `DUMP`, `RESTORE`, …) that a stricter parser like llhttp
+  rejects. Swapping it for another parser is contained here; the handler and the
+  `Request`/`ResponseWriter` are parser-agnostic.
+- **Concurrency (inline or offloaded).** A handler selected by `should_offload` runs on the reactor's bounded worker pool; excess requests receive 503. Inline handlers run on the reactor and must remain nonblocking. The scoped writer and request remain valid only during the handler call. Delayed work transfers exclusive reply authority through `ResponseWriter::defer()` and retains the returned move-only `DeferredReply`, never the writer or request. The connection awaits one reply before handling the next keep-alive request.
+- **Request body (buffered or streamed).** A handler opts into streaming per
+  endpoint (`on_request_body` returns a `BodySink`): the body then flows to the sink
+  chunk-by-chunk as it is parsed, never accumulated, so a multi-gigabyte `RESTORE`
+  or bulk load runs in O(read-buffer) memory. Otherwise the body is buffered into
+  `Request::body` (the convenient path for small requests).
+- **Runtime (Asio).** The handler never sees the reactor. The transport rides on
+  [Kronuz/reactor](https://github.com/Kronuz/reactor), a generic Asio server runtime:
+  N Asio `io_context`s on N threads (thread-per-core, shared-nothing), all bound to one
+  port via `SO_REUSEPORT` where available, with a portable single-acceptor fallback
+  elsewhere (macOS/BSD). Swapping the runtime never reaches the HTTP layer or the app.
+
+The routing table (`Router`) is application configuration — what Xapiand's
+hardcoded `prepare()` method-switch becomes once search is an `HttpHandler`.
+
 ## Runtime: shared-nothing reactors
 
 The runtime is [Kronuz/reactor](https://github.com/Kronuz/reactor), a generic Asio

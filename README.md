@@ -1,120 +1,113 @@
 # http
 
 [![CI](https://github.com/Kronuz/http/actions/workflows/ci.yml/badge.svg)](https://github.com/Kronuz/http/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)
+![Header-only](https://img.shields.io/badge/header--only-yes-green.svg)
 
-A generic, extensible HTTP/1.1 application framework on
-[standalone Asio](https://think-async.com/Asio/) (C++20 coroutines).
+An HTTP/1.1 application framework for C++20 on standalone Asio coroutines. Your app
+implements one method, `handle(Request, ResponseWriter)`; the framework handles
+sockets, parsing, keep-alive, negotiation, compression, and backpressure.
 
-It puts the application *above* the server behind a single seam: an application
-implements one interface —
+![http: connections on per-core reactors parse into a Request, the handler writes a response](docs/http.svg)
+
+## ✨ Highlights
+
+- 🔌 **One seam**: the handler never sees the parser, the socket, or the event loop.
+- 🧵 **Shared-nothing reactors**: one Asio `io_context` per core, with a bounded worker
+  pool for blocking handlers; past its limit, requests get `503` instead of a stall.
+- 🌊 **Bounded memory for any body**: stream request bodies to a `BodySink` chunk by
+  chunk, and stream responses with backpressure.
+- 🤝 **Batteries**: a radix-tree `Router`, content negotiation, zstd/gzip compression,
+  ETags with `304`, and byte ranges with `206`.
+- 🔒 **Optional TLS**, connection caps, and per-request deadlines; OpenSSL is linked
+  only when you use the TLS adapter.
+- 🗣️ **Custom methods**: built on [http-parser](https://github.com/Kronuz/http-parser),
+  so verbs like `COUNT` or `RESTORE` parse.
+
+## 📦 Installation
+
+Requires a C++20 compiler and CMake 3.14 or newer. Asio and the Kronuz dependencies
+are fetched at configure time. CI builds it on Linux (x86_64, arm64), macOS (arm64,
+x86_64), and FreeBSD, plus ASan, UBSan, and TSan builds.
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(http
+  GIT_REPOSITORY https://github.com/Kronuz/http.git
+  GIT_TAG        main)
+FetchContent_MakeAvailable(http)
+
+target_link_libraries(my_app PRIVATE http::http)
+```
+
+## 🚀 Quick start
 
 ```cpp
-struct HttpHandler {
-    virtual void handle(const Request&, ResponseWriter&) = 0;   // request in, response written out
+#include "http_asio.h"
+#include "http_router.h"
+
+#include <chrono>
+#include <thread>
+
+struct App : http::HttpHandler {
+	http::Router router;
+	App() {
+		router.route("GET", "/hello/:name", [](const http::Request&, http::ResponseWriter& resp, const http::Params& p) {
+			resp.send(200, "hello, " + std::string(p.get("name")) + "\n");
+		});
+	}
+	void handle(const http::Request& req, http::ResponseWriter& resp) override { router.handle(req, resp); }
 };
+
+int main() {
+	App app;
+	http::HttpAsioService service(app, /*reactors=*/4, /*workers=*/2, /*queue_limit=*/256);
+	service.start(8080);   // curl localhost:8080/hello/world
+	std::this_thread::sleep_for(std::chrono::minutes(1));
+	service.stop();
+}
 ```
 
-— and the framework does everything else: an Asio coroutine connection parses bytes
-with **http-parser**, builds a `Request`, hands it to the handler, and frames the
-written response back over the socket. The search engine becomes one `HttpHandler`;
-the demo is another.
-
-The handler writes through a `ResponseWriter`, which hides HTTP/1.1 framing. `send()` and ordinary `write()` calls use the buffered Asio path. Large asynchronous responses transfer authority through the optional [owned streaming capability](OWNED_STREAMING.md), with independent immutable chunks, producer backpressure and original socket completion before retirement.
-
-```cpp
-resp.send(200, body); // Buffered response with Content-Length.
-```
+[`examples/kv_store.cc`](examples/kv_store.cc) is a complete REST key/value app,
+including a streamed response and a streamed request body:
 
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
-./build/kv_store 8080          # a REST key/value app, served through the seam
+./build/kv_store 8080 &
 curl -XPUT localhost:8080/kv/greeting -d 'hello'
-curl       localhost:8080/kv/greeting        # -> hello (Content-Length)
-curl       localhost:8080/stream/5           # -> five lines (buffered demo)
+curl localhost:8080/kv/greeting
 ```
 
-`examples/kv_store.cc` is a complete REST app in a `Router` of closures. It never
-names http-parser, a socket, or the event loop.
+## 🎯 When to use it
 
-## Why the seam has this shape
+- ✅ A C++ service that needs a solid HTTP/1.1 front: REST APIs, search or storage
+  servers, admin endpoints.
+- ❌ HTTP/2, HTTP/3, or WebSockets: not implemented.
 
-The handler takes a `Request` and writes a response — it is never a callback into
-the connection, and it never sees the parser, the socket, or the loop. That value
-semantic keeps the moving parts contained behind the seam, so none of them touch
-application code:
+## 📚 Documentation
 
-- **Parser (http-parser).** Parsing lives only inside the connection and just
-  *produces* a `Request`. The parser is the Joyent `http_parser` fork
-  ([Kronuz/http-parser](https://github.com/Kronuz/http-parser)), chosen because it
-  accepts arbitrary request methods — Xapiand's REST API uses custom verbs
-  (`COUNT`, `INFO`, `DUMP`, `RESTORE`, …) that a stricter parser like llhttp
-  rejects. Swapping it for another parser is contained here; the handler and the
-  `Request`/`ResponseWriter` are parser-agnostic.
-- **Concurrency (inline or offloaded).** A handler selected by `should_offload` runs on the reactor's bounded worker pool; excess requests receive 503. Inline handlers run on the reactor and must remain nonblocking. The scoped writer and request remain valid only during the handler call. Delayed work transfers exclusive reply authority through `ResponseWriter::defer()` and retains the returned move-only `DeferredReply`, never the writer or request. The connection awaits one reply before handling the next keep-alive request.
-- **Request body (buffered or streamed).** A handler opts into streaming per
-  endpoint (`on_request_body` returns a `BodySink`): the body then flows to the sink
-  chunk-by-chunk as it is parsed, never accumulated, so a multi-gigabyte `RESTORE`
-  or bulk load runs in O(read-buffer) memory. Otherwise the body is buffered into
-  `Request::body` (the convenient path for small requests).
-- **Runtime (Asio).** The handler never sees the reactor. The transport rides on
-  [Kronuz/reactor](https://github.com/Kronuz/reactor), a generic Asio server runtime:
-  N Asio `io_context`s on N threads (thread-per-core, shared-nothing), all bound to one
-  port via `SO_REUSEPORT` where available, with a portable single-acceptor fallback
-  elsewhere (macOS/BSD). Swapping the runtime never reaches the HTTP layer or the app.
+- [ARCHITECTURE.md](ARCHITECTURE.md): the two layers, why the seam has this shape,
+  the request lifecycle, and the response transforms.
+- [docs/TRANSPORT.md](docs/TRANSPORT.md): deferred replies, TLS, connection caps,
+  request deadlines, and early rejections.
+- [docs/OWNED_STREAMING.md](docs/OWNED_STREAMING.md): owned response streaming.
+- [docs/AUDIT.md](docs/AUDIT.md): transport audit findings, measured before and after.
+- [AGENTS.md](AGENTS.md): file map, invariants, and dependencies.
+- [prism](https://github.com/Kronuz/prism): a full app server built on this library.
 
-The routing table (`Router`) is application configuration — what Xapiand's
-hardcoded `prepare()` method-switch becomes once search is an `HttpHandler`.
+## 🛠️ Building and testing
 
-## Files
+```sh
+cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
+ctest --test-dir build
+```
 
-| File | Role |
-|---|---|
-| `http_message.h` | `Request` and the `Response` value (for buffered handlers), plus `reason_phrase`. |
-| `http_handler.h` | `HttpHandler` (the seam) + `ResponseWriter` (buffered `send` / streamed `write`+`end`) + `BodySink` (streamed request-body intake). |
-| `http_router.h` | `Router` — method/path dispatch, a thin binding over `Kronuz/radix-router`. |
-| `http_accept.h` | `Accept` — content negotiation (Accept / Accept-Encoding / …) per RFC 7231. |
-| `http_compression.h` | Transparent response compression — negotiate `Accept-Encoding` → zstd/gzip (Kronuz/compressors). |
-| `http_conditional.h` | Conditional requests — a weak ETag from the body + `If-None-Match` → `304 Not Modified`. |
-| `http_range.h` | Range requests — a single byte range → `206 Partial Content` (`Content-Range`), `416` if unsatisfiable. |
-| `http_request_parser.h` | `RequestParser` — the transport-agnostic http-parser wrapper: received bytes → `Request` values, with buffered-or-streamed body intake. |
-| `http_asio.h` | The Asio transport: the connection as a C++20 coroutine (parse → handler seam → frame) run as a `reactor::Session`, the buffered `ResponseWriter` with compression, keep-alive, the streaming `ChannelBodyReader`, and `HttpAsioService` (a thin adapter over `reactor::TcpServer`). |
+## 🤝 Contributing
 
-## Dependencies
+Issues and pull requests are welcome. Read [AGENTS.md](AGENTS.md) first. CI must
+pass on every platform.
 
-All via FetchContent, so the build is self-contained and version-pinned (no
-system/brew install):
+## 📄 License
 
-- [standalone Asio](https://github.com/chriskohlhoff/asio) (`asio-1-36-0`) — the reactor + TCP + C++20-coroutine runtime. Header-only, `ASIO_STANDALONE` (no Boost).
-- [`Kronuz/reactor`](https://github.com/Kronuz/reactor) — the generic Asio server runtime (shared-nothing reactor pool + accept + graceful shutdown) `http_asio.h` rides on. Header-only.
-- [`Kronuz/http-parser`](https://github.com/Kronuz/http-parser) — the HTTP parser (accepts custom methods).
-- [`Kronuz/radix-router`](https://github.com/Kronuz/radix-router) — the radix-tree path router behind `Router`.
-- [`Kronuz/compressors`](https://github.com/Kronuz/compressors) — the deflate/gzip + zstd codecs behind response compression.
-
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) for how the pieces fit and the request
-lifecycle; [`AGENTS.md`](AGENTS.md) for the working notes and invariants.
-
-## Owned delayed replies
-
-`defer(DeferredOptions)` returns an owned capability when supported, or null for an existing synchronous transport. Call it before writing any response fields. Supply a finite steady-clock deadline and bounded header/body limits. `complete(Response, reply_retention)` moves one buffered response into the transport and reports acceptance; acceptance does not establish delivery. Request retention and accepted reply retention remain held until the original socket operation completes or is canceled and reaped.
-
-Settlement runs once, outside the exchange lock, with Written, TimedOut, Disconnected, Abandoned, Shutdown or Failed. Written means the local write completed, not that the client received or acted on it. Dropping an unanswered capability abandons the reply; dropping it after acceptance preserves the accepted response. Late submission after shutdown returns Closed without accessing the retired runtime. A sending half-close preserves response interest. Peer read closure while the complete deferred response is already writing preserves its authentic write outcome; explicit timeout, abandonment and shutdown still override successful completion. Deferred replies skip compression, range and conditional transforms so their owned buffers and limits remain stable. Framing headers are transport-owned.
-
-### Optional HTTPS transport
-
-`http_asio_tls.h` adds `tls_connection_factory(shared_context, handshake_deadline, maximum_handshakes, maximum_connections)`, passed as the optional fifth `HttpAsioService` constructor argument. Link OpenSSL only when using this adapter. The caller configures certificates and verification policy. Incoming TLS allocation is capped by a shared handshake limit (64 by default) and total connection limit (1024 by default), and each handshake has one absolute deadline (five seconds by default). The factory retains the context through original operations.
-
-The common HTTP parser and response path operate on the plaintext stream. A deferred response retains one owned read-ahead byte across its write, then returns that byte to the next request. Fatal read errors notify the current deferred exchange. The original four-argument TCP service API remains available without an OpenSSL dependency.
-
-### Streaming request retirement
-
-Shutdown aborts the body reader, then joins the original pool handler with cleanup cancellation disabled. The request and response writer remain alive until the handler returns, including after a canceled body read. This uses the reactor session completion barrier in reactor `863bed0`.
-
-`HttpAsioService` preserves the existing ConnectionFactory and constructor APIs. An additive TimedConnectionFactory receives reactor's acceptance timestamp and an explicit sixth constructor argument sets a global connection cap before destination dispatch. `set_connection_limit()` and `connection_stats()` expose the same gate for existing factories. The timed path requires the matching reactor connection-admission API; upgrade the sibling reactor headers together when adopting it.
-
-For TLS, `tls_connection_factory_timed()` uses the original accept timestamp so destination queue wait consumes the handshake deadline. Pass it with an explicit service connection bound. The original `tls_connection_factory()` remains source-compatible and keeps its destination-side handshake/idle-connection limits; without a service-level gate it does not bound sockets queued before the factory starts. TLS allocation follows capacity and elapsed-deadline checks. Transport leases survive original serving IO and refund on retirement.
-
-`HttpAsioService::set_request_timeout()` optionally sets one absolute header/body deadline per request, with a maximum of 24 hours and zero disabling it. Set it before starting the service. Fragments do not renew the deadline; buffered replies use the remaining budget. Deferred replies retain their own independently specified deadline. This extension does not add a deadline to arbitrary direct streaming writes.
-
-Handlers can throw `http::RequestRejected(status, body, content)` from header/body admission to send a bounded rejection before consuming the request body. Status must be 400–599 and body at most 512 bytes; content selects fixed text or JSON framing. The transport closes after writing the rejection, with a one-second write bound. The exception derives from `std::invalid_argument` for existing admission catches.
-
-`connection_observer()` returns read-only shared transport admission state for background metrics. The observer outlives the HTTP service safely. These transport extensions require the matching reactor headers (`a0bc26c` or newer); existing HTTP call signatures remain available.
+MIT, Copyright (c) 2026 Germán Méndez Bravo. See [LICENSE](LICENSE).

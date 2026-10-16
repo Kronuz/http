@@ -1,0 +1,15 @@
+# http: the request path. Render: d2 --layout elk --sketch --theme 302 docs/http.d2 docs/http.svg
+direction: right
+client: clients {shape: person}
+reactors: "reactor per core" {
+  conn: "connection coroutine\nparse · keep-alive · frame"
+}
+pool: "worker pool\n(bounded; 503 when full)" {shape: queue}
+app: "your HttpHandler\nRouter → views" {shape: hexagon}
+xf: "response transforms\ncompress · ETag/304 · range/206"
+client -> reactors.conn: "bytes"
+reactors.conn -> app: "Request (inline)"
+reactors.conn -> pool: "should_offload"
+pool -> app
+app -> xf: "ResponseWriter"
+xf -> reactors.conn

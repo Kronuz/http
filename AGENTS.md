@@ -28,6 +28,11 @@ http_asio.h           The Asio transport: the connection as a C++20 coroutine (t
                       reactor::Session), the buffered ResponseWriter with compression,
                       keep-alive, the streaming ChannelBodyReader (a reactor::Abortable),
                       and HttpAsioService (a thin adapter over reactor::TcpServer).
+http_deferred.h       DeferredReply: an owned, delayed buffered reply (ResponseWriter::defer()).
+http_owned_stream.h   OwnedStreamCapability: owned response streaming (ResponseWriter::stream()).
+http_owned_stream_asio.h  Its Asio implementation, plain TCP and TLS.
+http_owned_storage.h  Owned chunk storage and allocation refusal for owned streams.
+http_asio_tls.h       Optional TLS adapter (tls_connection_factory); the only OpenSSL user.
 reactor (dep)         The generic Asio server runtime (Kronuz/reactor): the shared-nothing
                       reactor pool, accept/bind strategies, offload gate, and graceful
                       shutdown. Extracted from http_asio.h so other services share it.
@@ -37,6 +42,12 @@ examples/bench_asio.cc Raw-Asio throughput ceiling (no framework) — the refere
                       is measured against.
 examples/bench_http.cc Framework throughput: the same fixed response through HttpAsioService.
 test/test.cc          ctest: method dispatch, 404 vs 405, param capture (transport-agnostic).
+test/deferred_test.cc, deferred_asio_test.cc, owned_stream_test.cc,
+owned_stream_asio_test.cc, offload_test.cc
+                      ctest: deferred replies, owned streaming, worker offload.
+docs/TRANSPORT.md     Deferred replies, TLS, connection and request limits, rejections.
+docs/OWNED_STREAMING.md  Owned response streaming: framing, backpressure, footprint.
+docs/AUDIT.md         Transport audit findings with their before/after measurements.
 test/asio_test.cc     ctest "asio": the transport end-to-end over real TCP — un-stallable
                       offload, 503 backpressure, N reactors (both bind modes), keep-alive,
                       compression, streamed request bodies, error mapping.
@@ -180,7 +191,7 @@ also have direct unit coverage in `test/test.cc`.
 
 ## Limitations
 
-- Ordinary Asio `write()` calls remain buffered. Optional response-side streaming uses `ResponseWriter::stream()` and its independently owned capability; exact-length and bounded chunked modes are described in `OWNED_STREAMING.md`. Request-side push and concurrent pull streaming remain available.
+- Ordinary Asio `write()` calls remain buffered. Optional response-side streaming uses `ResponseWriter::stream()` and its independently owned capability; exact-length and bounded chunked modes are described in `docs/OWNED_STREAMING.md`. Request-side push and concurrent pull streaming remain available.
 
 ## Build / test
 
