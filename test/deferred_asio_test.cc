@@ -6,6 +6,7 @@
 #include <iostream>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <system_error>
 #include <thread>
 #include <unistd.h>
 
@@ -100,10 +101,18 @@ struct Server {
 	std::shared_ptr<App> app;
 	std::unique_ptr<HttpAsioService> service;
 	unsigned short port;
-	explicit Server(std::shared_ptr<App> application = std::make_shared<App>())
-		: app(std::move(application)), service(std::make_unique<HttpAsioService>(*app, 1, 0, 64)),
-		  port(available_port()) {
-		service->start(port);
+	// A probed port can be taken by a parallel test before the bind; probe again then.
+	explicit Server(std::shared_ptr<App> application = std::make_shared<App>()) : app(std::move(application)) {
+		for (int attempt = 0;; ++attempt) {
+			service = std::make_unique<HttpAsioService>(*app, 1, 0, 64);
+			port = available_port();
+			try {
+				service->start(port);
+				return;
+			} catch (const std::system_error &error) {
+				if (error.code() != std::errc::address_in_use || attempt == 9) { throw; }
+			}
+		}
 	}
 	~Server() {
 		service->stop();
