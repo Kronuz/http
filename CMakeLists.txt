@@ -24,7 +24,7 @@ endif()
 find_package(Threads REQUIRED)
 
 # --- the radix-tree path router (transport-agnostic) ---
-FetchContent_Declare(radix_router GIT_REPOSITORY https://github.com/Kronuz/radix-router.git GIT_TAG main)
+FetchContent_Declare(radix_router GIT_REPOSITORY https://github.com/Kronuz/radix-router.git GIT_TAG d03574406e76f7a5dc7d7d4d11eb8bd6c20c6aed)
 FetchContent_MakeAvailable(radix_router)
 
 # --- http-parser (the HTTP parser) ---
@@ -32,14 +32,14 @@ FetchContent_MakeAvailable(radix_router)
 # it accepts arbitrary request methods: Xapiand's REST API uses custom verbs
 # (COUNT, INFO, DUMP, RESTORE, ...) that a method-validating parser rejects. The
 # seam stays parser-agnostic, so this is contained inside the connection.
-FetchContent_Declare(http_parser GIT_REPOSITORY https://github.com/Kronuz/http-parser.git GIT_TAG main)
+FetchContent_Declare(http_parser GIT_REPOSITORY https://github.com/Kronuz/http-parser.git GIT_TAG 30cf36458daa67e385ed38b064937220d168dec4)
 FetchContent_MakeAvailable(http_parser)
 
 # --- compressors (the deflate/gzip + zstd codecs) ---
 # Response compression (http_compression.h) negotiates Accept-Encoding and applies a
 # coding. The codecs are Kronuz/compressors (has compiled units + lz4/zstd/zlib
 # wiring). Previously reached transitively via Kronuz/server; now a direct dependency.
-FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG main)
+FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG ed590c87201afd270afbfbb2d58d5d467c6d23b6)
 FetchContent_MakeAvailable(compressors)
 
 # --- standalone Asio (the runtime + transport substrate) ---
@@ -63,7 +63,7 @@ endif()
 # REACTOR_INCLUDE_DIR to use a local checkout instead of fetching (dev iteration).
 set(REACTOR_INCLUDE_DIR "" CACHE PATH "use an existing Kronuz/reactor dir instead of fetching")
 if(REACTOR_INCLUDE_DIR STREQUAL "")
-	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG main)
+	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG 56783e5f9c3bbe36257e92e4bfd62cc3f53f0d48)
 	FetchContent_MakeAvailable(reactor)
 	set(REACTOR_INCLUDE_DIR "${reactor_SOURCE_DIR}")
 endif()
