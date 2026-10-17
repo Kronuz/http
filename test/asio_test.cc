@@ -46,6 +46,9 @@ struct App : http::HttpHandler {
 		router.route("GET", "/throw", [](const http::Request&, http::ResponseWriter&, const http::Params&) {
 			throw std::runtime_error("boom");
 		});
+		router.route("GET", "/remote", [](const http::Request& req, http::ResponseWriter& w, const http::Params&) {
+			w.send(200, req.remote);
+		});
 	}
 	void handle(const http::Request& req, http::ResponseWriter& resp) override { router.handle(req, resp); }
 	bool should_offload(const http::Request&) const override { return true; }
@@ -378,6 +381,8 @@ int main() {
 		check(r.status == 500 && r.body == "mapped: boom\n", "on_error mapped the exception to 500");
 		auto nf = do_request(port, "/nope");
 		check(nf.status == 404, "unknown path -> 404 from the router");
+		auto who = do_request(port, "/remote");
+		check(who.status == 200 && who.body == "127.0.0.1", "Request::remote is the client's address");
 	}
 	// [H] Streaming request-body intake: a multi-MB NDJSON body streams to the app's
 	// sink chunk-by-chunk (never buffered) -- the gigabyte-safe path. The body is far

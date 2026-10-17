@@ -96,6 +96,7 @@ struct Request {
 	int http_major = 1;
 	int http_minor = 1;
 	bool keep_alive = true;
+	std::string remote;        // the client's IP address as the transport saw it ("" if unknown)
 
 	// Per-request application state, opaque to the library. An app can stash a
 	// context here in on_request_body() and read it back in handle() -- e.g. to

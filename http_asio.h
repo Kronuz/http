@@ -588,12 +588,15 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 	try {
 		asio::error_code opt_ec;
 		socket.lowest_layer().set_option(asio::ip::tcp::no_delay(true), opt_ec);
+		std::string remote;  // the peer's address, for every request on this connection
+		if (auto peer = socket.lowest_layer().remote_endpoint(opt_ec); !opt_ec) { remote = peer.address().to_string(); }
 		auto ex = co_await asio::this_coro::executor;
 		RequestParser parser;
 		// The headers-complete hook: build the app's per-request extension, then choose
 		// how to take the body -- concurrent pull streaming (needs a worker), push to an
 		// on_request_body sink, or buffer into Request::body.
-		parser.set_headers_callback([handler, reactor](Request& req) -> RequestParser::BodyIntake {
+		parser.set_headers_callback([handler, reactor, &remote](Request& req) -> RequestParser::BodyIntake {
+			req.remote = remote;
 			req.extension = handler->create_extension(req);
 			RequestParser::BodyIntake intake;
 			if (reactor->pool() != nullptr && handler->wants_body_stream(req)) {
@@ -625,6 +628,7 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 			if (parser.streaming()) {
 				// ---- CONCURRENT PULL STREAMING ----
 				Request request = parser.take_headers();
+				request.remote = remote;
 				bool keep_alive = request.keep_alive;
 				auto reader = std::make_shared<ChannelBodyReader>(ex, /*capacity=*/8);
 				request.body_reader = reader;
@@ -720,6 +724,7 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 
 			if (std::chrono::steady_clock::now() >= request_deadline) { co_return; }
 			Request request = parser.take();
+			request.remote = remote;
 			parser.resume();
 			bool keep_alive = request.keep_alive;
 			// The extension and the body (streamed to the app's sink, or buffered into
