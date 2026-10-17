@@ -63,7 +63,7 @@ endif()
 # REACTOR_INCLUDE_DIR to use a local checkout instead of fetching (dev iteration).
 set(REACTOR_INCLUDE_DIR "" CACHE PATH "use an existing Kronuz/reactor dir instead of fetching")
 if(REACTOR_INCLUDE_DIR STREQUAL "")
-	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG 56783e5f9c3bbe36257e92e4bfd62cc3f53f0d48)
+	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG e19afd966d5cf18e377649398096be66fb40e800)
 	FetchContent_MakeAvailable(reactor)
 	set(REACTOR_INCLUDE_DIR "${reactor_SOURCE_DIR}")
 endif()
@@ -128,4 +128,18 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	target_link_libraries(asio_test PRIVATE http)
 	add_test(NAME asio COMMAND asio_test)
 	set_tests_properties(asio PROPERTIES TIMEOUT 60)
+
+	# The TLS connection factory and its failure hook, when reactor built its TLS layer.
+	if(TARGET reactor::tls)
+		add_executable(tls_asio_test test/tls_asio_test.cc)
+		target_link_libraries(tls_asio_test PRIVATE http reactor::tls)
+		add_test(NAME tls_asio COMMAND tls_asio_test)
+		set_tests_properties(tls_asio PROPERTIES TIMEOUT 60)
+	endif()
+
+	# The idle, header, and inactivity timeouts over real TCP.
+	add_executable(timeouts_test test/timeouts_test.cc)
+	target_link_libraries(timeouts_test PRIVATE http)
+	add_test(NAME timeouts COMMAND timeouts_test)
+	set_tests_properties(timeouts PROPERTIES TIMEOUT 60)
 endif()

@@ -94,6 +94,10 @@ struct AsioResponseOptions {
 	// Disabled for existing consumers. Authority opts into an absolute request
 	// network deadline so trickled headers/body bytes cannot renew admission.
 	std::chrono::milliseconds request_timeout{0};
+	// Each 0 = off. idle: from a connection's start or a reply's end to the next request's
+	// first byte. header: from that first byte to the end of the headers. inactivity: per
+	// body read and per 64 KiB of a buffered reply, so a slow transfer that moves completes.
+	std::chrono::milliseconds idle_timeout{0}, header_timeout{0}, inactivity_timeout{0};
 };
 
 namespace detail {
@@ -418,6 +422,32 @@ inline asio::awaitable<ReplySettlement> write_before_deadline(Stream& socket,
 	if (winner.index() == 0) { co_return write_error ? ReplySettlement::Disconnected : ReplySettlement::Written; }
 	co_return timer_error ? ReplySettlement::Failed : ReplySettlement::TimedOut;
 }
+// Writes buffers before `deadline`, and with an inactivity bound, 64 KiB at a time, each
+// slice before `inactivity` from its start (whichever deadline comes first).
+template<class Stream, std::size_t N>
+inline asio::awaitable<ReplySettlement> write_with_progress(Stream& socket, std::array<asio::const_buffer, N> buffers,
+	std::chrono::milliseconds inactivity, std::chrono::steady_clock::time_point deadline) {
+	if (inactivity.count() <= 0) {
+		if (deadline == std::chrono::steady_clock::time_point::max()) {
+			asio::error_code ec;
+			co_await asio::async_write(socket, buffers, asio::redirect_error(asio::use_awaitable, ec));
+			co_return ec ? ReplySettlement::Disconnected : ReplySettlement::Written;
+		}
+		co_return co_await write_before_deadline(socket, buffers, deadline);
+	}
+	constexpr std::size_t slice = 64 * 1024;
+	for (const auto& b : buffers) {
+		for (std::size_t at = 0; at < b.size(); at += slice) {
+			const auto* data = static_cast<const char*>(b.data()) + at;
+			const std::size_t n = std::min(slice, b.size() - at);
+			const auto until = std::min(deadline, std::chrono::steady_clock::now() + inactivity);
+			const auto r = co_await write_before_deadline(socket, std::array<asio::const_buffer, 1>{asio::buffer(data, n)}, until);
+			if (r != ReplySettlement::Written) { co_return r; }
+		}
+	}
+	co_return ReplySettlement::Written;
+}
+
 // A deferred response keeps one owned plaintext read alive across its write.
 // Consumed pipelined input is returned to the parser, never discarded by a race.
 template<class Stream>
@@ -609,15 +639,30 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 		std::string buffered;
 		char tmp[64 * 1024];
 
+		using clock = std::chrono::steady_clock;
+		const auto ms = [](std::chrono::milliseconds t) { return t.count() > 0; };
+		const auto idle = options ? options->idle_timeout : std::chrono::milliseconds{0};
+		const auto header = options ? options->header_timeout : std::chrono::milliseconds{0};
+		const auto inactivity = options ? options->inactivity_timeout : std::chrono::milliseconds{0};
+		// The next body read's deadline: the request's, or sooner when nothing arrives.
+		const auto body_deadline = [&](clock::time_point request_deadline) {
+			return ms(inactivity) ? std::min(request_deadline, clock::now() + inactivity) : request_deadline;
+		};
 		for (;;) {
 			const auto request_deadline = options && options->request_timeout.count() > 0
-				? std::chrono::steady_clock::now() + options->request_timeout
-				: std::chrono::steady_clock::time_point::max();
-			// Phase 1: parse the request line + headers.
+				? clock::now() + options->request_timeout
+				: clock::time_point::max();
+			// Phase 1: parse the request line + headers. Until a byte arrives the idle
+			// timeout bounds the wait; from the first byte, the header timeout.
+			auto header_deadline = clock::time_point::max();
+			if (!buffered.empty() && ms(header)) { header_deadline = clock::now() + header; }
 			while (!parser.headers_done()) {
 				if (buffered.empty()) {
-					std::size_t n = co_await input->read(asio::buffer(tmp), request_deadline);
+					const bool waiting = header_deadline == clock::time_point::max();
+					const auto until = std::min(request_deadline, waiting ? (ms(idle) ? clock::now() + idle : clock::time_point::max()) : header_deadline);
+					std::size_t n = co_await input->read(asio::buffer(tmp), until);
 					if (n == 0) { co_return; }
+					if (waiting && ms(header)) { header_deadline = clock::now() + header; }
 					buffered.append(tmp, n);
 				}
 				std::size_t used = parser.feed(buffered.data(), buffered.size());
@@ -650,7 +695,7 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 						if (parser.complete()) { break; }
 						if (buffered.empty()) {
 							std::size_t n = 0;
-							try { n = co_await input->read(asio::buffer(tmp), request_deadline); } catch (const asio::system_error& e) { fec = e.code(); }
+							try { n = co_await input->read(asio::buffer(tmp), body_deadline(request_deadline)); } catch (const asio::system_error& e) { fec = e.code(); }
 							if (fec || n == 0) { reader->abort(); co_return; }
 							buffered.append(tmp, n);
 						}
@@ -702,9 +747,7 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 			} else {
 				std::string head = writer.serialize_head(keep_alive);
 				std::array<asio::const_buffer, 2> buffers{asio::buffer(head), writer.has_body() ? asio::buffer(writer.body()) : asio::const_buffer{}};
-				if (request_deadline == std::chrono::steady_clock::time_point::max()) {
-					co_await asio::async_write(socket, buffers, use_awaitable);
-				} else if (co_await write_before_deadline(socket, buffers, request_deadline) != ReplySettlement::Written) { co_return; }
+				if (co_await write_with_progress(socket, buffers, inactivity, request_deadline) != ReplySettlement::Written) { co_return; }
 			}
 				if (!keep_alive || writer.wants_close()) { break; }
 				parser.reset();
@@ -714,7 +757,7 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 			// ---- BUFFERED / PUSH path ----
 			while (!parser.complete()) {
 				if (buffered.empty()) {
-					std::size_t n = co_await input->read(asio::buffer(tmp), request_deadline);
+					std::size_t n = co_await input->read(asio::buffer(tmp), body_deadline(request_deadline));
 					buffered.append(tmp, n);
 				}
 				std::size_t used = parser.feed(buffered.data(), buffered.size());
@@ -764,9 +807,7 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 			} else {
 				std::string head = writer.serialize_head(keep_alive);
 				std::array<asio::const_buffer, 2> buffers{asio::buffer(head), writer.has_body() ? asio::buffer(writer.body()) : asio::const_buffer{}};
-				if (request_deadline == std::chrono::steady_clock::time_point::max()) {
-					co_await asio::async_write(socket, buffers, use_awaitable);
-				} else if (co_await write_before_deadline(socket, buffers, request_deadline) != ReplySettlement::Written) { co_return; }
+				if (co_await write_with_progress(socket, buffers, inactivity, request_deadline) != ReplySettlement::Written) { co_return; }
 			}
 			if (!keep_alive || writer.wants_close()) { break; }
 		}
@@ -839,6 +880,13 @@ public:
 	void set_connection_limit(std::size_t maximum) { server_.set_connection_limit(maximum); }
 	reactor::ConnectionStats connection_stats() const noexcept { return server_.connection_stats(); }
 	std::shared_ptr<const reactor::ConnectionAdmission> connection_observer() const noexcept { return server_.connection_observer(); }
+	std::chrono::milliseconds checked_timeout(std::chrono::milliseconds timeout) const {
+		if (started_) { throw std::logic_error("network timeouts must be set before startup"); }
+		if (timeout < std::chrono::milliseconds::zero() || timeout > std::chrono::hours(24)) {
+			throw std::invalid_argument("network timeouts must be between zero and 24 hours");
+		}
+		return timeout;
+	}
 	void set_request_timeout(std::chrono::milliseconds timeout) {
 		if (started_) { throw std::logic_error("request network timeout must be set before startup"); }
 		if (timeout < std::chrono::milliseconds::zero() || timeout > std::chrono::hours(24)) {
@@ -846,6 +894,10 @@ public:
 		}
 		response_.request_timeout = timeout;
 	}
+	// Each off by default; set before startup, between zero and 24 hours (AsioResponseOptions).
+	void set_idle_timeout(std::chrono::milliseconds timeout) { response_.idle_timeout = checked_timeout(timeout); }
+	void set_header_timeout(std::chrono::milliseconds timeout) { response_.header_timeout = checked_timeout(timeout); }
+	void set_inactivity_timeout(std::chrono::milliseconds timeout) { response_.inactivity_timeout = checked_timeout(timeout); }
 	void enable_compression(CompressionOptions options = {}) {
 		response_.compress = true;
 		response_.compression = std::move(options);
