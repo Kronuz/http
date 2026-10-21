@@ -134,6 +134,8 @@ public:
 	virtual int response_code() const = 0;
 	// Whether the handler began a response at all (set a status or wrote a byte).
 	virtual bool response_started() const = 0;
+	// True after successful end(); legacy writers retain their started approximation.
+	virtual bool response_ended() const { return response_started(); }
 	// The response headers, by reference.
 	virtual const Headers& response_headers() const = 0;
 	// The retained response body, by reference.

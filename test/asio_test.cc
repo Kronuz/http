@@ -270,6 +270,17 @@ static void check(bool ok, const std::string& m) { std::printf("  %s %s\n", ok ?
 
 int main() {
 	std::printf("== Asio Kronuz/http transport test ==\n");
+	{
+		http::Request request;
+		http::AsioResponseWriter writer(request, nullptr);
+		check(!writer.response_started() && !writer.response_ended(), "fresh response is neither started nor ended");
+		writer.status(200);
+		check(writer.response_started() && !writer.response_ended(), "status does not complete response");
+		writer.write("partial");
+		check(!writer.response_ended(), "body write does not complete response");
+		writer.end();
+		check(writer.response_ended(), "successful end completes response");
+	}
 	App app;
 	double offload_fast_max = 0;
 

@@ -3,6 +3,8 @@
 How the pieces fit, and the path a request takes. Read `README.md` first for the
 seam and the rationale; this is the map.
 
+Buffered response completion is independent of response start. Asio's `BufferedResponse::response_ended()` exposes its existing `ended_` flag, letting decorators preserve the transport's rule: map an exception only before successful `end()`, then fall back to 500 if mapping still leaves the response unfinished. The compatibility default for custom writers approximates completion with `response_started()`; it is not a delivery or ownership-transfer observation.
+
 ## Two layers
 
 The framework is split into a transport-agnostic **protocol layer** and one

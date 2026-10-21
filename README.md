@@ -9,6 +9,8 @@ An HTTP/1.1 application framework for C++20 on standalone Asio coroutines. Your 
 implements one method, `handle(Request, ResponseWriter)`; the framework handles
 sockets, parsing, keep-alive, negotiation, compression, and backpressure.
 
+Buffered response decorators can distinguish `response_started()` from `response_ended()`: setting a status or writing bytes does not complete a response; Asio reports completion only after `end()` succeeds. The new query defaults to the historical started approximation for existing custom `BufferedResponse` writers. Override it for accurate middleware error mapping. This is source compatible but extends a virtual interface: rebuild all consumers together rather than mixing header revisions. It does not indicate confirmed network delivery.
+
 ![http: connections on per-core reactors parse into a Request, the handler writes a response](docs/http.svg)
 
 ## ✨ Highlights

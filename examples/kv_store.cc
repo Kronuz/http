@@ -2,7 +2,8 @@
  * kv_store — a tiny REST key/value store, served entirely through the HttpHandler
  * seam. The application is just a Router with a few closures: it never sees
  * http-parser, a socket, or the event loop. Swap this handler for Xapiand's search
- * handler and the same engine becomes a search server.
+ * handler and the same engine becomes a search server. Responses finish with
+ * end(); setting status alone does not satisfy BufferedResponse::response_ended().
  *
  *   ./kv_store 8080
  *   curl -XPUT  localhost:8080/kv/greeting -d 'hello'

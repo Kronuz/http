@@ -210,6 +210,7 @@ public:
 	// in serialize_head() run later, so this is the pre-transform view a logger wants).
 	int response_code() const override { return status_; }
 	bool response_started() const override { return started_; }
+	bool response_ended() const override { return ended_; }
 	const Headers& response_headers() const override { return headers_; }
 	std::string_view response_body() const override { return body_; }
 	std::string_view response_content_type() const override {
