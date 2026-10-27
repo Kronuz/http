@@ -1,7 +1,7 @@
 name: CI
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, "track/**"]
   pull_request:
   workflow_dispatch:
   schedule:
@@ -12,3 +12,10 @@ concurrency:
 jobs:
   ci:
     uses: Kronuz/cpp-libraries/.github/workflows/cmake.yml@main
+  clients:
+    uses: Kronuz/cpp-libraries/.github/workflows/cmake.yml@main
+    with:
+      cmake_args: -DHTTP_BUILD_CLIENTS=ON -DHTTP_BUILD_CLIENT_TLS=ON
+      apt_packages: libssl-dev
+      brew_packages: openssl@3
+      freebsd_packages: openssl
