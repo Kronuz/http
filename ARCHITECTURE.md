@@ -7,6 +7,8 @@ Buffered response completion is independent of response start. Asio's `BufferedR
 
 ## Two layers
 
+The server layers below retain their existing application seam. Optional [HTTP clients](docs/CLIENTS.md) share one response framing engine beneath POSIX and Asio drivers; buffering drains that engine, and TLS adds the existing reactor configuration helpers and a bounded connection cache. Client-only configuration does not construct the server dependency graph. Owning allocation contexts retain managed requests, responses and shared controls through original completion and surviving weak owners.
+
 The framework is split into a transport-agnostic **protocol layer** and one
 **transport**. The protocol layer is pure value logic — it never names a socket, a
 loop, or a thread — so it is testable in isolation and portable to any runtime.
@@ -29,9 +31,7 @@ loop, or a thread — so it is testable in isolation and portable to any runtime
                                   per-reactor offload pool, graceful shutdown (extracted)
 ```
 
-The only file that knows Asio is `http_asio.h` (and the generic `reactor` runtime it
-rides on). The only file that knows the parser is `http_request_parser.h`. Everything
-else is plain C++ over the `Request` / `ResponseWriter` values.
+Server transport is in `http_asio.h` and its deferred/owned-stream adapters; TLS adds `http_asio_tls.h`. Server request parsing is in `http_request_parser.h`. Client parsing and drivers have separate optional targets, so plain TCP clients do not acquire Asio or TLS dependencies.
 
 ## Why the seam has this shape
 

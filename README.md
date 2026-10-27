@@ -5,13 +5,14 @@ Part of [Kronuz C++ Libraries](https://github.com/Kronuz/cpp-libraries), a colle
 [![CI](https://github.com/Kronuz/http/actions/workflows/ci.yml/badge.svg)](https://github.com/Kronuz/http/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)
-![Header-only](https://img.shields.io/badge/header--only-yes-green.svg)
 
 An HTTP/1.1 application framework for C++20 on standalone Asio coroutines. Your app
 implements one method, `handle(Request, ResponseWriter)`; the framework handles
 sockets, parsing, keep-alive, negotiation, compression, and backpressure.
 
 Buffered response decorators can distinguish `response_started()` from `response_ended()`: setting a status or writing bytes does not complete a response; Asio reports completion only after `end()` succeeds. The new query defaults to the historical started approximation for existing custom `BufferedResponse` writers. Override it for accurate middleware error mapping. This is source compatible but extends a virtual interface: rebuild all consumers together rather than mixing header revisions. It does not indicate confirmed network delivery.
+
+The server framework is header-only. Optional bounded HTTP clients share one parser across POSIX and Asio drivers, with TLS and connection reuse when enabled; their POSIX and TLS targets contain compiled code.
 
 ![http: connections on per-core reactors parse into a Request, the handler writes a response](docs/http.svg)
 
@@ -31,7 +32,7 @@ Buffered response decorators can distinguish `response_started()` from `response
 
 ## 📦 Installation
 
-Requires a C++20 compiler and CMake 3.14 or newer. Asio and the Kronuz dependencies
+Requires a C++20 compiler and CMake 3.16 or newer. Asio and the Kronuz dependencies
 are fetched at configure time. CI builds it on Linux (x86_64, arm64), macOS (arm64,
 x86_64), and FreeBSD, plus ASan, UBSan, and TSan builds.
 
@@ -84,6 +85,8 @@ curl localhost:8080/kv/greeting
 ```
 
 ## 🎯 When to use it
+
+For clients without the server dependency graph, see [HTTP clients](docs/CLIENTS.md). Configure `HTTP_BUILD_SERVER=OFF` and `HTTP_BUILD_CLIENTS=ON` for a POSIX client profile without Asio, reactor, compressors or OpenSSL. Client targets are disabled by default so existing server consumers do not build an unused compiled client. Enable `HTTP_BUILD_CLIENT_ASIO` or `HTTP_BUILD_CLIENT_TLS` for the corresponding coroutine drivers. [client_get.cc](examples/client_get.cc) shows a numeric-endpoint request under one deadline.
 
 - ✅ A C++ service that needs a solid HTTP/1.1 front: REST APIs, search or storage
   servers, admin endpoints.

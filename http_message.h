@@ -55,8 +55,11 @@ struct RequestExtension {
 
 inline bool iequal(std::string_view a, std::string_view b) {
 	if (a.size() != b.size()) { return false; }
+	const auto lower = [](unsigned char value) {
+		return value >= 'A' && value <= 'Z' ? value + ('a' - 'A') : value;
+	};
 	for (size_t i = 0; i < a.size(); ++i) {
-		if (std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(b[i]))) {
+		if (lower(a[i]) != lower(b[i])) {
 			return false;
 		}
 	}
