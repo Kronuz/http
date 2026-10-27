@@ -41,11 +41,11 @@ endif()
 # it accepts arbitrary request methods: Xapiand's REST API uses custom verbs
 # (COUNT, INFO, DUMP, RESTORE, ...) that a method-validating parser rejects. The
 # seam stays parser-agnostic, so this is contained inside the connection.
-FetchContent_Declare(http_parser GIT_REPOSITORY https://github.com/Kronuz/http-parser.git GIT_TAG 178f873450364b67f0abca9c96fbbc735589d435)
+FetchContent_Declare(http_parser GIT_REPOSITORY https://github.com/Kronuz/http-parser.git GIT_TAG 154fad24013504814efd034a9882de1c91b0308e)
 FetchContent_MakeAvailable(http_parser)
 
 # Owning allocation contexts, independent of legacy allocation interception.
-FetchContent_Declare(allocators GIT_REPOSITORY https://github.com/Kronuz/allocators.git GIT_TAG b7daa52f1b6a316e04bba2817f0f527d64d704eb)
+FetchContent_Declare(allocators GIT_REPOSITORY https://github.com/Kronuz/allocators.git GIT_TAG 4b3981936112e45e06d54cdc922ebd6906787a4f)
 FetchContent_MakeAvailable(allocators)
 if(HTTP_BUILD_CLIENTS)
 	add_library(http_client_core INTERFACE)
@@ -65,7 +65,7 @@ if(HTTP_BUILD_SERVER)
 # Response compression (http_compression.h) negotiates Accept-Encoding and applies a
 # coding. The codecs are Kronuz/compressors (has compiled units + lz4/zstd/zlib
 # wiring). Previously reached transitively via Kronuz/server; now a direct dependency.
-FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG ed590c87201afd270afbfbb2d58d5d467c6d23b6)
+FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 86ff17d171524977723f070f08d3867d6fdb7364)
 FetchContent_MakeAvailable(compressors)
 endif()
 
