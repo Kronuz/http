@@ -63,6 +63,8 @@ class TlsLease {
 	asio::ip::tcp::endpoint endpoint() const noexcept { return endpoint_; }
   private:
 	friend asio::awaitable<void> connect(TlsLease &lease);
+	friend asio::awaitable<BufferedResponse> exchange(TlsLease &, PreparedRequest, Deadline, Limits, ResponsePolicy);
+	asio::awaitable<BufferedResponse> exchange_io(PreparedRequest, Deadline, Limits, ResponsePolicy);
 	void tcp_connected() noexcept;
 	void mark_connected() noexcept;
 	std::shared_ptr<TlsCache> cache_;
@@ -70,7 +72,7 @@ class TlsLease {
 	std::shared_ptr<TlsCache::Stream> one_shot_;
 	asio::ip::tcp::endpoint endpoint_;
 	std::size_t index_ = 0;
-	bool reusable_ = false, one_shot_connected_ = false;
+	bool reusable_ = false, one_shot_connected_ = false, exchanged_ = false;
 };
 asio::awaitable<void> connect(TlsLease &lease);
 asio::awaitable<BufferedResponse> exchange(TlsLease &lease, PreparedRequest request, Deadline deadline,

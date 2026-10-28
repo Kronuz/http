@@ -113,6 +113,7 @@ TlsLease::TlsLease(TlsKey key, asio::any_io_executor executor, std::shared_ptr<T
 	try {
 		if (cache_) index_ = cache_->acquire(key, executor);
 		else one_shot_ = make_stream(key, executor, context);
+		exchanged_ = connected();
 	} catch (const allocators::ResourcePressure &) { throw Error(ErrorKind::Pressure, "HTTP TLS allocation pressure"); }
 	catch (const std::bad_alloc &) { throw Error(ErrorKind::Pressure, "HTTP TLS allocation failed"); }
 }
@@ -160,22 +161,21 @@ asio::awaitable<void> connect(TlsLease &lease) {
 			"HTTP TLS connection failed", error.code());
 	}
 }
-namespace detail {
-asio::awaitable<BufferedResponse> tls_exchange_io(TlsLease &lease, PreparedRequest request, Deadline deadline,
+asio::awaitable<BufferedResponse> TlsLease::exchange_io(PreparedRequest request, Deadline deadline,
 	Limits limits, ResponsePolicy policy) {
-	lease.reusable(false);
+	reusable(false);
 	(void)deadline.remaining();
-	if (lease.connected() && !input_idle(lease.stream()))
+	if (connected() && (SSL_pending(stream().native_handle()) || (exchanged_ && !input_idle(stream()))))
 		throw Error(ErrorKind::Transport, "HTTP TLS connection has unconsumed input");
-	co_await connect(lease);
-	auto response = co_await exchange_io(lease.stream(), std::move(request), deadline, limits, policy);
-	response.reusable = response.reusable && !SSL_pending(lease.stream().native_handle()) &&
-		!SSL_has_pending(lease.stream().native_handle());
+	exchanged_ = true;
+	co_await connect(*this);
+	auto response = co_await detail::exchange_io(stream(), std::move(request), deadline, limits, policy);
+	response.reusable = response.reusable && !SSL_pending(stream().native_handle()) &&
+		!SSL_has_pending(stream().native_handle());
 	co_return response;
 }
-} // namespace detail
 asio::awaitable<BufferedResponse> exchange(TlsLease &lease, PreparedRequest request, Deadline deadline,
 	Limits limits, ResponsePolicy policy) {
-	return before(deadline, detail::tls_exchange_io(lease, std::move(request), deadline, limits, policy));
+	return before(deadline, lease.exchange_io(std::move(request), deadline, limits, policy));
 }
 } // namespace http::client
