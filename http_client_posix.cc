@@ -211,7 +211,8 @@ BufferedResponse exchange(PosixConnection &connection, PreparedRequest request, 
 		BufferedReceiver receiver(limits, policy, request.context());
 		const auto wire = request.wire();
 		connection.write({wire.data(), wire.size()}, deadline);
-		std::array<char, ResponseParser::read_bytes> buffer;
+		// Batch socket reads independently of the bounded parser feed.
+		std::array<char, 16 * 1024> buffer;
 		while (!receiver.done()) {
 			const auto size = connection.read(buffer, deadline);
 			if (!size) { receiver.eof(); break; }

@@ -40,7 +40,7 @@ http::client::BufferedResponse get_snapshot() {
 
 `resolve(host, port, output_span, deadline)` is an optional synchronous OS resolver. It checks expiry before and after resolution, preserves address order and rejects a result exceeding the supplied span. `default_resolved_endpoints` provides a 64-entry convenience capacity. The OS resolver cannot be interrupted and can delay return beyond expiry; it creates no helper thread. Subsequent socket waits use the original expiry.
 
-The POSIX driver uses nonblocking sockets and `poll`, recomputes remaining time after EINTR, suppresses SIGPIPE per socket or send, and owns each descriptor exactly once. Connection fallback does not replay a request. An address that stalls can consume the entire deadline; this is sequential fallback, without Happy Eyeballs.
+The POSIX driver batches socket reads in 16 KiB while parser feeds remain bounded to 4 KiB. It uses nonblocking sockets and `poll`, recomputes remaining time after EINTR, suppresses SIGPIPE per socket or send, and owns each descriptor exactly once. Connection fallback does not replay a request. An address that stalls can consume the entire deadline; this is sequential fallback, without Happy Eyeballs.
 
 ## Asio and TLS
 
