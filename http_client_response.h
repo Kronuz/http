@@ -29,7 +29,15 @@ class BufferedReceiver {
 			parser_.feed(bytes, budget);
 			if (parser_.head_ready()) parser_.accept_head();
 			const auto body = parser_.body();
-			if (!body.empty()) response_.body.append(body.data(), body.size());
+			if (!body.empty()) {
+				if (response_.body.empty() && parser_.head().content_length) {
+					const auto length = *parser_.head().content_length;
+					if (length > response_.body.max_size())
+						throw Error(ErrorKind::Limit, "HTTP buffered response size");
+					response_.body.reserve(static_cast<std::size_t>(length));
+				}
+				response_.body.append(body.data(), body.size());
+			}
 			parser_.consume_body(body.size());
 			finish();
 		} catch (const allocators::ResourcePressure &) {

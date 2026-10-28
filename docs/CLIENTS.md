@@ -17,6 +17,8 @@ cmake --build build-client
 ctest --test-dir build-client --output-on-failure
 ```
 
+The buffered receiver reserves a validated fixed body length when its first body bytes arrive. Reservation uses the owning allocation context and respects parser and string size limits. Bodyless responses do not reserve their advertised representation length.
+
 ## Plain TCP
 
 Prepare one deadline before connection acquisition and retain it across every phase and address attempt. Numeric or pre-resolved endpoints avoid uncancellable name resolution.
