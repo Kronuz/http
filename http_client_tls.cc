@@ -7,9 +7,13 @@
 
 namespace http::client {
 namespace {
+bool buffers_empty(TlsCache::Stream &stream) noexcept {
+	auto *bio = SSL_get_rbio(stream.native_handle());
+	return bio && !SSL_pending(stream.native_handle()) && !SSL_has_pending(stream.native_handle()) &&
+		!BIO_ctrl_pending(bio);
+}
 bool input_idle(TlsCache::Stream &stream) noexcept {
-	return !SSL_pending(stream.native_handle()) && !SSL_has_pending(stream.native_handle()) &&
-		detail::transport_input_idle(stream);
+	return buffers_empty(stream) && detail::transport_input_idle(stream);
 }
 class VerificationCategory final : public std::error_category {
   public:
@@ -170,8 +174,7 @@ asio::awaitable<BufferedResponse> TlsLease::exchange_io(PreparedRequest request,
 	exchanged_ = true;
 	co_await connect(*this);
 	auto response = co_await detail::exchange_io(stream(), std::move(request), deadline, limits, policy);
-	response.reusable = response.reusable && !SSL_pending(stream().native_handle()) &&
-		!SSL_has_pending(stream().native_handle());
+	response.reusable = response.reusable && buffers_empty(stream());
 	co_return response;
 }
 asio::awaitable<BufferedResponse> exchange(TlsLease &lease, PreparedRequest request, Deadline deadline,

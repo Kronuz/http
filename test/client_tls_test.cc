@@ -14,13 +14,62 @@ void check(bool value, std::source_location location = std::source_location::cur
 	if (!value) throw std::runtime_error("HTTP TLS client invariant at line " + std::to_string(location.line()));
 }
 #if defined(__unix__) || defined(__APPLE__)
+asio::awaitable<void> record_boundary(bool chunked) {
+	tls_fixture::Credentials credentials;
+	check(SSL_CTX_set_num_tickets(credentials.server->native_handle(), 0) == 1);
+	SSL_CTX_set_read_ahead(credentials.client->native_handle(), 0);
+	const auto executor = co_await asio::this_coro::executor;
+	const auto boundary = http_test::boundary_response(client::ResponseParser::read_bytes, chunked);
+	tls_fixture::Server peer(credentials.server, boundary.wire + http_test::unsolicited, {}, boundary.wire.size());
+	auto written = peer.first_written();
+	auto cache = client::make_tls_cache(executor, 1);
+	client::TlsKey key{peer.endpoint(), "localhost", credentials.client};
+	{
+		client::TlsLease lease(key, executor, cache);
+		const client::Deadline deadline(std::chrono::seconds(2));
+		co_await client::before(deadline, client::connect(lease));
+		co_await client::before(deadline, client::write(lease.stream(), client::PreparedRequest({"GET", "localhost", "/"})));
+		check(written.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+		written.get();
+		std::array<unsigned char, 8192> ciphertext{};
+		for (;;) {
+			(void)deadline.remaining();
+			const auto bytes = ::recv(lease.stream().next_layer().native_handle(), ciphertext.data(), ciphertext.size(), MSG_PEEK | MSG_DONTWAIT);
+			if (bytes < 0) check(errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR);
+			std::size_t offset = 0, records = 0;
+			while (bytes > 0 && offset + 5 <= static_cast<std::size_t>(bytes)) {
+				const auto length = (std::size_t(ciphertext[offset + 3]) << 8) | ciphertext[offset + 4];
+				if (length > static_cast<std::size_t>(bytes) - offset - 5) break;
+				if (ciphertext[offset] == 23) ++records;
+				offset += 5 + length;
+			}
+			if (records >= 2) break;
+			co_await asio::post(executor, asio::use_awaitable);
+		}
+		client::BufferedReceiver receiver;
+		std::array<char, client::ResponseParser::read_bytes> input{};
+		const auto bytes = co_await client::before(deadline, lease.stream().async_read_some(asio::buffer(input), asio::use_awaitable));
+		check(bytes == boundary.wire.size());
+		auto remaining = std::span<const char>(input.data(), bytes);
+		while (!remaining.empty()) receiver.feed(remaining);
+		check(receiver.done());
+		auto response = receiver.take_response();
+		check(std::string_view(response.body) == std::string_view(boundary.body) && response.reusable);
+		check(!SSL_pending(lease.stream().native_handle()) && !SSL_has_pending(lease.stream().native_handle()));
+		check(lease.stream().next_layer().available() == 0);
+		check(BIO_ctrl_pending(SSL_get_rbio(lease.stream().native_handle())) > 0);
+		lease.reusable(response.reusable);
+	}
+	check(cache->stats().live == 0 && cache->stats().leased == 0);
+}
 asio::awaitable<void> queued_response(tls_fixture::Credentials &credentials) {
 	const auto executor = co_await asio::this_coro::executor;
 	const auto &forged = http_test::unsolicited;
 	const auto first = http_test::response_at_boundary(client::ResponseParser::read_bytes);
 	check(first.size() == client::ResponseParser::read_bytes);
-	{
-		tls_fixture::Server peer(credentials.server, first + forged);
+	for (const bool chunked : {false, true}) {
+		const auto boundary = http_test::boundary_response(client::ResponseParser::read_bytes, chunked);
+		tls_fixture::Server peer(credentials.server, boundary.wire + forged);
 		auto cache = client::make_tls_cache(executor, 1);
 		client::TlsKey key{peer.endpoint(), "localhost", credentials.client};
 		bool rejected = false;
@@ -29,7 +78,7 @@ asio::awaitable<void> queued_response(tls_fixture::Credentials &credentials) {
 			try {
 				auto response = co_await client::exchange(lease,
 					client::PreparedRequest({"GET", "localhost", "/"}), client::Deadline(std::chrono::seconds(2)));
-				check(response.head.status == 200 && std::string_view(response.body) == std::string_view(first).substr(first.find("\r\n\r\n") + 4));
+				check(response.head.status == 200 && std::string_view(response.body) == std::string_view(boundary.body));
 				lease.reusable(response.reusable);
 			} catch (const client::Error &error) {
 				rejected = error.kind() == client::ErrorKind::Framing;
@@ -75,6 +124,8 @@ asio::awaitable<void> queued_response(tls_fixture::Credentials &credentials) {
 		}
 		check(cache->stats().live == 0 && cache->stats().leased == 0);
 	}
+	co_await record_boundary(false);
+	co_await record_boundary(true);
 }
 asio::awaitable<void> network(tls_fixture::Credentials &credentials, tls_fixture::Server &one,
 	tls_fixture::Server &two) {

@@ -60,9 +60,10 @@ class Server {
   public:
 	explicit Server(std::shared_ptr<asio::ssl::context> context,
 		std::string reply = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
-		std::shared_ptr<LateReply> late = {})
+		std::shared_ptr<LateReply> late = {}, std::size_t split = 0)
 		: context_(std::move(context)), reply_(std::move(reply)), late_(std::move(late)),
-		  acceptor_(io_, {asio::ip::address_v4::loopback(), 0}) {
+		  split_(split), acceptor_(io_, {asio::ip::address_v4::loopback(), 0}) {
+		require(!split_ || split_ < reply_.size());
 		acceptor_.non_blocking(true);
 		endpoint_ = acceptor_.local_endpoint();
 		thread_ = std::thread([this] { serve(); });
@@ -76,10 +77,14 @@ class Server {
 		thread_.join();
 	}
 	asio::ip::tcp::endpoint endpoint() const { return endpoint_; }
+	std::future<void> first_written() { return written_.get_future(); }
   private:
 	std::shared_ptr<asio::ssl::context> context_;
 	std::string reply_;
 	std::shared_ptr<LateReply> late_;
+	std::size_t split_ = 0;
+	std::promise<void> written_;
+	bool wrote_ = false;
 	asio::io_context io_;
 	asio::ip::tcp::acceptor acceptor_;
 	asio::ip::tcp::endpoint endpoint_;
@@ -108,7 +113,11 @@ class Server {
 				const auto size = asio::read_until(stream, input, "\r\n\r\n", error);
 				if (error) break;
 				input.consume(size);
-				asio::write(stream, asio::buffer(reply_), error);
+				if (split_) {
+					asio::write(stream, asio::buffer(reply_.data(), split_), error);
+					if (!error) asio::write(stream, asio::buffer(reply_.data() + split_, reply_.size() - split_), error);
+				} else asio::write(stream, asio::buffer(reply_), error);
+				if (!error && !wrote_) { wrote_ = true; written_.set_value(); }
 				if (!error && late_ && !late_->sent.exchange(true)) {
 					if (late_->permission.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
 						late_->queued.set_exception(std::make_exception_ptr(std::runtime_error("late reply gate timeout")));
