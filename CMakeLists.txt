@@ -41,7 +41,7 @@ endif()
 # it accepts arbitrary request methods: Xapiand's REST API uses custom verbs
 # (COUNT, INFO, DUMP, RESTORE, ...) that a method-validating parser rejects. The
 # seam stays parser-agnostic, so this is contained inside the connection.
-FetchContent_Declare(http_parser GIT_REPOSITORY https://github.com/Kronuz/http-parser.git GIT_TAG 154fad24013504814efd034a9882de1c91b0308e)
+FetchContent_Declare(http_parser GIT_REPOSITORY https://github.com/Kronuz/http-parser.git GIT_TAG 87ae8cf1e20c9e2bac5b503b0869ac2d8b03be90)
 FetchContent_MakeAvailable(http_parser)
 
 # Owning allocation contexts, independent of legacy allocation interception.

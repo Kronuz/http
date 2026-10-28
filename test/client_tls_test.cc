@@ -1,16 +1,68 @@
 #include "http_client_tls.h"
 #include <allocators/memory_resource.h>
 #include <iostream>
+#include <source_location>
 #include <asio/use_future.hpp>
+#include "support/response_boundary.h"
 #if defined(__unix__) || defined(__APPLE__)
 #include "tls_client_fixture.h"
 #endif
 
 namespace client = http::client;
-void check(bool value) {
-	if (!value) throw std::runtime_error("HTTP TLS client invariant failed");
+void check(bool value, std::source_location location = std::source_location::current()) {
+	if (!value) throw std::runtime_error("HTTP TLS client invariant at line " + std::to_string(location.line()));
 }
 #if defined(__unix__) || defined(__APPLE__)
+asio::awaitable<void> queued_response(tls_fixture::Credentials &credentials) {
+	const auto executor = co_await asio::this_coro::executor;
+	const auto &forged = http_test::unsolicited;
+	const auto first = http_test::response_at_boundary(client::ResponseParser::read_bytes);
+	check(first.size() == client::ResponseParser::read_bytes);
+	{
+		tls_fixture::Server peer(credentials.server, first + forged);
+		auto cache = client::make_tls_cache(executor, 1);
+		client::TlsKey key{peer.endpoint(), "localhost", credentials.client};
+		bool rejected = false;
+		{
+			client::TlsLease lease(key, executor, cache);
+			try {
+				auto response = co_await client::exchange(lease,
+					client::PreparedRequest({"GET", "localhost", "/"}), client::Deadline(std::chrono::seconds(2)));
+				check(response.head.status == 200 && std::string_view(response.body) == std::string_view(first).substr(first.find("\r\n\r\n") + 4));
+				lease.reusable(response.reusable);
+			} catch (const client::Error &error) {
+				rejected = error.kind() == client::ErrorKind::Framing;
+				check(rejected);
+			}
+		}
+		check(cache->stats().leased == 0 && cache->stats().live == 0);
+	}
+	{
+		auto late = std::make_shared<tls_fixture::LateReply>();
+		late->bytes = forged;
+		auto queued = late->queued.get_future();
+		tls_fixture::Server peer(credentials.server,
+			"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", late);
+		auto cache = client::make_tls_cache(executor, 1);
+		client::TlsKey key{peer.endpoint(), "localhost", credentials.client};
+		{
+			client::TlsLease lease(key, executor, cache);
+			auto response = co_await client::exchange(lease,
+				client::PreparedRequest({"GET", "localhost", "/"}), client::Deadline(std::chrono::seconds(2)));
+			check(response.body == "ok");
+			lease.reusable(response.reusable);
+		}
+		check(cache->stats().live == 1);
+		late->release.set_value();
+		check(queued.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+		queued.get();
+		{
+			client::TlsLease next(key, executor, cache);
+			check(!next.connected() && cache->stats().connects == 1);
+		}
+		check(cache->stats().live == 0 && cache->stats().leased == 0);
+	}
+}
 asio::awaitable<void> network(tls_fixture::Credentials &credentials, tls_fixture::Server &one,
 	tls_fixture::Server &two) {
 	const auto executor = co_await asio::this_coro::executor;
@@ -130,6 +182,10 @@ int main() {
 		auto result = asio::co_spawn(network_io, network(credentials, one, two), asio::use_future);
 		network_io.run();
 		result.get();
+		network_io.restart();
+		auto poisoned = asio::co_spawn(network_io, queued_response(credentials), asio::use_future);
+		network_io.run();
+		poisoned.get();
 	}
 #endif
 	std::cout << "HTTP TLS capacity, executor, verification and escaped resource ownership passed\n";

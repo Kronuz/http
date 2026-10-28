@@ -11,6 +11,24 @@
 
 namespace http::client {
 namespace detail {
+template <class Stream> bool transport_input_idle(Stream &stream) noexcept {
+	if constexpr (requires(asio::error_code &error) { stream.lowest_layer().available(error); }) {
+		try {
+			asio::error_code error;
+			const auto bytes = stream.lowest_layer().available(error);
+			return !error && !bytes;
+		} catch (...) { return false; }
+	}
+	return false;
+}
+template <class Stream> void check_plain_input(Stream &stream) {
+	if constexpr (requires(asio::error_code &error) { stream.available(error); }) {
+		asio::error_code error;
+		const auto bytes = stream.available(error);
+		if (error) throw Error(ErrorKind::Transport, "HTTP input inspection failed", error);
+		if (bytes) throw Error(ErrorKind::Framing, "HTTP connection has unconsumed input");
+	}
+}
 template <class T> struct AsyncResult {
 	std::optional<T> value;
 	std::exception_ptr error;
@@ -66,6 +84,7 @@ template <class Stream> asio::awaitable<BufferedResponse> exchange_io(Stream &st
 	policy.head_request = request.head_request();
 	BufferedReceiver receiver(limits, policy, request.context());
 	(void)deadline.remaining();
+	check_plain_input(stream);
 	co_await write(stream, std::move(request));
 	std::array<char, ResponseParser::read_bytes> buffer;
 	while (!receiver.done()) {
@@ -84,7 +103,10 @@ template <class Stream> asio::awaitable<BufferedResponse> exchange_io(Stream &st
 		if (!receiver.done()) co_await asio::post(co_await asio::this_coro::executor, asio::use_awaitable);
 	}
 	(void)deadline.remaining();
-	co_return receiver.take_response();
+	check_plain_input(stream);
+	auto response = receiver.take_response();
+	response.reusable = response.reusable && transport_input_idle(stream);
+	co_return response;
 }
 } // namespace detail
 template <class Stream> asio::awaitable<BufferedResponse> exchange(Stream &stream, PreparedRequest request,

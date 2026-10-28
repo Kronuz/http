@@ -1,6 +1,7 @@
 #include "http_client_asio.h"
 #include <asio/use_future.hpp>
 #include <iostream>
+#include "support/response_boundary.h"
 
 namespace client = http::client;
 void check(bool value) {
@@ -22,6 +23,27 @@ asio::awaitable<int> original(std::shared_ptr<int> owner) {
 	*owner = 2;
 	throw std::system_error(error);
 }
+asio::awaitable<void> queued_response() {
+	const auto executor = co_await asio::this_coro::executor;
+	asio::ip::tcp::acceptor listener(executor, {asio::ip::address_v4::loopback(), 0});
+	asio::ip::tcp::socket socket(executor);
+	co_await socket.async_connect(listener.local_endpoint(), asio::use_awaitable);
+	auto peer = co_await listener.async_accept(asio::use_awaitable);
+	const auto wire = http_test::response_at_boundary(client::ResponseParser::read_bytes) + http_test::unsolicited;
+	co_await asio::async_write(peer, asio::buffer(wire), asio::use_awaitable);
+	const client::Deadline deadline(std::chrono::seconds(2));
+	while (socket.available() < wire.size()) {
+		(void)deadline.remaining();
+		co_await asio::post(executor, asio::use_awaitable);
+	}
+	bool rejected = false;
+	try {
+		auto response = co_await client::exchange(socket,
+			client::PreparedRequest({"GET", "localhost", "/"}), deadline);
+		rejected = !response.reusable;
+	} catch (const client::Error &error) { rejected = error.kind() == client::ErrorKind::Framing; }
+	check(rejected);
+}
 asio::awaitable<void> exercise() {
 	const client::Deadline deadline(std::chrono::milliseconds(1000));
 	check(co_await client::before(deadline, success()) == 7);
@@ -35,6 +57,7 @@ asio::awaitable<void> exercise() {
 	try { (void)co_await client::before(client::Deadline(std::chrono::milliseconds(100)), original(owner)); }
 	catch (const client::Error &error) { expired = error.kind() == client::ErrorKind::Deadline; }
 	check(expired && *owner == 2 && owner.use_count() == 1);
+	co_await queued_response();
 }
 int main() {
 	asio::io_context io;

@@ -29,7 +29,10 @@ class PosixConnection {
 	std::size_t read(std::span<char> bytes, Deadline deadline);
   private:
 	int socket_ = -1;
+	std::optional<ErrorKind> input_error() const noexcept;
+	void close() noexcept;
 	void wait(short events, Deadline deadline);
+	friend BufferedResponse exchange(PosixConnection &, PreparedRequest, Deadline, Limits, ResponsePolicy);
 };
 BufferedResponse exchange(PosixConnection &connection, PreparedRequest request, Deadline deadline,
 	Limits limits = {}, ResponsePolicy policy = {});

@@ -7,6 +7,10 @@
 
 namespace http::client {
 namespace {
+bool input_idle(TlsCache::Stream &stream) noexcept {
+	return !SSL_pending(stream.native_handle()) && !SSL_has_pending(stream.native_handle()) &&
+		detail::transport_input_idle(stream);
+}
 class VerificationCategory final : public std::error_category {
   public:
 	const char *name() const noexcept override { return "x509"; }
@@ -62,9 +66,12 @@ std::size_t TlsCache::acquire(const TlsKey &key, const asio::any_io_executor &ex
 		if (entry.stream && entry.connected && entry.endpoint == key.endpoint && entry.hostname == key.hostname &&
 			entry.tls.get() == key.context.get() && !entry.tls.owner_before(key.context) &&
 			!key.context.owner_before(entry.tls) && entry.binding == key.binding) {
-			entry.leased = entry.reused = true;
-			++stats_.leased; ++stats_.reuse_attempts;
-			return index;
+			if (input_idle(*entry.stream)) {
+				entry.leased = entry.reused = true;
+				++stats_.leased; ++stats_.reuse_attempts;
+				return index;
+			}
+			retire(entry);
 		}
 		if (!available || !entry.stream) available = index;
 	}
@@ -93,7 +100,7 @@ std::size_t TlsCache::acquire(const TlsKey &key, const asio::any_io_executor &ex
 }
 void TlsCache::release(std::size_t index, bool reusable) noexcept {
 	auto &entry = entries_[index];
-	reusable = reusable && entry.connected;
+	reusable = reusable && entry.connected && input_idle(*entry.stream);
 	if (reusable && entry.reused) ++stats_.reuses;
 	if (!reusable) retire(entry);
 	entry.leased = false;
@@ -158,8 +165,13 @@ asio::awaitable<BufferedResponse> tls_exchange_io(TlsLease &lease, PreparedReque
 	Limits limits, ResponsePolicy policy) {
 	lease.reusable(false);
 	(void)deadline.remaining();
+	if (lease.connected() && !input_idle(lease.stream()))
+		throw Error(ErrorKind::Transport, "HTTP TLS connection has unconsumed input");
 	co_await connect(lease);
-	co_return co_await exchange_io(lease.stream(), std::move(request), deadline, limits, policy);
+	auto response = co_await exchange_io(lease.stream(), std::move(request), deadline, limits, policy);
+	response.reusable = response.reusable && !SSL_pending(lease.stream().native_handle()) &&
+		!SSL_has_pending(lease.stream().native_handle());
+	co_return response;
 }
 } // namespace detail
 asio::awaitable<BufferedResponse> exchange(TlsLease &lease, PreparedRequest request, Deadline deadline,

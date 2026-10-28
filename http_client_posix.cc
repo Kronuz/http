@@ -145,7 +145,22 @@ PosixConnection::PosixConnection(std::span<const Endpoint> endpoints, Deadline d
 	}
 	throw Error(ErrorKind::Connect, "HTTP endpoints exhausted", last);
 }
-PosixConnection::~PosixConnection() { if (socket_ != -1) ::close(socket_); }
+PosixConnection::~PosixConnection() { close(); }
+void PosixConnection::close() noexcept {
+	if (socket_ != -1) ::close(std::exchange(socket_, -1));
+}
+std::optional<ErrorKind> PosixConnection::input_error() const noexcept {
+	if (socket_ == -1) return ErrorKind::Transport;
+	char byte;
+	int flags = MSG_PEEK;
+#ifdef MSG_DONTWAIT
+	flags |= MSG_DONTWAIT;
+#endif
+	const auto bytes = ::recv(socket_, &byte, 1, flags);
+	if (bytes > 0) return ErrorKind::Framing;
+	if (bytes < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return {};
+	return ErrorKind::Transport;
+}
 PosixConnection::PosixConnection(PosixConnection &&other) noexcept
 	: socket_(std::exchange(other.socket_, -1)) {}
 void PosixConnection::wait(short events, Deadline deadline) {
@@ -189,17 +204,27 @@ std::size_t PosixConnection::read(std::span<char> bytes, Deadline deadline) {
 }
 BufferedResponse exchange(PosixConnection &connection, PreparedRequest request, Deadline deadline,
 	Limits limits, ResponsePolicy policy) {
-	policy.head_request = request.head_request();
-	BufferedReceiver receiver(limits, policy, request.context());
-	const auto wire = request.wire();
-	connection.write({wire.data(), wire.size()}, deadline);
-	std::array<char, ResponseParser::read_bytes> buffer;
-	while (!receiver.done()) {
-		const auto size = connection.read(buffer, deadline);
-		if (!size) { receiver.eof(); break; }
-		auto input = std::span<const char>(buffer.data(), size);
-		while (!input.empty()) receiver.feed(input);
+	try {
+		if (const auto error = connection.input_error())
+			throw Error(*error, "HTTP connection has unconsumed input or is closed");
+		policy.head_request = request.head_request();
+		BufferedReceiver receiver(limits, policy, request.context());
+		const auto wire = request.wire();
+		connection.write({wire.data(), wire.size()}, deadline);
+		std::array<char, ResponseParser::read_bytes> buffer;
+		while (!receiver.done()) {
+			const auto size = connection.read(buffer, deadline);
+			if (!size) { receiver.eof(); break; }
+			auto input = std::span<const char>(buffer.data(), size);
+			while (!input.empty()) receiver.feed(input);
+		}
+		auto response = receiver.take_response();
+		response.reusable = response.reusable && !connection.input_error();
+		if (!response.reusable) connection.close();
+		return response;
+	} catch (...) {
+		connection.close();
+		throw;
 	}
-	return receiver.take_response();
 }
 } // namespace http::client

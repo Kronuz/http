@@ -6,6 +6,8 @@
 #include <exception>
 #include <iostream>
 #include <thread>
+#include <future>
+#include "support/response_boundary.h"
 
 namespace client = http::client;
 void check(bool value) {
@@ -27,7 +29,59 @@ client::Endpoint bound_endpoint(int socket) {
 	check(::getsockname(socket, reinterpret_cast<sockaddr *>(&endpoint.address), &endpoint.size) == 0);
 	return endpoint;
 }
+void queued_response() {
+	const Socket listener{::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)};
+	check(listener.value >= 0);
+	const auto endpoint = bound_endpoint(listener.value);
+	check(::listen(listener.value, 1) == 0);
+	const auto wire = http_test::response_at_boundary(client::ResponseParser::read_bytes) + http_test::unsolicited;
+	std::promise<void> sent, release;
+	auto queued = sent.get_future(), permission = release.get_future();
+	std::exception_ptr server_error;
+	JoiningThread server{std::thread([&] {
+		try {
+			pollfd descriptor{listener.value, POLLIN, 0};
+			check(::poll(&descriptor, 1, 2000) == 1);
+			const Socket peer{::accept(listener.value, nullptr, nullptr)};
+			check(peer.value >= 0);
+#ifdef SO_NOSIGPIPE
+			int one = 1;
+			check(::setsockopt(peer.value, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one)) == 0);
+#endif
+			timeval timeout{2, 0};
+			check(::setsockopt(peer.value, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == 0);
+			for (std::size_t offset = 0; offset < wire.size();) {
+				int flags = 0;
+#ifdef MSG_NOSIGNAL
+				flags = MSG_NOSIGNAL;
+#endif
+				const auto bytes = ::send(peer.value, wire.data() + offset, wire.size() - offset, flags);
+				check(bytes > 0);
+				offset += static_cast<std::size_t>(bytes);
+			}
+			sent.set_value();
+			(void)permission.wait_for(std::chrono::seconds(2));
+		} catch (...) {
+			server_error = std::current_exception();
+			sent.set_exception(server_error);
+		}
+	})};
+	client::PosixConnection connection(std::span(&endpoint, 1), client::Deadline(std::chrono::seconds(2)));
+	check(queued.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+	queued.get();
+	bool rejected = false;
+	try {
+		auto response = client::exchange(connection, client::PreparedRequest({"GET", "localhost", "/"}),
+			client::Deadline(std::chrono::seconds(2)));
+		rejected = !response.reusable;
+	} catch (const client::Error &error) { rejected = error.kind() == client::ErrorKind::Framing; }
+	release.set_value();
+	server.value.join();
+	if (server_error) std::rethrow_exception(server_error);
+	check(rejected);
+}
 int main() {
+	queued_response();
 	{
 		std::array<client::Endpoint, 1> addresses;
 		const client::Deadline deadline(std::chrono::milliseconds(1000));

@@ -52,6 +52,8 @@ Prepare an `asio::ssl::context` with `reactor::tls::configure()` on the applicat
 
 Construct a `TlsLease` with the key, executor and optional cache. After complete framing and application acceptance, call `lease.reusable(response.reusable)`. The default is retirement. Starting another buffered exchange clears any earlier reuse acceptance; accept its completed response explicitly again. Unauthenticated entries cannot persist, failed semantic validation retires the entry, and a valid Connection-close response succeeds while retiring it. Fully leased caches return pressure immediately and create no waiter list. Idle sockets retain their admission until eviction or cache destruction. Leases keep their cache alive and must settle before its executor disappears.
 
+Reuse also requires no observable pending input. TLS checks decrypted bytes, internally buffered records and socket readiness when a lease returns and when another lease checks it out. Pending or uncertain input retires the entry; legitimate TLS control traffic can conservatively prevent reuse. These checks observe current input and cannot predict later peer traffic. The drivers do not pipeline requests. A custom Asio stream without readable-state inspection returns a nonreusable response.
+
 ## Limits and streaming
 
 | Default | Bound |
