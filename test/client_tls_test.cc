@@ -2,6 +2,7 @@
 #include <allocators/memory_resource.h>
 #include <iostream>
 #include <source_location>
+#include <cerrno>
 #include <asio/use_future.hpp>
 #include "support/response_boundary.h"
 #if defined(__unix__) || defined(__APPLE__)
@@ -45,17 +46,29 @@ asio::awaitable<void> queued_response(tls_fixture::Credentials &credentials) {
 			"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", late);
 		auto cache = client::make_tls_cache(executor, 1);
 		client::TlsKey key{peer.endpoint(), "localhost", credentials.client};
+		int transport = -1;
 		{
 			client::TlsLease lease(key, executor, cache);
 			auto response = co_await client::exchange(lease,
 				client::PreparedRequest({"GET", "localhost", "/"}), client::Deadline(std::chrono::seconds(2)));
 			check(response.body == "ok");
+			transport = lease.stream().next_layer().native_handle();
 			lease.reusable(response.reusable);
 		}
 		check(cache->stats().live == 1);
 		late->release.set_value();
 		check(queued.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
 		queued.get();
+		const client::Deadline arrival(std::chrono::seconds(2));
+		for (;;) {
+			(void)arrival.remaining();
+			pollfd descriptor{transport, POLLIN, 0};
+			const auto ready = ::poll(&descriptor, 1, 0);
+			if (ready < 0 && errno == EINTR) continue;
+			check(ready >= 0);
+			if (ready) { check(descriptor.revents & POLLIN); break; }
+			co_await asio::post(executor, asio::use_awaitable);
+		}
 		{
 			client::TlsLease next(key, executor, cache);
 			check(!next.connected() && cache->stats().connects == 1);
