@@ -72,6 +72,9 @@
 #include "http_range.h"
 #include "http_request_parser.h"
 #include "reactor.h"
+#ifdef HTTP_TRACE_HOP
+#include "http_trace_hop.h"
+#endif
 #include "http_owned_stream_asio.h"
 
 namespace http {
@@ -610,6 +613,14 @@ inline asio::awaitable<bool> write_response(Stream &socket, AsioResponseWriter &
 inline asio::awaitable<void> invoke_handler(HttpHandler* handler, const Request& request, ResponseWriter& writer) {
 	handler->handle(request, writer); co_return;
 }
+#ifdef HTTP_TRACE_HOP
+inline asio::awaitable<void> invoke_handler_traced(HttpHandler* handler, const Request& request, ResponseWriter& writer, trace_hop::Stamp* stamp) {
+	stamp->start = trace_hop::now();
+	handler->handle(request, writer);
+	stamp->end = trace_hop::now();
+	co_return;
+}
+#endif
 template<class Stream>
 inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::shared_ptr<ConnectionInput<Stream>>& input, HttpHandler* handler,
                                               reactor::Reactor* reactor, const AsioResponseOptions* options) {
@@ -786,7 +797,15 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 						// co_spawn selects the worker executor for the coroutine body;
 						// awaiting post() alone preserves the parent executor.
 						offload_active = true;
+#ifdef HTTP_TRACE_HOP
+						trace_hop::Stamp stamp;
+						stamp.post = trace_hop::now();
+						co_await asio::co_spawn(reactor->pool()->get_executor(), invoke_handler_traced(handler, request, writer, &stamp), use_awaitable);
+						stamp.resume = trace_hop::now();
+						trace_hop::log().record(stamp);
+#else
 						co_await asio::co_spawn(reactor->pool()->get_executor(), invoke_handler(handler, request, writer), use_awaitable);
+#endif
 						reactor->gate().leave();
 						offload_active = false;
 					}
