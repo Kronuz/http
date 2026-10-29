@@ -768,6 +768,7 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 			if (std::chrono::steady_clock::now() >= request_deadline) { co_return; }
 			Request request = parser.take();
 			request.remote = remote;
+			reactor->lag().note_activity();
 			parser.resume();
 			bool keep_alive = request.keep_alive;
 			// The extension and the body (streamed to the app's sink, or buffered into
@@ -918,6 +919,10 @@ public:
 	void stop() { server_.stop(); }
 
 	std::size_t reactors() const { return server_.reactors(); }
+	// Reactor `i`, for its lag probe (reactor_lag.h): `reactor(i).lag().snapshot()`.
+	reactor::Reactor& reactor(std::size_t i) { return server_.reactor(i); }
+	// Run a lag probe on every reactor; before start().
+	void enable_lag_probe() { server_.enable_lag_probe(); }
 
 private:
 	// Declared before server_: the Session captures &handler_/&response_, and member

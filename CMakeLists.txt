@@ -63,7 +63,7 @@ endif()
 # REACTOR_INCLUDE_DIR to use a local checkout instead of fetching (dev iteration).
 set(REACTOR_INCLUDE_DIR "" CACHE PATH "use an existing Kronuz/reactor dir instead of fetching")
 if(REACTOR_INCLUDE_DIR STREQUAL "")
-	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG e19afd966d5cf18e377649398096be66fb40e800)
+	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG 3041327b695f3071f740030f6b7e337b5c187154)
 	FetchContent_MakeAvailable(reactor)
 	set(REACTOR_INCLUDE_DIR "${reactor_SOURCE_DIR}")
 endif()
@@ -120,6 +120,12 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	target_link_libraries(deferred_asio_test PRIVATE http)
 	add_test(NAME deferred_asio COMMAND deferred_asio_test)
 	set_tests_properties(deferred_asio PROPERTIES TIMEOUT 60)
+
+	# The service's reactor lag probe.
+	add_executable(lag_asio_test test/lag_asio_test.cc)
+	target_link_libraries(lag_asio_test PRIVATE http)
+	add_test(NAME lag_asio COMMAND lag_asio_test)
+	set_tests_properties(lag_asio PROPERTIES TIMEOUT 30)
 
 	# The Asio transport (http_asio.h) end-to-end over real TCP: the un-stallable
 	# model, 503 backpressure, N reactors (both bind modes), keep-alive, compression,
