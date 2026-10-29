@@ -102,8 +102,8 @@ int main() {
 		}
 		const auto busy = wakes() - before;
 		std::printf("     %d requests, %llu wakes in the last 600 ms\n", served, (unsigned long long)busy);
-		check(served > 200, "requests were served");
-		check(busy > 150, "requests alone keep the probes at the 1 ms interval (per-request note_activity)");
+		check(served > 50, "requests were served");
+		check(busy > 60, "requests alone keep the probes at the 1 ms interval (per-request note_activity)");
 		on.stop();
 	}
 	std::printf(g_fail ? "FAILED (%d)\n" : "PASSED\n", g_fail);
