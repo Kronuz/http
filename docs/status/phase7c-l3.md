@@ -10,24 +10,32 @@
   - http: `~/code/Kronuz/http-wt/l3-http`
   - http-log: `~/code/Kronuz/http-log-wt/l3-http`
   - prism: `phase7c/l3-prism` at `~/code/Kronuz/prism-wt/l3-prism`
-- State: implementing (library work, tests, mutants, ASan+UBSan done; TSan and preflight under way)
+- State: in review (ready for the code reviewer: concurrency and a shared public API)
 - Done criteria: the lead's list was the task message; they are the checkboxes below.
-  - [x] Offload removed: worker pool, `should_offload`, body hand-off, `ChannelBodyReader`, `Reactor::pool` (reactor 67e22a6, http bda9b5a)
+  - [x] Offload removed: worker pool, `should_offload`, body hand-off, `ChannelBodyReader`, `Reactor::pool`
   - [x] `HttpHandler::handle` is a coroutine; `Router` routes are coroutines
   - [x] `BodyStream` read with `co_await` on the loop (asio_test [K] one thread; coroutine_test [B])
   - [x] Per-request disconnect callback (`Request::on_cancel`); both C17 rules stated (`docs/mechanisms/coroutine-handlers.md`) and tested (coroutine_test [C])
   - [x] `reactor::AdmissionGate`, beside the application's own cap (`RequestRejected(503, ..., retry_after)`), each with its own 503 (coroutine_test [D])
   - [x] Buffered-body cap with 413 (coroutine_test [E]); parser fuzz target
-  - [x] Shutdown order (D16) and its bound (C14, the grace, reactor test [F], coroutine_test [F]); `Reactor::track` O(1) (reactor test [L])
-  - [x] prism (and http-log, which it wraps) migrated; prism builds and its demo serves
-  - [ ] ASan+UBSan done (reactor 9/9, http 10/10); TSan; preflight
-  - [x] Xapiand HTTP-layer check against these pins: configures; compile errors listed below for X3
+  - [x] Shutdown order (D16) and its bound (C14: the grace, reactor test [F], coroutine_test [F]); `Reactor::track` O(1) (reactor test [L])
+  - [x] prism (and http-log, which it wraps) migrated; prism builds and its demo serves (smoke script: 8 routes, SIGINT stop)
+  - [x] ASan+UBSan and TSan clean at the final heads (reactor 9/9, http 10/10 each, 0 reports)
+  - [x] preflight (`cpp-libraries/tools/preflight.sh`): reactor mac-hardened, mac-asan-ubsan, linux, freebsd ok; http mac-hardened, linux, freebsd ok;
+        http mac-asan-ubsan fails to build `compressors` under Homebrew LLVM (zlib's SDK `-isystem` shadows libc++'s headers;
+        the same 33 errors are in the older preflight log of http `main`), so ASan+UBSan was run by hand with `-stdlib++-isystem` and a zlib include override
+  - [x] Xapiand HTTP-layer check against these pins: configures; the compile errors are listed below for X3
 - Done: see the log.
-- Doing: TSan builds; preflight.
-- Next: push the final heads, record CI jobs, hand to the code reviewer.
+- Doing: nothing running.
+- Next: the code review; then the lead merges in order reactor, http, http-log, prism and moves their pins to `main`.
 - Blocked on: nothing.
-- Findings folded in: none yet (not reviewed).
-- Last verified: macOS x86_64, Apple clang Debug: reactor 9/9, http 11/11 ctest (tls_asio included); Homebrew LLVM 23 ASan+UBSan: reactor 9/9, http 10/10 (tls_asio is not built with a local reactor include); libFuzzer 181 s, 1.9M runs, no crash.
+- Findings folded in: none yet (not reviewed). Self-found and fixed: a request tracked after the force walk was never forced (reactor d442d87);
+  `std::promise` on the caller's stack in `abort_all` (linux-asan-ubsan CI, reactor f6abdd6).
+- Heads: reactor f6abdd6, http ead53b4, http-log fa1e87a, prism (this ledger's commit message names it).
+- Last verified: macOS x86_64, Apple clang Debug: reactor 9/9, http 11/11, http-log 2/2; Homebrew LLVM 23 ASan+UBSan and TSan as above; libFuzzer 181 s,
+  1.9M runs, no crash; TSan reactor_test 518 runs, no hang (one abort in the older `free_port` test: bind on a port another process took).
+- Known cost for the lead to measure (not measured here): after a keep-alive request the one-byte watch read has consumed the first byte of
+  the next request, so the parser gets it from `ConnectionInput::read` and the rest takes a second read.
 
 ## Proof
 
@@ -53,13 +61,14 @@ Mutants (http, one build and run each; a mutant "dies" when a test fails or the 
 | late `on_cancel` not run | [B] |
 
 Reactor mutants (reactor test): gate off by one ([G] x5), `abort_all` inline instead of on the loop ([O]),
-`force_all` skipped (hang), linear scan in `add` (exceeds the 60 s timeout), no cursor fix in `remove` ([L]).
+`force_all` skipped (hang), linear scan in `add` (exceeds the 60 s timeout), no cursor fix in `remove` ([L]),
+no cancellation emitted for idle sessions (hang), `track` after `force_all` not forced ([O]).
 A mutant removing the drain-time cancel in `ConnectionInput::drain` survived (exit 0): the next `co_await` of a
 cancelled coroutine throws, so the code was redundant and was removed.
 
 Revert checks: each new test is new, so "fails without the fix" is the mutant above that undoes that fix.
 
-## What X3 must change (Xapiand `d71cf7a97` with pins reactor 67e22a6, http c05b4d3, http-log c7772ab)
+## What X3 must change (Xapiand `d71cf7a97` with pins reactor f6abdd6, http ead53b4, http-log fa1e87a)
 
 CMake configures. Compiling `src/server/search_service.o`, `search_views.o` and `manager.o` stops at:
 
