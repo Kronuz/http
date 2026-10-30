@@ -423,6 +423,9 @@ int main() {
 		check(svc.reactor(0).gate().rejected == 3, "[D] the gate counts the refusals");
 		check(until([&] { return svc.reactor(0).gate().inflight.load() == 0; }), "[D] every lease is released once the responses settle");
 		check(one(port, get("/fast", "Connection: close\r\n")).status == 200, "[D] admission resumes after the load drains");
+		Conn keep(port);   // a connection that stays open: its lease must end with each response, not with the socket
+		for (int i = 0; i < 3; ++i) { keep.send(get("/fast")); keep.read_response(); }
+		check(until([&] { return svc.reactor(0).gate().inflight.load() == 0; }), "[D] a keep-alive connection holds no lease between requests");
 	}
 
 	// [E] The buffered-body cap.

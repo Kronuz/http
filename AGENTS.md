@@ -15,8 +15,10 @@ routes, negotiates, frames, and writes. Header-only. Read `README.md` for the sh
 
 ```
 http_message.h        Request + the buffered Response value + reason_phrase().
-http_handler.h        HttpHandler (the seam) + ResponseWriter (buffered/streamed output)
-                      + BodySink (push streaming) + BodyReader (concurrent pull streaming).
+http_handler.h        HttpHandler (the seam; handle() is a coroutine) + ResponseWriter
+                      (buffered/streamed output) + BodySink (push streaming).
+http_body_stream.h    BodyStream: a request body read with co_await (a bounded channel the
+                      connection feeds); the handler-facing async_read and the feed side.
 http_router.h         Router — method/path dispatch; a thin binding over Kronuz/radix-router.
 http_accept.h         Accept — content negotiation (Accept / Accept-Encoding / …), RFC 7231.
 http_compression.h    Transparent response compression (Accept-Encoding → zstd/gzip).
@@ -26,15 +28,16 @@ http_request_parser.h RequestParser — transport-agnostic http-parser wrapper: 
                       with buffered-or-streamed body intake (the headers-complete hook).
 http_asio.h           The Asio transport: the connection as a C++20 coroutine (the
                       reactor::Session), the buffered ResponseWriter with compression,
-                      keep-alive, the streaming ChannelBodyReader (a reactor::Abortable),
-                      and HttpAsioService (a thin adapter over reactor::TcpServer).
+                      keep-alive, the per-request watch (ConnectionInput), the per-request
+                      abort hook (RequestAbort, a reactor::Abortable), the streamed-body
+                      feed, and HttpAsioService (a thin adapter over reactor::TcpServer).
 http_deferred.h       DeferredReply: an owned, delayed buffered reply (ResponseWriter::defer()).
 http_owned_stream.h   OwnedStreamCapability: owned response streaming (ResponseWriter::stream()).
 http_owned_stream_asio.h  Its Asio implementation, plain TCP and TLS.
 http_owned_storage.h  Owned chunk storage and allocation refusal for owned streams.
 http_asio_tls.h       Optional TLS adapter (tls_connection_factory); the only OpenSSL user.
 reactor (dep)         The generic Asio server runtime (Kronuz/reactor): the shared-nothing
-                      reactor pool, accept/bind strategies, offload gate, and graceful
+                      reactor pool, accept/bind strategies, admission gate, and graceful
                       shutdown. Extracted from http_asio.h so other services share it.
 examples/kv_store.cc  A complete REST app: buffered routes, a streamed response route, a
                       streamed request-body route (POST /bulk).
@@ -43,13 +46,17 @@ examples/bench_asio.cc Raw-Asio throughput ceiling (no framework) — the refere
 examples/bench_http.cc Framework throughput: the same fixed response through HttpAsioService.
 test/test.cc          ctest: method dispatch, 404 vs 405, param capture (transport-agnostic).
 test/deferred_test.cc, deferred_asio_test.cc, owned_stream_test.cc,
-owned_stream_asio_test.cc, offload_test.cc
-                      ctest: deferred replies, owned streaming, worker offload.
+owned_stream_asio_test.cc
+                      ctest: deferred replies, owned streaming.
+test/coroutine_test.cc ctest "coroutine": coroutine handlers, BodyStream, disconnect cancels
+                      reads not writes, the admission 503, the body cap's 413, shutdown.
+docs/mechanisms/coroutine-handlers.md  How a request runs, is cancelled, admitted and stopped.
+docs/status/phase7c-l3.md  The L3 ledger.
 docs/TRANSPORT.md     Deferred replies, TLS, connection and request limits, rejections.
 docs/OWNED_STREAMING.md  Owned response streaming: framing, backpressure, footprint.
 docs/AUDIT.md         Transport audit findings with their before/after measurements.
-test/asio_test.cc     ctest "asio": the transport end-to-end over real TCP — un-stallable
-                      offload, 503 backpressure, N reactors (both bind modes), keep-alive,
+test/asio_test.cc     ctest "asio": the transport end-to-end over real TCP — suspended
+                      handlers, 503 backpressure, N reactors (both bind modes), keep-alive,
                       compression, streamed request bodies, error mapping.
 ```
 
@@ -86,36 +93,47 @@ transition (`reading_value_`).
 ## The un-stallable model (Asio coroutine)
 
 One connection is one coroutine (`detail::serve_connection` in `http_asio.h`, run as a
-`reactor::Session`). When the service is created with a worker count, each
-`reactor::Reactor` owns an Asio `thread_pool` and a bounded offload window. A request
-that opts in (`should_offload`) is run with:
+`reactor::Session`), and a handler is a coroutine awaited from it on the same loop:
 
 ```cpp
-co_await asio::co_spawn(reactor->pool()->get_executor(),
-    [&]() -> asio::awaitable<void> { handler->handle(request, writer); co_return; },
-    asio::use_awaitable);
+co_await handler->handle(request, writer);   // suspends on whatever it waits for
 ```
 
-The handler runs on a pool thread, the reactor stays free to serve other connections,
-and the coroutine resumes on the connection's own `io_context`. Invariants — do not
-break these when touching `serve_connection`:
+A handler that waits `co_await`s, the loop serves other connections, and the coroutine
+resumes on the connection's own `io_context`. There is no worker pool and no thread
+handoff. Invariants -- do not break these when touching `serve_connection`:
 
 - **One in-flight handler per connection.** The coroutine is the single owner of its
   `Request` and `ResponseWriter`; it does not read the next request until this one's
   response is written. So there is no pause/resume bookkeeping and no cross-thread
-  handoff of the connection state — the race class a callback FSM hides cannot arise.
-- **Bounded offload → 503.** `reactor::OffloadGate::try_enter()` (via `reactor->gate()`)
-  fails when the window is full; answer 503 inline rather than grow an unbounded backlog.
-- **Offloaded handlers run concurrently across connections, so the `HttpHandler` must
-  be thread-safe** when a worker count is set. With `workers = 0`, `handle()` runs
-  inline on the reactor — the single-threaded fast path.
-- **Per-route fast path.** `should_offload(request)` (default true) is consulted per
-  request; return false to keep a cheap route (health check, metrics) inline so it is
-  served even when every worker is busy. A route classified cheap must actually be
-  cheap — it runs on the reactor.
+  handoff of the connection state -- the race class a callback FSM hides cannot arise.
+- **A request's frame is never destroyed early.** Cancellation is disabled on the
+  connection coroutine from just before the handler runs until its response is written
+  (`reset_cancellation_state(disable_cancellation())`, re-enabled at the top of the next
+  request). Shutdown and hang-ups arrive as `Request::cancel`, never as a destroyed
+  frame. `reactor->stopping()` is checked at the top of the keep-alive loop because a
+  session cancellation that arrived while disabled is not replayed.
+- **Admitted at headers-complete, released when the response is settled.**
+  `reactor->gate().enter()` in the headers hook; empty means `RequestRejected(503, ...,
+  retry_after 1)`. The lease is a connection-scope local, reset after the write.
+- **Tracked and watched for the whole run.** `RequestAbort` (a stack `reactor::Abortable`)
+  is on the reactor's intrusive list from before the handler to after the write:
+  `abort()` is `Request::cancel(Shutdown)`, `force()` closes the socket after the grace.
+  `ConnectionInput::watch` keeps one one-byte read pending: EOF or a read error (not our
+  own cancellation) calls `Request::cancel(Disconnect)`. That is the per-request rule and
+  it differs from the deferred-reply monitor's (EOF is a half-close there). A pipelined
+  byte ends the watch for the rest of the request. `WatchGuard` unwatches on every exit.
+- **Cancel reads, never writes.** A handler stops reading at its next checkpoint when
+  `Request::cancelled()`; the transport still writes the response (a half-closed client
+  gets its answer). Nothing in the transport aborts a write for a disconnect.
+- **`ConnectionInput::drain` must end when cancelled.** A cancelled waiter cancels the
+  pending one-byte read (`lowest_layer().cancel()`); otherwise an idle keep-alive
+  connection would hold shutdown until its peer sent a byte.
+- **Handlers are single-threaded per reactor but run on every reactor.** State shared
+  across reactors still needs its own synchronization.
 
-`test/asio_test.cc` proves it: fast-request latency stays ~15 ms under offloaded slow
-load vs ~450 ms inline (same load).
+`test/coroutine_test.cc` proves each of these over real TCP; `docs/mechanisms/
+coroutine-handlers.md` is the long form.
 
 ## Multi-reactor binding (portable)
 
@@ -141,26 +159,23 @@ Chosen at headers-complete:
 - **Push-streamed** (`on_request_body` returns a `BodySink`): body chunks go to the
   sink as parsed, on the reactor, nothing accumulated. For light per-chunk work.
   `asio_test [H]` streams a 2.4 MB NDJSON body and asserts `Request::body` stays empty.
-- **Pull-streamed / concurrent** (`wants_body_stream` returns true, needs a worker
-  pool): the framework runs `handle()` on a worker *concurrently* with the body read
-  and gives it a `BodyReader` (`Request::body_reader`) to PULL raw chunks from.
-  `read()` blocks the worker on a condition variable until the next chunk; the reactor
-  feeds through a bounded queue and, when it is full, yields via a short timer and
-  retries (flow control -> the reactor stays free, back-pressure reaches the socket).
-  O(buffer) memory for any size. The handler is launched with an explicit
-  `co_spawn(pool_exec, handle, done_signal)` (so it really runs on the pool -- the
-  `&&`/awaitable-operators form ran it on the reactor and deadlocked); the reactor
-  feeds, then co_awaits the done signal. feed never throws (a socket/parse error
-  `abort()`s the reader so `read()` returns false). `read()` is sticky at end (an
-  over-read never blocks). The consumer waking on a condvar -- not the io_context --
-  is what lets shutdown work: `ChannelBodyReader` is a `reactor::Abortable` registered
-  via `reactor->track()`, and `reactor::TcpServer::stop()` aborts every tracked
-  abortable before `io.stop()`, so a handler blocked mid-stream unwedges before the pool
-  join, even after the loops stop. An empty chunk is the end-of-body marker;
-  a streaming handler MUST drain the reader.
-  `asio_test [K]` (2 MB through a slow consumer: no loss under back-pressure + a fast
-  request served mid-stream + an over-read returns false + a tiny body arriving with the
-  headers) and `[L]` (stop() while a stream is mid-flight must not hang).
+- **Streamed** (`wants_body_stream` returns true): `handle()` is spawned on the
+  connection's loop as soon as the headers are in and reads `Request::body_stream` (a
+  `BodyStream`) with `co_await`. The connection coroutine feeds a bounded
+  `asio::experimental::channel` (capacity 8 chunks) and suspends in `push()` when it is
+  full, so back-pressure reaches the socket. `finish()` ends the stream (`eof`, sticky),
+  `fail(ec)` ends it with an error after the buffered chunks, `abandon()` (the handler
+  completed) releases a push that is waiting. The feed runs in `feed() || handler_done`:
+  if the handler answers without reading it all, the feed is cancelled and the
+  connection closes after the response. The join on the handler is uncancellable
+  (`HandlerDone::wait` with cancellation disabled), so the request and writer outlive it.
+  The body is not capped. `asio_test [K]` (2 MB through a slow consumer, all reads on the
+  one loop thread, a fast request served mid-stream, an over-read returns eof, a tiny
+  body arriving with the headers) and `[L]` (stop() while a stream is mid-flight).
+- The **buffered cap** (`AsioResponseOptions::max_body`, 16 MiB by default) is enforced
+  by `RequestParser::set_body_limit`: a `Content-Length` over it stops the parse at
+  headers-complete, and a chunked body stops it as bytes arrive; the connection throws
+  `RequestRejected(413)`. The callbacks return -1 (http_parser treats 1 as "no body").
 
 ## Response transforms (generic knobs)
 

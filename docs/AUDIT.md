@@ -2,6 +2,8 @@
 
 ## Worker offload executor
 
+The offload path these two sections audit was removed in Phase 7c L3 (handlers are coroutines on the connection's loop; see `docs/mechanisms/ coroutine-handlers.md`). They stay as the record of what the audit found.
+
 The buffered transport awaited `asio::post(pool_executor, use_awaitable)` and then called the handler. That await retained the parent coroutine's executor, so blocking handlers still ran on the reactor. The untouched revision reproduces four failures in the existing real TCP transport suite, including serialized slow work and ineffective load shedding.
 
 The corrected path explicitly spawns a handler coroutine on the worker executor and awaits its result on the connection executor. Handler exceptions return to the connection's existing error path. One offload reservation still covers the complete handler call.

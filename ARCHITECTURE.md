@@ -26,11 +26,12 @@ loop, or a thread — so it is testable in isolation and portable to any runtime
                                   + the buffered ResponseWriter (compression / conditional
                                   / range), riding on the Kronuz/reactor runtime below
   runtime          reactor        N shared-nothing reactors on N threads, one port,
-                                  per-reactor offload pool, graceful shutdown (extracted)
+                                  per-reactor admission gate, graceful shutdown (extracted)
 ```
 
-The only file that knows Asio is `http_asio.h` (and the generic `reactor` runtime it
-rides on). The only file that knows the parser is `http_request_parser.h`. Everything
+The files that name Asio are `http_asio.h` (and the generic `reactor` runtime it
+rides on) and the coroutine seam itself (`handle` returns `asio::awaitable<void>`;
+`BodyStream` is an Asio operation). The only file that knows the parser is `http_request_parser.h`. Everything
 else is plain C++ over the `Request` / `ResponseWriter` values.
 
 ## Why the seam has this shape
@@ -47,7 +48,7 @@ application code:
   (`COUNT`, `INFO`, `DUMP`, `RESTORE`, …) that a stricter parser like llhttp
   rejects. Swapping it for another parser is contained here; the handler and the
   `Request`/`ResponseWriter` are parser-agnostic.
-- **Concurrency (inline or offloaded).** A handler selected by `should_offload` runs on the reactor's bounded worker pool; excess requests receive 503. Inline handlers run on the reactor and must remain nonblocking. The scoped writer and request remain valid only during the handler call. Delayed work transfers exclusive reply authority through `ResponseWriter::defer()` and retains the returned move-only `DeferredReply`, never the writer or request. The connection awaits one reply before handling the next keep-alive request.
+- **Concurrency (coroutines on the loop).** `handle` is a coroutine awaited on the connection's loop. A handler that must wait `co_await`s and the loop serves other connections; nothing runs off the loop, so there is no worker pool to size. Excess requests receive 503 from the reactor's admission gate. The scoped writer and request remain valid until the coroutine completes, and a request's frame is never destroyed early. Delayed work transfers exclusive reply authority through `ResponseWriter::defer()` and retains the returned move-only `DeferredReply`, never the writer or request. The connection awaits one reply before handling the next keep-alive request.
 - **Request body (buffered or streamed).** A handler opts into streaming per
   endpoint (`on_request_body` returns a `BodySink`): the body then flows to the sink
   chunk-by-chunk as it is parsed, never accumulated, so a multi-gigabyte `RESTORE`
@@ -69,8 +70,8 @@ server runtime extracted from this file: `HttpAsioService` is now a thin adapter
 turns the `HttpHandler` + response options into a per-connection `reactor::Session`
 (`detail::serve_connection`) and hands it to a `reactor::TcpServer`. The server runs
 **N `io_context`s on N threads** — thread-per-core, no shared state between them, no
-global lock, no cross-core bounce. Each `reactor::Reactor` also owns an optional Asio
-`thread_pool` for offload and a bounded offload window (`OffloadGate`).
+global lock, no cross-core bounce. Each `reactor::Reactor` also owns a bounded in-flight
+admission gate (`AdmissionGate`).
 
 Binding N reactors to one port has two modes, chosen automatically by the runtime:
 
@@ -92,61 +93,59 @@ One connection is one coroutine (`serve_connection`). Its keep-alive loop:
   read bytes  ->  RequestParser.feed
                      |
                      | on headers complete:
+                     |   admit: reactor gate, else 503 + Retry-After (rejected, connection closes)
                      |   build the app extension (create_extension)
-                     |   ask the app: stream this body? (on_request_body -> BodySink?)
+                     |   ask the app: BodyStream? sink? else buffer (capped: 413)
                      |
                      | on each body chunk:
-                     |   sink present  -> sink.write(chunk)     (streamed, never held)
-                     |   else          -> Request::body.append  (buffered, small bodies)
-                     |
-                     | on message complete: sink.end(); request ready
+                     |   sink present  -> sink.write(chunk)     (pushed, never held)
+                     |   else          -> Request::body.append  (buffered, up to the cap)
                      v
-  take() the Request
+  Request ready (or, for a BodyStream, as soon as the headers are)
      |
-     | should_offload(request) && a pool exists?
-     |    yes, window has room  -> co_await co_spawn(pool, handle)   (reactor free)
-     |    yes, window full      -> 503 Service Unavailable
-     |    no                    -> handle() inline on the reactor    (fast path)
-     |
+     | track the request for shutdown, watch the socket for a hang-up
+     | co_await handler->handle(request, writer)       (the loop serves others while it waits)
+     |    a hang-up or shutdown -> Request::cancel(...)  (the handler's callback; frame stays)
      | handler throws -> on_error(...) maps it (default 500)
      v
   ResponseWriter.serialize:  content negotiation + compression, HTTP/1.1 framing
      |
      v
-  async_write  ->  keep-alive? loop : close
+  async_write (finishes even when cancelled) -> release the gate -> keep-alive? loop : close
 ```
 
 ### The un-stallable property
 
-Offload is one `co_await co_spawn(pool, work)`: the blocking work runs on a pool
-thread, the reactor is free to serve other connections, and the coroutine resumes on
-the connection's own `io_context` when the work is done. There is **one in-flight
-handler per connection** (the coroutine is the single owner of its `Request` and
-`ResponseWriter`), so there is no pause/resume bookkeeping and no cross-thread
-completion handoff — the race class that a callback-FSM version hides cannot arise.
-A saturated offload window sheds load as `503` instead of growing an unbounded queue.
+A handler is a coroutine, so waiting is `co_await`: the coroutine suspends, the loop is
+free to serve other connections, and it resumes on the connection's own `io_context`.
+Nothing runs off the loop. There is **one in-flight handler per connection** (the
+connection coroutine is the single owner of its `Request` and `ResponseWriter`), so
+there is no pause/resume bookkeeping and no cross-thread completion handoff -- the race
+class that a callback-FSM version hides cannot arise. A saturated reactor sheds load as
+`503` instead of growing an unbounded queue. `docs/mechanisms/coroutine-handlers.md`
+walks through cancellation, admission and shutdown.
 
 ### Bodies: bounded memory for any size
 
 Request-body intake has three modes, chosen at headers-complete:
 
-- **Buffered** (default): the whole body lands in `Request::body`. Convenient for
-  small requests; the up-front reservation from `Content-Length` is capped so a
-  hostile length can't force a giant allocation.
+- **Buffered** (default): the whole body lands in `Request::body`, up to the service's
+  cap (16 MiB; `413` beyond it, from `Content-Length` or as chunked bytes arrive).
+  Convenient for small requests; the up-front reservation from `Content-Length` is
+  capped so a hostile length can't force a giant allocation.
 - **Push-streamed** (`on_request_body` returns a `BodySink`): each body chunk is
   handed to the sink as it is parsed, on the reactor, and nothing is accumulated.
-  For light per-chunk work (hashing, line-counting).
-- **Pull-streamed / concurrent** (`wants_body_stream` returns true): the framework
-  runs `handle()` on a worker *concurrently* with the body read and gives it a
-  `BodyReader` to PULL raw chunks from. `read()` blocks the worker until the next
-  chunk (or end); the reactor feeds chunks through a bounded, flow-controlled channel
-  and **suspends when it is full** (stays free to serve others, and back-pressure
-  reaches the socket). A multi-gigabyte `RESTORE`/bulk load is indexed as it arrives,
-  in O(buffer) memory. The app parses the chunks in its own format; the framework owns
-  the transport, the concurrency, and the back-pressure.
+  For light per-chunk work (hashing, line-counting). Not capped.
+- **Streamed** (`wants_body_stream` returns true): `handle()` starts as soon as the
+  headers are in and reads the body from `Request::body_stream` (a `BodyStream`) with
+  `co_await ... async_read(chunk, token)`. The connection coroutine feeds chunks
+  through a bounded channel and **suspends when it is full** (the loop stays free, and
+  back-pressure reaches the socket). A multi-gigabyte `RESTORE`/bulk load is indexed as
+  it arrives, in O(buffer) memory. The app parses the chunks in its own format; the
+  framework owns the transport and the back-pressure. Not capped.
 
-Push-streamed sinks run on the reactor, so keep their work light; heavy consumption
-belongs on the pull path (a worker).
+Push-streamed sinks run inside the parser, so keep their work light; heavy consumption
+belongs on the streamed path, where the handler can suspend.
 
 ## Extension points
 
@@ -155,11 +154,11 @@ editing it:
 
 | Hook | Purpose |
 |---|---|
-| `handle(request, writer)` | the request handler (route + respond). |
+| `handle(request, writer)` | the request handler, a coroutine (route + respond). |
 | `create_extension(request)` | attach typed per-request state, built at headers-complete. |
 | `on_request_body(request)` | opt into push streaming: return a `BodySink` (light per-chunk work on the reactor), or nullptr to buffer. |
-| `wants_body_stream(request)` | opt into concurrent pull streaming: `handle()` runs on a worker and pulls raw chunks from `Request::body_reader`, flow-controlled (O(buffer) memory). |
-| `should_offload(request)` | run this request on the offload pool vs inline. |
+| `wants_body_stream(request)` | opt into a streamed body: `handle()` runs while the body arrives and reads raw chunks from `Request::body_stream` with `co_await`, flow-controlled (O(buffer) memory). |
+| `Request::on_cancel(cb)` | run `cb(reason)` on the loop when the client closes or the service stops; reads stop, writes finish. |
 | `on_error(exc, request, writer)` | map an exception to a response (default 500). |
 | `CompressionOptions::add_coding` | register a content-coding (the app owns the codec). |
 | `Accept` / `negotiate` | pick a media type from what the app can serialize. |
@@ -191,6 +190,6 @@ concurrent pull, with flow control) is done.
 
 ## Deferred response ownership
 
-The scoped ResponseWriter and Request cannot escape the handler. `defer()` transfers exclusive buffered response authority into a move-only capability backed by a mutex-protected exchange. Application submission retains owned response bytes and a reply lease; the transport retains the request lease and waits on its connection executor. Completion before waiting is observable, and returning from an offloaded handler releases its worker slot before waiting for the reply.
+The scoped ResponseWriter and Request cannot escape the handler. `defer()` transfers exclusive buffered response authority into a move-only capability backed by a mutex-protected exchange. Application submission retains owned response bytes and a reply lease; the transport retains the request lease and waits on its connection executor. Completion before waiting is observable, and a handler that returns after `defer()` releases its in-flight admission when the reply settles.
 
 The exchange advances Waiting → Ready → Writing → Written, or enters Closing for deadline, disconnect, abandonment or shutdown. Closing retains all leases until the original socket operation has been canceled and reaped. Settlement is exactly once; hooks and lease destructors execute outside the lock. Escaped capabilities retain closed metadata, not a socket, stack writer or live executor. One bounded response is accepted, keep-alive handlers remain ordered, and sending half-close remains valid. Deferred response transforms are disabled.
