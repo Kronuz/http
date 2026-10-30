@@ -10,7 +10,7 @@
   - http: `~/code/Kronuz/http-wt/l3-http`
   - http-log: `~/code/Kronuz/http-log-wt/l3-http`
   - prism: `phase7c/l3-prism` at `~/code/Kronuz/prism-wt/l3-prism`
-- State: in review (ready for the code reviewer: concurrency and a shared public API)
+- State: review conditions fixed (L3-B1, L3-B2, L3-N1); waiting for the lead to rerun the review probes and land
 - Done criteria: the lead's list was the task message; they are the checkboxes below.
   - [x] Offload removed: worker pool, `should_offload`, body hand-off, `ChannelBodyReader`, `Reactor::pool`
   - [x] `HttpHandler::handle` is a coroutine; `Router` routes are coroutines
@@ -29,10 +29,10 @@
 - Doing: nothing running.
 - Next: the code review; then the lead merges in order reactor, http, http-log, prism and moves their pins to `main`.
 - Blocked on: nothing.
-- Findings folded in: none yet (not reviewed). Self-found and fixed: a request tracked after the force walk was never forced (reactor d442d87);
+- Findings folded in: see "Review fixes" below. Earlier: Self-found and fixed: a request tracked after the force walk was never forced (reactor d442d87);
   `abort_all` waited on heap state (`std::promise`, then a `shared_ptr`) while the accept-pressure test stops the server out of descriptors, where clang's UBSan vptr check cannot look up a new type (linux-asan-ubsan CI); the wait now uses reactor-owned members (reactor 7dcf73c).
-- Heads: reactor 7dcf73c, http 0553e53 (plus this ledger's docs-only commit), http-log 86661b3, prism 51e21bf.
-- CI at those heads: reactor 8/8 jobs green (including linux-asan-ubsan and linux-tsan); http, http-log and prism: every job green.
+- Heads: reactor 76c32b4, http fce24c6 (plus this ledger's docs-only commit), http-log d2315b8, prism bdaf3e6.
+- CI at the review heads (reactor 7dcf73c, http 0553e53, http-log 86661b3, prism 51e21bf): all green. At the fix heads above: pushed, CI not watched.
 - Last verified: macOS x86_64, Apple clang Debug: reactor 9/9, http 11/11, http-log 2/2; Homebrew LLVM 23 ASan+UBSan and TSan as above; libFuzzer 181 s,
   1.9M runs, no crash; TSan reactor_test 518 runs, no hang (one abort in the older `free_port` test: bind on a port another process took).
 - Known cost for the lead to measure (not measured here): after a keep-alive request the one-byte watch read has consumed the first byte of
@@ -58,7 +58,7 @@ Mutants (http, one build and run each; a mutant "dies" when a test fails or the 
 | `abort()` a no-op | [F] stop x3 |
 | `stopping()` check removed from the keep-alive loop | [F] stop (hangs) |
 | BodyStream unbounded | [B] bounded |
-| BodyStream drops the failure | [B] failed body |
+| BodyStream drops the failure | [B] failed body; [H] x4 (a real socket cut mid-body) |
 | late `on_cancel` not run | [B] |
 
 Reactor mutants (reactor test): gate off by one ([G] x5), `abort_all` inline instead of on the loop ([O]),
@@ -95,3 +95,28 @@ Other consumers of reactor or http still on their own pins (not touched): Detent
 ## Log
 - 2026-10-30: reactor `67e22a6`: pool removed, `AdmissionGate`, intrusive abort list, `abort_all`/`force_all` on the
   loop, shutdown grace. http `bda9b5a`: coroutine handlers, `BodyStream`, cancel/watch, admission, cap, tests.
+
+## Review fixes (`docs/reviews/phase7c-l3-code.md`)
+
+| Finding | Fix | Test | Revert / mutant evidence |
+|---|---|---|---|
+| L3-B1 | `feed()` maps EOF (and a zero-byte read) before the body is complete to `connection_reset`, and cancels the request before failing the stream, so `cancelled()` is true when the reader's read returns | coroutine_test [H]: Content-Length FIN, RST, half-close and chunked cut; the reader's end is not `eof` and `cancelled()` is true; a complete body still ends with `eof` | no eof mapping: [H] fails x3 (FIN, half-close, chunked); cancel left to the later call: [H] fails x4 |
+| L3-B2 | `Request::cancel` and a late `on_cancel` drop a throwing callback; the streamed path holds any throw between the `co_spawn` and `handler_done->wait()` in one `try` and rethrows after the wait | coroutine_test [I]: streamed (the request stays admitted while the handler runs, which the unwinding connection frame released early), buffered (survives), late registration | callback catch removed: the process terminates in [I]; guard removed with a throw injected after the cancel: ASan heap-use-after-free in the handler, passes with the guard (injection harness in `.scratch/inject.sh`, not committed) |
+| L3-N1 (reactor `76c32b4`) | per-connection accept errors (ECONNABORTED, ECONNRESET, EPROTO, the network errors, EINVAL on macOS) skip the connection; 64 in a row back off; a real listener error ends the loop and is logged on stderr and through `L_EXC` | reactor_test [N]: 1500 reset pending connections against both accept strategies, then the listener serves | per-connection branch removed: [N] fails x2 |
+| L3-N5 (partly) | http `CMakeLists.txt` header, http-log `AGENTS.md` (`body_stream`), reactor `test/test.cc` header | | |
+| L3-N11 | note on `set_headers_callback` | | |
+
+Follow-ups left open (not one-line changes):
+
+1. L3-N2: a second concurrent `Reactor::abort_all` returns before the first caller's walk has run.
+2. L3-N3: D16 lists the acceptors first; `TcpServer::stop` aborts first (safe). Update D16's wording in Xapiand.
+3. L3-N4: `Reactor::track` is loop-thread only, checked by `assert`; add a release-mode check or a post, and say so in the Detent/consensus migration notes.
+4. L3-N5 (rest): http `docs/http.d2` and `docs/http.svg` still draw the pool and `should_offload`.
+5. L3-N6: `Reactor` member order (`io_` should be declared after `gate_` and the mutexes, or documented).
+6. L3-N7, N10: what bounds the sum of buffered bodies, and a bound for handlers that never return (architect, X6).
+7. L3-N8, N9: documented cancellation limits; the keep-alive extra read is for the lead to measure.
+
+Proof of the fixes (macOS x86_64, Homebrew LLVM 23): ASan+UBSan and TSan clean on reactor (9/9 each) and http (10/10 each, coroutine_test with [H] and [I]);
+the review's probes against the fixed code: `probe_truncated` 0 of 4 clean eof, `probe_throwcb` streamed and buffered survive under ASan,
+`probe_acceptrst` 2000 reset connects, listener alive. Preflight: reactor mac-hardened, mac-asan-ubsan, linux, freebsd ok; http mac-hardened, linux, freebsd ok;
+http-log and prism mac-hardened ok; every mac-asan-ubsan run for http and its dependents fails in the same libc++ header search-path error as before this change.
