@@ -424,15 +424,13 @@ public:
 		auto error = std::get<1>(winner);
 		throw asio::system_error(error ? error : asio::error::timed_out);
 	}
-	// Waits for the pending one-byte read. A cancelled waiter cancels that read too, so the
-	// wait ends: the caller then sees the read fail with operation_aborted.
+	// Waits for the pending one-byte read. A cancelled waiter ends the wait: the next
+	// co_await of a cancelled coroutine throws operation_aborted, and the socket close that
+	// follows reaps the read.
 	asio::awaitable<void> drain() {
 		while (pending_) {
 			done_.expires_at(std::chrono::steady_clock::time_point::max());
 			asio::error_code error; co_await done_.async_wait(asio::redirect_error(asio::use_awaitable, error));
-			if (pending_ && (co_await asio::this_coro::cancellation_state).cancelled() != asio::cancellation_type::none) {
-				asio::error_code ignored; stream_.lowest_layer().cancel(ignored);
-			}
 		}
 	}
 private:
@@ -745,12 +743,13 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 				};
 				// The body is fed until it ends, or until the handler finishes first (it
 				// answered without reading it all): then the feed is cancelled.
-				Fed fed;
-				{
+				Fed fed = Fed::Failed;
+				std::exception_ptr feed_error;
+				try {
 					using namespace asio::experimental::awaitable_operators;
 					auto first = co_await (feed() || handler_done->wait());
 					fed = first.index() == 0 ? std::get<0>(first) : Fed::Abandoned;
-				}
+				} catch (...) { feed_error = std::current_exception(); }
 				// A feed that stopped early leaves the reader a failed body, never a hung read.
 				if (!stream->closed()) { stream->fail(asio::error::operation_aborted); }
 				// From here the handler and the request/writer it references end only by
@@ -763,6 +762,7 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 				}
 				co_await handler_done->wait();
 				input->unwatch();
+				if (feed_error) { std::rethrow_exception(feed_error); }   // after the handler has completed
 				if (fed != Fed::Complete) { keep_alive = false; }
 
 				if (!writer.is_deferred() && !writer.ended()) {

@@ -111,8 +111,7 @@ handoff. Invariants -- do not break these when touching `serve_connection`:
   connection coroutine from just before the handler runs until its response is written
   (`reset_cancellation_state(disable_cancellation())`, re-enabled at the top of the next
   request). Shutdown and hang-ups arrive as `Request::cancel`, never as a destroyed
-  frame. `reactor->stopping()` is checked at the top of the keep-alive loop because a
-  session cancellation that arrived while disabled is not replayed.
+  frame.
 - **Admitted at headers-complete, released when the response is settled.**
   `reactor->gate().enter()` in the headers hook; empty means `RequestRejected(503, ...,
   retry_after 1)`. The lease is a connection-scope local, reset after the write.
@@ -126,9 +125,9 @@ handoff. Invariants -- do not break these when touching `serve_connection`:
 - **Cancel reads, never writes.** A handler stops reading at its next checkpoint when
   `Request::cancelled()`; the transport still writes the response (a half-closed client
   gets its answer). Nothing in the transport aborts a write for a disconnect.
-- **`ConnectionInput::drain` must end when cancelled.** A cancelled waiter cancels the
-  pending one-byte read (`lowest_layer().cancel()`); otherwise an idle keep-alive
-  connection would hold shutdown until its peer sent a byte.
+- **`reactor->stopping()` is checked at the top of the keep-alive loop.** A session
+  cancellation that arrived while cancellation was disabled is dropped, and an idle
+  connection is not tracked, so without the check `stop()` would wait on it forever.
 - **Handlers are single-threaded per reactor but run on every reactor.** State shared
   across reactors still needs its own synchronization.
 
