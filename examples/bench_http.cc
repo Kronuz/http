@@ -4,7 +4,7 @@
  * parsing, response framing all exercised). Compare its numbers against bench_asio
  * (the raw-Asio ceiling with no framework) to see the framework's overhead.
  *
- * The fast path is inline on the reactor (no offload), which is what a cheap handler
+ * The handler runs on the reactor, which is what a cheap handler
  * wants -- max throughput, the loop never leaves the core.
  *
  *   ./bench_http <port> <reactors>
