@@ -131,6 +131,7 @@ struct Obs {
 	std::atomic<int> end_kind{0};          // how a body read ended: 1 eof, 2 operation_aborted, 3 another error
 	std::atomic<bool> cancelled_at_end{false};
 	std::atomic<bool> cancelled_late{false};
+	std::atomic<bool> release{false};      // the test lets a held handler finish
 	clk::time_point t0{};
 };
 struct App : http::HttpHandler {
@@ -210,7 +211,8 @@ struct App : http::HttpHandler {
 			auto o = get_obs(id);
 			req.on_cancel([](http::CancelReason) { throw std::runtime_error("callback throws"); });
 			o->started = true;
-			co_await sleep_for(300ms);
+			// Held until the test releases it (5 s at most), so a slow host cannot finish it early.
+			for (auto end = clk::now() + 5s; !o->release.load() && clk::now() < end;) { co_await sleep_for(5ms); }
 			o->cancelled_late = req.cancelled() && !req.path.empty();   // touches the request after the cancel
 			o->finished = true;
 			w.send(200, "survived");
@@ -622,6 +624,7 @@ int main() {
 			std::this_thread::sleep_for(120ms);
 			check(!o->finished && svc.reactor(0).gate().inflight.load() == 1,
 				"[I] streamed: after the throwing callback the connection still holds its request (the handler runs)");
+			o->release = true;
 			until([&] { return o->finished.load(); }, 3000);
 			check(o->finished && o->cancelled_late, "[I] streamed: the handler finishes and its request was intact");
 			check(until([&] { return svc.reactor(0).gate().inflight.load() == 0; }), "[I] streamed: the request is released afterwards");
@@ -633,6 +636,8 @@ int main() {
 			until([&] { return o->started.load(); });
 			std::this_thread::sleep_for(50ms);
 			c.close();
+			std::this_thread::sleep_for(50ms);
+			o->release = true;
 			until([&] { return o->finished.load(); }, 3000);
 			check(o->finished && o->cancelled_late, "[I] buffered: the handler finishes after a throwing callback");
 			check(one(port, get("/fast", "Connection: close\r\n")).body == "fast", "[I] buffered: the server keeps serving");
