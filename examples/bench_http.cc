@@ -27,11 +27,12 @@
 // measurement is the framework's parse/route/frame overhead, not the app's.
 class HelloApp : public http::HttpHandler {
 public:
-	void handle(const http::Request& /*request*/, http::ResponseWriter& response) override {
+	asio::awaitable<void> handle(http::Request& /*request*/, http::ResponseWriter& response) override {
 		response.status(200);
 		response.set_header("Content-Type", "text/plain");
 		response.write("Hello, World!\n");
 		response.end();
+		co_return;
 	}
 };
 
@@ -44,10 +45,10 @@ int main(int argc, char** argv) {
 	if (reactors == 0) { reactors = 1; }
 
 	HelloApp app;
-	// workers=0 -> the handler runs inline on the reactor (the fast path). SO_REUSEPORT
+	// The handler runs on the reactor (nothing leaves it). SO_REUSEPORT
 	// so each reactor binds its own acceptor (best on Linux); the portable shared
 	// acceptor kicks in automatically where SO_REUSEPORT is unavailable.
-	http::HttpAsioService service(app, reactors, /*workers=*/0, /*queue_limit=*/0);
+	http::HttpAsioService service(app, reactors, /*in_flight_limit=*/0);
 	http::AsioBindOptions bind;
 	bind.reuse_port = true;
 	service.set_bind_options(bind);

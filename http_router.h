@@ -116,7 +116,8 @@ public:
 	// A route function also receives the captured path parameters; routes that take
 	// none can ignore the third argument. Patterns use radix-router syntax: static
 	// segments, ":name" params, and a trailing "*name" catch-all.
-	using Route = std::function<void(const Request&, ResponseWriter&, const Params&)>;
+	// A route is a coroutine: it may suspend, and it completes after end().
+	using Route = std::function<asio::awaitable<void>(Request&, ResponseWriter&, const Params&)>;
 
 	// Register `fn` for `method` + `pattern`. `pattern` must begin with '/'.
 	Router& route(std::string_view method, std::string_view pattern, Route fn) {
@@ -124,12 +125,12 @@ public:
 		return *this;
 	}
 
-	void handle(const Request& request, ResponseWriter& response) override {
+	asio::awaitable<void> handle(Request& request, ResponseWriter& response) override {
 		Params params;
 		bool path_known = false;
 		if (const Route* fn = routes_.find(request.method, request.path, params, &path_known)) {
-			(*fn)(request, response, params);
-			return;
+			co_await (*fn)(request, response, params);
+			co_return;
 		}
 		response.send(path_known ? 405 : 404, path_known ? "Method Not Allowed\n" : "Not Found\n");
 	}

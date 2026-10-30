@@ -23,14 +23,14 @@
 // The HTTP message values that cross the application seam. They are deliberately
 // plain data: an application sees a request and fills in a response, and nothing
 // here knows how the bytes were parsed (http-parser today), how they arrived (the
-// Asio transport today), or whether the handler runs inline or on the offload pool.
-// That is what keeps the parser / transport / concurrency choices swappable behind
-// the handler.
+// Asio transport today), or which loop the handler runs on. That is what keeps the
+// parser / transport choices swappable behind the handler.
 
 #pragma once
 
 #include <algorithm>
 #include <cctype>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -41,7 +41,13 @@ namespace http {
 
 using Headers = std::vector<std::pair<std::string, std::string>>;
 
-class BodyReader;   // http_handler.h -- the concurrent streaming pull seam (Request::body_reader)
+class BodyStream;   // http_body_stream.h -- the streamed request body (Request::body_stream)
+
+// Why a request was cancelled while its handler ran (Request::on_cancel).
+//   Disconnect: the client closed its side (EOF) or the socket failed on a read.
+//   Shutdown:   the service is stopping.
+// Cancellation stops reads at their next checkpoint; the response is still written.
+enum class CancelReason : unsigned char { None, Disconnect, Shutdown };
 
 // The base for an application's typed per-request state. The library owns the
 // Request; an application attaches its own working state (a decoded body, resolved
@@ -78,6 +84,7 @@ inline const char* reason_phrase(int status) {
 		case 405: return "Method Not Allowed";
 		case 409: return "Conflict";
 		case 412: return "Precondition Failed";
+		case 413: return "Payload Too Large";
 		case 416: return "Range Not Satisfiable";
 		case 500: return "Internal Server Error";
 		case 503: return "Service Unavailable";
@@ -103,14 +110,32 @@ struct Request {
 	// carry what a streaming BodySink accumulated.
 	std::shared_ptr<void> user_data;
 
-	// Set by the framework when the handler opted into concurrent body streaming
-	// (wants_body_stream()); the handler PULLS raw body chunks from it (see BodyReader),
-	// on its worker, while the reactor feeds them flow-controlled. Null otherwise.
-	std::shared_ptr<BodyReader> body_reader;
+	// Set by the framework when the handler opted into a streamed body
+	// (wants_body_stream()); the handler reads raw chunks from it with co_await (see
+	// BodyStream) while the connection feeds them flow-controlled. Null otherwise.
+	std::shared_ptr<BodyStream> body_stream;
+
+	// Cancellation, delivered on the connection's loop while the handler runs: the
+	// transport calls cancel() when the client closes its side (Disconnect) or the
+	// service stops (Shutdown), and the handler registers what to do with on_cancel() --
+	// typically requesting a task::cancel_source. Only the first cancel() counts, and the
+	// callback runs once. A callback registered after cancel() runs at once. Neither call
+	// is thread-safe: both run on the connection's loop.
+	bool cancelled() const noexcept { return cancel_reason_ != CancelReason::None; }
+	CancelReason cancel_reason() const noexcept { return cancel_reason_; }
+	void on_cancel(std::function<void(CancelReason)> callback) {
+		cancel_callback_ = std::move(callback);
+		if (cancelled() && cancel_callback_) { cancel_callback_(cancel_reason_); }
+	}
+	void cancel(CancelReason reason) {
+		if (cancelled()) { return; }
+		cancel_reason_ = reason;
+		if (cancel_callback_) { cancel_callback_(reason); }
+	}
 
 	// Typed per-request application state (see RequestExtension). Created once at
 	// headers-complete by HttpHandler::create_extension(), before on_request_body()
-	// and should_offload() so both can use it; reset when the connection is reused.
+	// and wants_body_stream() so both can use it; reset when the connection is reused.
 	// ext<T>() is the app's typed view of it (undefined if the wrong T or none set).
 	// It stays mutable even through a const Request: the HTTP fields are immutable
 	// during handle(), but the app's extension is its per-request working scratch.
@@ -135,9 +160,15 @@ struct Request {
 		headers.clear(); body.clear();
 		http_major = 1; http_minor = 1; keep_alive = true;
 		user_data.reset();
-		body_reader.reset();
+		body_stream.reset();
 		extension.reset();
+		cancel_reason_ = CancelReason::None;
+		cancel_callback_ = nullptr;
 	}
+
+private:
+	CancelReason cancel_reason_ = CancelReason::None;
+	std::function<void(CancelReason)> cancel_callback_;
 };
 
 

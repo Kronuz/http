@@ -6,6 +6,8 @@
  * exercise what http:: adds on top. Run via ctest (http_test).
  */
 
+#include <asio.hpp>
+
 #include "http_accept.h"
 #include "http_conditional.h"
 #include "http_handler.h"
@@ -50,6 +52,15 @@ struct RecordingWriter : http::ResponseWriter {
 	void set_close() override { closed_ = true; }
 };
 
+// Runs a coroutine to completion on a private loop.
+static void drive(asio::awaitable<void> task) {
+	asio::io_context io;
+	std::exception_ptr failure;
+	asio::co_spawn(io, std::move(task), [&](std::exception_ptr e) { failure = e; });
+	io.run();
+	if (failure) { std::rethrow_exception(failure); }
+}
+
 static RecordingWriter run(http::HttpHandler& h, const std::string& method, const std::string& target) {
 	http::Request req;
 	req.method = method;
@@ -57,13 +68,13 @@ static RecordingWriter run(http::HttpHandler& h, const std::string& method, cons
 	auto q = target.find('?');
 	req.path = (q == std::string::npos) ? target : target.substr(0, q);
 	RecordingWriter w;
-	h.handle(req, w);
+	drive(h.handle(req, w));
 	return w;
 }
 
 static http::Router::Route mark(const char* id, std::vector<std::string> names = {}) {
 	std::string sid = id;
-	return [sid, names](const http::Request&, http::ResponseWriter& resp, const http::Params& p) {
+	return [sid, names](http::Request&, http::ResponseWriter& resp, const http::Params& p) -> asio::awaitable<void> {
 		std::string body = "id=" + sid;
 		for (const auto& n : names) {
 			body += " ";
@@ -72,6 +83,7 @@ static http::Router::Route mark(const char* id, std::vector<std::string> names =
 			body += std::string(p.get(n));
 		}
 		resp.send(200, body);
+		co_return;
 	};
 }
 
@@ -84,12 +96,13 @@ int main() {
 	r.route("POST", "/items", mark("create"));
 	r.route("PUT", "/items/:id", mark("update", {"id"}));
 	// a streamed response: status + several writes + end
-	r.route("GET", "/multi", [](const http::Request&, http::ResponseWriter& resp, const http::Params&) {
+	r.route("GET", "/multi", [](http::Request&, http::ResponseWriter& resp, const http::Params&) -> asio::awaitable<void> {
 		resp.status(200);
 		resp.write("a");
 		resp.write("b");
 		resp.write("c");
 		resp.end();
+		co_return;
 	});
 
 	// method dispatch + param capture surfaced to the route
@@ -219,10 +232,11 @@ int main() {
 				s->note = "seen " + req.method + " " + req.path;
 				return s;
 			}
-			void handle(const http::Request& req, http::ResponseWriter& resp) override {
+			asio::awaitable<void> handle(http::Request& req, http::ResponseWriter& resp) override {
 				auto& st = req.ext<MyState>();   // the same object create_extension built
 				st.hits += 1;
 				resp.send(200, st.note + " x" + std::to_string(st.hits));
+				co_return;
 			}
 		};
 		ExtHandler h;
@@ -232,7 +246,7 @@ int main() {
 		req.extension = h.create_extension(req);   // what finalize_request() does
 		CHECK(req.extension != nullptr);
 		RecordingWriter w;
-		h.handle(req, w);
+		drive(h.handle(req, w));
 		CHECK(w.body_ == "seen GET /x x1");
 		req.clear();                               // connection reuse drops the extension
 		CHECK(req.extension == nullptr);

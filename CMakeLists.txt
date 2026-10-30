@@ -56,14 +56,14 @@ if(ASIO_INCLUDE_DIR STREQUAL "")
 endif()
 
 # --- reactor: the generic Asio server runtime (shared reactor pool + accept + shutdown) ---
-# The reactor pool, the two accept/bind strategies, the offload gate, the abortable
-# registry, and the abort->stop->join shutdown were extracted from http_asio.h into
+# The reactor pool, the two accept/bind strategies, the admission gate, the abortable
+# list, and the abort->grace->force->stop->join shutdown were extracted from http_asio.h into
 # Kronuz/reactor so other Kronuz network services share one runtime. Header-only; rides
 # on the same standalone Asio (so no second Asio fetch -- just its include dir). Set
 # REACTOR_INCLUDE_DIR to use a local checkout instead of fetching (dev iteration).
 set(REACTOR_INCLUDE_DIR "" CACHE PATH "use an existing Kronuz/reactor dir instead of fetching")
 if(REACTOR_INCLUDE_DIR STREQUAL "")
-	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG 3041327b695f3071f740030f6b7e337b5c187154)
+	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG 67e22a66877e6bf4934273eae0b292b0d7daed5f)
 	FetchContent_MakeAvailable(reactor)
 	set(REACTOR_INCLUDE_DIR "${reactor_SOURCE_DIR}")
 endif()
@@ -101,10 +101,10 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	target_link_libraries(http_owned_stream_asio_test PRIVATE http)
 	add_test(NAME owned_stream_asio COMMAND http_owned_stream_asio_test)
 	set_tests_properties(owned_stream_asio PROPERTIES TIMEOUT 30)
-	add_executable(offload_test test/offload_test.cc)
-	target_link_libraries(offload_test PRIVATE http)
-	add_test(NAME offload COMMAND offload_test)
-	set_tests_properties(offload PROPERTIES TIMEOUT 15)
+	add_executable(coroutine_test test/coroutine_test.cc)
+	target_link_libraries(coroutine_test PRIVATE http)
+	add_test(NAME coroutine COMMAND coroutine_test)
+	set_tests_properties(coroutine PROPERTIES TIMEOUT 120)
 	add_executable(http_deferred_test test/deferred_test.cc)
 	target_include_directories(http_deferred_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 	target_link_libraries(http_deferred_test PRIVATE Threads::Threads)

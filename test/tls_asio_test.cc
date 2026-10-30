@@ -32,7 +32,7 @@ static void check(bool ok, const char* what) {
 }
 
 struct Hello : http::HttpHandler {
-	void handle(const http::Request&, http::ResponseWriter& w) override { w.send(200, "hello"); }
+	asio::awaitable<void> handle(http::Request&, http::ResponseWriter& w) override { w.send(200, "hello"); co_return; }
 };
 
 // A self-signed certificate for localhost and 127.0.0.1, and its key, as PEM files.
@@ -131,7 +131,7 @@ int main() {
 	reactor::tls::configure(*server, reactor::tls::Options{cert, key, ""}, reactor::tls::Role::Server);
 	Hello hello;
 	const unsigned short port = free_port();
-	http::HttpAsioService svc(hello, 1, 0, 64, http::tls_connection_factory_timed(server, 300ms, 64, 1024, count), 1024);
+	http::HttpAsioService svc(hello, 1, 64, http::tls_connection_factory_timed(server, 300ms, 64, 1024, count), 1024);
 	svc.start(port);
 
 	asio::ssl::context trusting(asio::ssl::context::tls), refusing(asio::ssl::context::tls);

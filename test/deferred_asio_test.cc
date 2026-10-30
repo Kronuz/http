@@ -35,12 +35,11 @@ struct App : HttpHandler {
 	std::condition_variable ready;
 	std::deque<Pending> pending;
 	std::atomic<unsigned> fast = 0;
-	bool should_offload(const Request &) const override { return false; }
-	void handle(const Request &request, ResponseWriter &writer) override {
+	asio::awaitable<void> handle(Request &request, ResponseWriter &writer) override {
 		if (request.path == "/fast") {
 			++fast;
 			writer.send(200, "sync");
-			return;
+			co_return;
 		}
 		auto record = std::make_shared<Record>();
 		auto lease = std::make_shared<char>();
@@ -72,6 +71,7 @@ struct App : HttpHandler {
 		if (request.path == "/throw" || request.path == "/throw-ready") {
 			throw std::runtime_error("after deferral");
 		}
+		co_return;
 	}
 	Pending take() {
 		std::unique_lock lock(mutex);
@@ -104,7 +104,7 @@ struct Server {
 	// A probed port can be taken by a parallel test before the bind; probe again then.
 	explicit Server(std::shared_ptr<App> application = std::make_shared<App>()) : app(std::move(application)) {
 		for (int attempt = 0;; ++attempt) {
-			service = std::make_unique<HttpAsioService>(*app, 1, 0, 64);
+			service = std::make_unique<HttpAsioService>(*app, 1, 64);
 			port = available_port();
 			try {
 				service->start(port);

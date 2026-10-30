@@ -13,6 +13,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -33,25 +35,30 @@ struct App : http::HttpHandler {
 	http::Router router;
 	std::string big = big_body();
 	App() {
-		router.route("GET", "/fast", [](const http::Request&, http::ResponseWriter& w, const http::Params&) {
+		router.route("GET", "/fast", [](http::Request&, http::ResponseWriter& w, const http::Params&) -> asio::awaitable<void> {
 			w.send(200, "fast\n");
+			co_return;
 		});
-		router.route("GET", "/slow", [](const http::Request&, http::ResponseWriter& w, const http::Params&) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(SLOW_MS));
+		// Waits on a timer: the coroutine suspends and the loop serves other connections.
+		router.route("GET", "/slow", [](http::Request&, http::ResponseWriter& w, const http::Params&) -> asio::awaitable<void> {
+			asio::steady_timer timer(co_await asio::this_coro::executor, std::chrono::milliseconds(SLOW_MS));
+			co_await timer.async_wait(asio::use_awaitable);
 			w.send(200, "slow\n");
 		});
-		router.route("GET", "/big", [this](const http::Request&, http::ResponseWriter& w, const http::Params&) {
+		router.route("GET", "/big", [this](http::Request&, http::ResponseWriter& w, const http::Params&) -> asio::awaitable<void> {
 			w.send(200, big, "text/plain");
+			co_return;
 		});
-		router.route("GET", "/throw", [](const http::Request&, http::ResponseWriter&, const http::Params&) {
+		router.route("GET", "/throw", [](http::Request&, http::ResponseWriter&, const http::Params&) -> asio::awaitable<void> {
 			throw std::runtime_error("boom");
+			co_return;
 		});
-		router.route("GET", "/remote", [](const http::Request& req, http::ResponseWriter& w, const http::Params&) {
+		router.route("GET", "/remote", [](http::Request& req, http::ResponseWriter& w, const http::Params&) -> asio::awaitable<void> {
 			w.send(200, req.remote);
+			co_return;
 		});
 	}
-	void handle(const http::Request& req, http::ResponseWriter& resp) override { router.handle(req, resp); }
-	bool should_offload(const http::Request&) const override { return true; }
+	asio::awaitable<void> handle(http::Request& req, http::ResponseWriter& resp) override { co_await router.handle(req, resp); }
 	void on_error(std::exception_ptr e, const http::Request&, http::ResponseWriter& resp) override {
 		try { std::rethrow_exception(e); }
 		catch (const std::exception& ex) { resp.send(500, std::string("mapped: ") + ex.what() + "\n"); }
@@ -72,12 +79,13 @@ struct CountSink : http::BodySink {
 	void end() override {}
 };
 struct StreamApp : http::HttpHandler {
-	void handle(const http::Request& req, http::ResponseWriter& resp) override {
+	asio::awaitable<void> handle(http::Request& req, http::ResponseWriter& resp) override {
 		auto ctx = std::static_pointer_cast<BulkCtx>(req.user_data);
 		size_t lines = ctx ? ctx->lines.load() : 0;
 		// req.body must be EMPTY if the body streamed to the sink (never buffered).
 		bool streamed = req.body.empty();
 		resp.send(200, std::to_string(lines) + (streamed ? " streamed\n" : " buffered\n"));
+		co_return;
 	}
 	std::unique_ptr<http::BodySink> on_request_body(http::Request& req) override {
 		if (req.path == "/bulk") {
@@ -89,31 +97,43 @@ struct StreamApp : http::HttpHandler {
 	}
 };
 
-// ---- concurrent pull streaming: a handler that pulls the body from a BodyReader on its
-// worker (slowly), while the reactor feeds it flow-controlled. Also serves a fast route to
-// prove the reactor stays free during a back-pressured stream.
+// ---- streamed body: a handler reads the body with co_await on the connection's loop
+// (slowly), while the connection feeds it flow-controlled. Also serves a fast route to
+// prove the loop stays free during a back-pressured stream, and records the threads its
+// reads ran on.
 struct ConcurrentStreamApp : http::HttpHandler {
+	std::mutex mutex;
+	std::set<std::thread::id> threads;
+	std::atomic<bool> all_inside_run{true};
 	bool wants_body_stream(const http::Request& r) override { return r.method == "POST" && r.path == "/restore"; }
-	bool should_offload(const http::Request&) const override { return true; }
-	void handle(const http::Request& req, http::ResponseWriter& resp) override {
-		if (req.path == "/fast") { resp.send(200, "fast\n"); return; }
-		if (req.path == "/restore" && req.body_reader) {
+	asio::awaitable<void> handle(http::Request& req, http::ResponseWriter& resp) override {
+		if (req.path == "/fast") { resp.send(200, "fast\n"); co_return; }
+		if (req.path == "/restore" && req.body_stream) {
 			std::size_t total = 0;
 			std::uint64_t sum = 0;
 			std::string chunk;
-			while (req.body_reader->read(chunk)) {   // blocking pull on the worker
+			auto ex = co_await asio::this_coro::executor;
+			for (;;) {
+				asio::error_code ec;
+				co_await req.body_stream->async_read(chunk, asio::redirect_error(asio::use_awaitable, ec));
+				{ std::lock_guard<std::mutex> lk(mutex); threads.insert(std::this_thread::get_id()); }
+				if (!reactor::inside_run()) { all_inside_run = false; }
+				if (ec == asio::error::eof) { break; }
+				if (ec) { resp.send(400, "body failed: " + ec.message() + "\n"); co_return; }
 				total += chunk.size();
 				for (unsigned char c : chunk) { sum += c; }
-				std::this_thread::sleep_for(std::chrono::milliseconds(2));   // slow consumer
+				asio::steady_timer slow(ex, std::chrono::milliseconds(2));   // a slow consumer
+				co_await slow.async_wait(asio::use_awaitable);
 			}
-			// Over-read past the end: must return false immediately, never block (a parser
+			// Over-read past the end: must complete with eof immediately, never wait (a parser
 			// that flushes a trailing item then loops does exactly this).
 			std::string extra;
-			bool over = req.body_reader->read(extra);
+			asio::error_code again;
+			co_await req.body_stream->async_read(extra, asio::redirect_error(asio::use_awaitable, again));
 			bool empty_body = req.body.empty();
 			resp.send(200, std::to_string(total) + " " + std::to_string(sum) +
-				(empty_body ? " empty" : " buffered") + (over ? " overread\n" : " end\n"));
-			return;
+				(empty_body ? " empty" : " buffered") + (again == asio::error::eof ? " end\n" : " overread\n"));
+			co_return;
 		}
 		resp.send(404, "nope\n");
 	}
@@ -284,10 +304,10 @@ int main() {
 	App app;
 	double offload_fast_max = 0;
 
-	// [A] Offload: 8 workers; fast stays low-latency under slow load.
+	// [A] Handlers that wait suspend: fast stays low-latency under slow load, on ONE loop.
 	{
 		unsigned short port = free_port();
-		http::HttpAsioService svc(app, 1, 8, 256);
+		http::HttpAsioService svc(app, 1, 256);
 		svc.start(port); wait_listen(port);
 		std::vector<Resp> slow;
 		std::thread st([&] { slow = fire(port, "/slow", 4); });
@@ -295,29 +315,15 @@ int main() {
 		auto fast = fire(port, "/fast", 40);
 		st.join();
 		offload_fast_max = max_ms(fast);
-		std::printf("  [A] offload: 40 fast under 4 slow -> %d/40 200, max fast %.1f ms\n", count_status(fast, 200), offload_fast_max);
+		std::printf("  [A] suspended: 40 fast under 4 slow -> %d/40 200, max fast %.1f ms\n", count_status(fast, 200), offload_fast_max);
 		check(count_status(fast, 200) == 40, "all fast served");
 		check(offload_fast_max < SLOW_MS / 2.0, "fast stays under the slow duration");
 		check(count_status(slow, 200) == 4, "slow requests complete");
 	}
-	// [B] Inline control: workers=0 -> slow runs on the reactor and stalls it.
+	// [C] Backpressure: in-flight cap 4 -> excess sheds 503.
 	{
 		unsigned short port = free_port();
-		http::HttpAsioService svc(app, 1, 0, 256);
-		svc.start(port); wait_listen(port);
-		std::thread st([&] { do_request(port, "/slow"); });
-		std::this_thread::sleep_for(std::chrono::milliseconds(50));
-		auto fast = fire(port, "/fast", 20);
-		st.join();
-		double m = max_ms(fast);
-		std::printf("  [B] inline:  20 fast under 1 slow -> max fast %.1f ms\n", m);
-		check(m > SLOW_MS * 0.5, "inline fast latency dominated by the blocked loop");
-		check(m > offload_fast_max * 2, "offload materially faster than inline");
-	}
-	// [C] Backpressure: 2 workers + cap 4 -> excess sheds 503.
-	{
-		unsigned short port = free_port();
-		http::HttpAsioService svc(app, 1, 2, 4);
+		http::HttpAsioService svc(app, 1, 4);
 		svc.start(port); wait_listen(port);
 		auto res = fire(port, "/slow", 16);
 		int n200 = count_status(res, 200), n503 = count_status(res, 503);
@@ -329,7 +335,7 @@ int main() {
 	// [D] N reactors on one port (SO_REUSEPORT).
 	{
 		unsigned short port = free_port();
-		http::HttpAsioService svc(app, 3, 4, 64);
+		http::HttpAsioService svc(app, 3, 64);
 		http::AsioBindOptions b; b.reuse_port = true; svc.set_bind_options(b);
 		svc.start(port); wait_listen(port);
 		auto res = fire(port, "/fast", 60);
@@ -341,7 +347,7 @@ int main() {
 	// and fans connections out round-robin to all reactors.
 	{
 		unsigned short port = free_port();
-		http::HttpAsioService svc(app, 4, 4, 64);
+		http::HttpAsioService svc(app, 4, 64);
 		http::AsioBindOptions b; b.reuse_port = false; svc.set_bind_options(b);
 		svc.start(port); wait_listen(port);
 		auto res = fire(port, "/fast", 60);
@@ -351,7 +357,7 @@ int main() {
 	// [E] Keep-alive: three sequential requests on one connection.
 	{
 		unsigned short port = free_port();
-		http::HttpAsioService svc(app, 1, 4, 64);
+		http::HttpAsioService svc(app, 1, 64);
 		svc.start(port); wait_listen(port);
 		int fd = ::socket(AF_INET, SOCK_STREAM, 0);
 		sockaddr_in a{}; a.sin_family = AF_INET; a.sin_port = htons(port);
@@ -372,7 +378,7 @@ int main() {
 	// [F] Compression: enable_compression + Accept-Encoding: gzip -> gzip round-trips.
 	{
 		unsigned short port = free_port();
-		http::HttpAsioService svc(app, 1, 4, 64);
+		http::HttpAsioService svc(app, 1, 64);
 		svc.enable_compression();
 		svc.start(port); wait_listen(port);
 		auto gz = do_request(port, "/big", "gzip");
@@ -385,7 +391,7 @@ int main() {
 	// [G] Error hook.
 	{
 		unsigned short port = free_port();
-		http::HttpAsioService svc(app, 1, 4, 64);
+		http::HttpAsioService svc(app, 1, 64);
 		svc.start(port); wait_listen(port);
 		auto r = do_request(port, "/throw");
 		std::printf("  [G] error hook: /throw -> %d\n", r.status);
@@ -402,7 +408,7 @@ int main() {
 	{
 		unsigned short port = free_port();
 		StreamApp sapp;
-		http::HttpAsioService svc(sapp, 1, 0, 64);
+		http::HttpAsioService svc(sapp, 1, 64);
 		svc.start(port); wait_listen(port);
 		const int N = 200000;
 		std::string body;
@@ -422,7 +428,7 @@ int main() {
 	// with If-None-Match is answered 304 (bodyless).
 	{
 		unsigned short port = free_port();
-		http::HttpAsioService svc(app, 1, 4, 64);
+		http::HttpAsioService svc(app, 1, 64);
 		svc.enable_conditional();
 		svc.start(port); wait_listen(port);
 		auto first = do_request(port, "/big");
@@ -438,7 +444,7 @@ int main() {
 	// unsatisfiable range is 416.
 	{
 		unsigned short port = free_port();
-		http::HttpAsioService svc(app, 1, 4, 64);
+		http::HttpAsioService svc(app, 1, 64);
 		svc.enable_ranges();
 		svc.start(port); wait_listen(port);
 		auto full = do_request(port, "/big");
@@ -452,13 +458,13 @@ int main() {
 		auto bad = do_get_h(port, "/big", "Range: bytes=" + std::to_string(total + 100) + "-");
 		check(bad.status == 416, "an unsatisfiable range -> 416");
 	}
-	// [K] Concurrent pull streaming: a slow-consuming streaming handler + a large body.
+	// [K] Streamed body read with co_await: a slow-consuming handler + a large body.
 	// Asserts no data loss under back-pressure (count + checksum) AND that the reactor
 	// stays free (a fast request on another connection is served mid-stream).
 	{
 		unsigned short port = free_port();
 		ConcurrentStreamApp capp;
-		http::HttpAsioService svc(capp, 1, 4, 64);   // 1 reactor, 4 workers (streaming needs a pool)
+		http::HttpAsioService svc(capp, 1, 64);
 		svc.start(port); wait_listen(port);
 
 		const std::size_t N = 2u * 1024 * 1024;   // 2 MB, >> the 8x64KB channel window
@@ -484,6 +490,10 @@ int main() {
 		check(restore.body.find("empty") != std::string::npos, "body streamed, request.body never buffered");
 		check(restore.body.find("end") != std::string::npos, "over-reading past the end returns false (never blocks)");
 		check(fast.status == 200 && fast_ms < 250.0, "reactor stays free: a fast request is served while a slow stream is back-pressured");
+		{
+			std::lock_guard<std::mutex> lk(capp.mutex);
+			check(capp.threads.size() == 1 && capp.all_inside_run, "every body read resumed on the one loop thread (no worker)");
+		}
 
 		// A tiny body arrives in the SAME read as the headers (completes during header
 		// parsing) -- the stream must still deliver it, not drop it as already-complete.
@@ -497,12 +507,12 @@ int main() {
 			"a body arriving with the headers is streamed, not dropped");
 	}
 	// [L] Shutdown while a stream is mid-flight must not hang: a client sends headers +
-	// a partial body (less than Content-Length) and holds; stop() aborts the reader so
-	// the handler blocked in read() unwedges and the pool join completes.
+	// a partial body (less than Content-Length) and holds; stop() cancels the body read,
+	// so the handler waiting in async_read() sees an error and completes.
 	{
 		unsigned short port = free_port();
 		ConcurrentStreamApp capp;
-		auto* svc = new http::HttpAsioService(capp, 1, 4, 64);
+		auto* svc = new http::HttpAsioService(capp, 1, 64);
 		svc->start(port); wait_listen(port);
 		int fd = ::socket(AF_INET, SOCK_STREAM, 0);
 		sockaddr_in a{}; a.sin_family = AF_INET; a.sin_port = htons(port);

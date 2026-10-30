@@ -28,11 +28,10 @@ struct App final : HttpHandler {
 	std::mutex mutex;
 	std::condition_variable ready;
 	std::optional<Pending> pending;
-	bool should_offload(const Request &) const override { return false; }
-	void handle(const Request &request, ResponseWriter &writer) override {
+	asio::awaitable<void> handle(Request &request, ResponseWriter &writer) override {
 		if (request.path == "/fast") {
 			writer.send(200, "fast");
-			return;
+			co_return;
 		}
 		auto record = std::make_shared<Record>();
 		auto lease = std::make_shared<char>();
@@ -63,6 +62,7 @@ struct App final : HttpHandler {
 			pending.emplace(Pending{std::move(reply), record});
 		}
 		ready.notify_one();
+		co_return;
 	}
 	Pending take() {
 		std::unique_lock lock(mutex);
@@ -303,7 +303,7 @@ int main() {
 	try {
 		resource_lifetime();
 		App app;
-		HttpAsioService server(app, 1, 0, 64);
+		HttpAsioService server(app, 1, 64);
 		const auto selected = port();
 		server.start(selected);
 		transfer(app, selected);

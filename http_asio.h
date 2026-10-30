@@ -22,43 +22,39 @@
 
 // The Asio connection + HTTP service for Kronuz/http -- the transport layer. The generic
 // server runtime (the shared-nothing reactor pool, the accept/bind strategies, the
-// offload gate, and the graceful abort->stop->join shutdown) lives in Kronuz/reactor;
+// admission gate, and the graceful abort->stop->join shutdown) lives in Kronuz/reactor;
 // this file is what makes that runtime speak HTTP. Everything above it is unchanged: the
 // HttpHandler seam, the radix router, http_message, http-parser (via RequestParser), the
 // codings.
 //
-// The un-stallable model is native here: a connection is a coroutine (the reactor::Session
-// detail::serve_connection), and offloading a blocking handler is a single
-// `co_await co_spawn(reactor.pool(), ...)` -- the work runs on a pool thread while the
-// coroutine suspends, the reactor is free, and resumption lands back on the connection's
-// own io_context. No pause/resume/pending-input bookkeeping, and no cross-thread
-// completion handoff to get wrong: the coroutine is the single owner of its
-// request/response, so the ordering is structural.
+// A connection is a coroutine (the reactor::Session detail::serve_connection) and so is a
+// handler: handle() is awaited on the connection's loop, nothing runs off it, and a handler
+// that must wait suspends. The coroutine is the single owner of its request/response, so
+// the ordering is structural. While a handler runs, the connection watches the socket for a
+// hang-up and tracks the request for shutdown; both cancel it (Request::cancel) without
+// destroying its frame.
 //
 // Scaling is the runtime's shared-nothing / thread-per-core model: N io_contexts on N
-// threads, one port (SO_REUSEPORT or a portable shared acceptor), plus a bounded
-// thread_pool per reactor for offload. HttpAsioService is a thin adapter over
-// reactor::TcpServer. Response compression / conditional / range transforms are applied
-// on the buffered response (the http_* helpers). Request-body intake is dual-mode (the
-// app chooses per endpoint via wants_body_stream / on_request_body): buffered for small
-// bodies, or TRUE INCREMENTAL streaming for large/unbounded ones -- a multi-gigabyte
-// RESTORE/bulk load flows through in O(read-buffer) memory, never held whole, with the
-// ChannelBodyReader registered as a reactor::Abortable so shutdown can unwedge it.
+// threads, one port (SO_REUSEPORT or a portable shared acceptor), and a bounded in-flight
+// admission gate per reactor. HttpAsioService is a thin adapter over reactor::TcpServer.
+// Response compression / conditional / range transforms are applied on the buffered
+// response (the http_* helpers). Request-body intake has three modes, chosen per endpoint:
+// buffered into Request::body up to a cap (then 413), pushed to a BodySink, or streamed to
+// a BodyStream the handler reads with co_await -- a multi-gigabyte RESTORE/bulk load flows
+// through in O(read-buffer) memory, never held whole.
 
 #pragma once
 
 #include <asio.hpp>
-#include <asio/experimental/concurrent_channel.hpp>
 #include <asio/experimental/awaitable_operators.hpp>
 
 #include <array>
-#include <condition_variable>
 #include <cstddef>
-#include <deque>
 #include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -76,7 +72,7 @@
 
 namespace http {
 
-// The reactor pool, accept plumbing, offload gate, and graceful shutdown live in the
+// The reactor pool, accept plumbing, admission gate, and graceful shutdown live in the
 // generic Kronuz/reactor runtime now; http rides on it. The bind options are the
 // runtime's -- alias kept so existing callers (Xapiand, the tests, the bench) are
 // unchanged. reuse_port is what lets the N reactors share one port.
@@ -98,6 +94,9 @@ struct AsioResponseOptions {
 	// first byte. header: from that first byte to the end of the headers. inactivity: per
 	// body read and per 64 KiB of a buffered reply, so a slow transfer that moves completes.
 	std::chrono::milliseconds idle_timeout{0}, header_timeout{0}, inactivity_timeout{0};
+	// The largest body buffered into Request::body (0 = no cap); a larger request gets 413.
+	// A route that streams its body (wants_body_stream / on_request_body) is not capped.
+	std::size_t max_body = 16u * 1024 * 1024;
 };
 
 namespace detail {
@@ -158,6 +157,10 @@ public:
 	AsioResponseWriter(const Request& request, const AsioResponseOptions* options, const asio::any_io_executor* executor, reactor::Reactor* reactor)
 		: request_(request), options_(options), executor_(executor), reactor_(reactor) {}
 	~AsioResponseWriter() override {
+		if (reactor_) {
+			if (stream_) { reactor_->untrack(*stream_); }
+			if (deferred_) { reactor_->untrack(*deferred_); }
+		}
 		if (stream_) { try { stream_->exchange->close(ReplySettlement::Shutdown); } catch (...) {} stream_->disable(); try { stream_->exchange->settle(); } catch (...) {} }
 		if (deferred_) { try { deferred_->exchange->close(ReplySettlement::Shutdown); } catch (...) {} deferred_->disable(); try { deferred_->exchange->settle(ReplySettlement::Shutdown); } catch (...) {} }
 	}
@@ -165,7 +168,7 @@ public:
 		if (!executor_) { return {}; }
 		if (started_ || ended_ || !headers_.empty() || close_ || deferred_ || stream_) { throw std::logic_error("response authority already used"); }
 		auto control = detail::AsioDeferredControl::create(*executor_, std::move(options));
-		if (reactor_) { reactor_->track(control); }
+		if (reactor_) { reactor_->track(*control); }
 		auto capability = std::make_unique<DeferredReply>(control->exchange); deferred_ = std::move(control); return capability;
 	}
 	const std::shared_ptr<detail::AsioDeferredControl>& deferred() const noexcept { return deferred_; }
@@ -178,7 +181,7 @@ public:
 		auto resource = options.resource;
 		auto control = detail::AsioOwnedStreamControl::create(*executor_, std::move(options));
 		if (reactor_)
-			reactor_->track(control);
+			reactor_->track(*control);
 		auto capability = detail::make_resource_unique<OwnedStreamReply>(resource, control->exchange);
 		stream_ = std::move(control);
 		return capability;
@@ -330,89 +333,6 @@ private:
 
 namespace detail {
 
-// The Asio-backed BodyReader: a bounded queue of raw body chunks bridging the reactor
-// (producer) and the handler's worker (consumer). The consumer blocks on a condition
-// variable -- NOT on the io_context -- so abort() (shutdown) can wake it directly, even
-// after the reactor's io_context has stopped. The producer (reactor coroutine) stays
-// non-blocking: when the queue is full it yields via a short timer and retries, so a
-// slow consumer applies back-pressure (the socket read pauses) without ever blocking the
-// reactor thread. An empty chunk from finish() is the end-of-body marker.
-//
-// It is a reactor::Abortable as well as a BodyReader: the reactor tracks it via
-// Reactor::track() so TcpServer shutdown aborts it (the single abort() below satisfies
-// both interfaces) before io.stop(), waking a consumer even after the loop has stopped.
-class ChannelBodyReader : public BodyReader, public reactor::Abortable {
-public:
-	ChannelBodyReader(asio::any_io_executor ex, std::size_t capacity)
-		: ex_(std::move(ex)), cap_(capacity != 0 ? capacity : 1) {}
-
-	// consumer (handler worker): blocking pull. false at end-of-body or on abort; sticky
-	// at end, so an over-read (a parser flushing a trailing item then looping) never blocks.
-	bool read(std::string& chunk) override {
-		std::unique_lock<std::mutex> lk(m_);
-		cv_.wait(lk, [this] { return !q_.empty() || closed_ || aborted_; });
-		if (!q_.empty()) {
-			chunk = std::move(q_.front());
-			q_.pop_front();
-			cv_.notify_all();   // wake the producer if it is waiting for space
-			return true;
-		}
-		return false;           // closed + drained, or aborted
-	}
-
-	bool aborted() const {
-		std::lock_guard<std::mutex> lk(m_);
-		return aborted_;
-	}
-
-	// producer (reactor coroutine): enqueue a chunk, yielding the reactor while the queue
-	// is full (flow control). Returns early if aborted.
-	asio::awaitable<void> push(std::string chunk) {
-		for (;;) {
-			{
-				std::lock_guard<std::mutex> lk(m_);
-				if (aborted_) { co_return; }
-				if (q_.size() < cap_) {
-					q_.push_back(std::move(chunk));
-					cv_.notify_all();
-					co_return;
-				}
-			}
-			asio::steady_timer t(ex_, std::chrono::milliseconds(1));
-			co_await t.async_wait(asio::use_awaitable);   // reactor stays free; retry
-		}
-	}
-	asio::awaitable<void> finish() {
-		{
-			std::lock_guard<std::mutex> lk(m_);
-			closed_ = true;
-		}
-		cv_.notify_all();
-		co_return;
-	}
-	void abort() override {
-		{
-			std::lock_guard<std::mutex> lk(m_);
-			aborted_ = true;
-		}
-		cv_.notify_all();
-	}
-
-private:
-	asio::any_io_executor ex_;
-	std::size_t cap_;
-	mutable std::mutex m_;
-	std::condition_variable cv_;
-	std::deque<std::string> q_;
-	bool closed_ = false;    // producer sent finish()
-	bool aborted_ = false;   // shutdown / transport abort
-};
-
-// Serve one connection: keep-alive loop of parse -> handler seam -> write. A normal
-// request runs handle() inline on the reactor, or (pool + should_offload) on the pool
-// with the reactor free -- the un-stallable path. A request the handler marked
-// wants_body_stream runs CONCURRENTLY: the handler on the pool pulls body chunks from a
-// flow-controlled BodyReader that the reactor feeds -- O(buffer) memory for any size.
 template<class Stream, std::size_t N>
 inline asio::awaitable<ReplySettlement> write_before_deadline(Stream& socket,
 	std::array<asio::const_buffer, N> buffers, std::chrono::steady_clock::time_point deadline) {
@@ -449,8 +369,15 @@ inline asio::awaitable<ReplySettlement> write_with_progress(Stream& socket, std:
 	co_return ReplySettlement::Written;
 }
 
-// A deferred response keeps one owned plaintext read alive across its write.
-// Consumed pipelined input is returned to the parser, never discarded by a race.
+// One owned one-byte read keeps watching the socket while a handler runs or a deferred
+// response waits, and consumed pipelined input is returned to the parser, never discarded
+// by a race. Two rules read it, and they differ on purpose:
+//   * a deferred or owned-stream reply (monitor): only a read error other than EOF is a
+//     disconnect, because the client may half-close after sending and still expect the reply;
+//   * a request in flight (watch): EOF and any read error but our own cancellation are a
+//     disconnect, because a client that closed has nobody to read what a search computes.
+//     A pipelined byte (the client sent the next request early) ends the watch for the
+//     rest of that request: a later disconnect is not seen until the next read.
 template<class Stream>
 class ConnectionInput : public std::enable_shared_from_this<ConnectionInput<Stream>> {
 public:
@@ -462,20 +389,19 @@ public:
 		if (ready_ && error_ && error_ != asio::error::eof) {
 			control->exchange->observe_peer_disconnect(); return;
 		}
-		if (pending_ || ready_) { return; }
-		pending_ = true;
-		auto owner = this->shared_from_this();
-		try {
-			stream_.async_read_some(asio::buffer(&byte_, 1), [owner](asio::error_code error, std::size_t size) {
-				owner->pending_ = false; owner->ready_ = true; owner->error_ = error; owner->size_ = size;
-				owner->done_.cancel();
-				if (error && error != asio::error::eof) {
-					if (auto c = owner->observer_.lock()) { c->exchange->observe_peer_disconnect(); }
-					if (auto c = owner->owned_observer_.lock()) { c->exchange->observe_peer_disconnect(); }
-				}
-			});
-		} catch (...) { pending_ = false; throw; }
+		arm();
 	}
+	// Calls `on_disconnect` once, on the loop, when the peer closes while the watch is set.
+	void watch(std::function<void()> on_disconnect) {
+		on_disconnect_ = std::move(on_disconnect);
+		if (ready_) {
+			if (error_ && error_ != asio::error::operation_aborted) { fire(); }
+			else if (size_) { on_disconnect_ = nullptr; }
+			return;
+		}
+		arm();
+	}
+	void unwatch() noexcept { on_disconnect_ = nullptr; }
 	asio::awaitable<std::size_t> read(asio::mutable_buffer output) {
 		co_await drain();
 		if (ready_) {
@@ -498,14 +424,45 @@ public:
 		auto error = std::get<1>(winner);
 		throw asio::system_error(error ? error : asio::error::timed_out);
 	}
+	// Waits for the pending one-byte read. A cancelled waiter cancels that read too, so the
+	// wait ends: the caller then sees the read fail with operation_aborted.
 	asio::awaitable<void> drain() {
 		while (pending_) {
 			done_.expires_at(std::chrono::steady_clock::time_point::max());
 			asio::error_code error; co_await done_.async_wait(asio::redirect_error(asio::use_awaitable, error));
+			if (pending_ && (co_await asio::this_coro::cancellation_state).cancelled() != asio::cancellation_type::none) {
+				asio::error_code ignored; stream_.lowest_layer().cancel(ignored);
+			}
 		}
 	}
 private:
 	struct ReadCompletion { std::size_t bytes; std::exception_ptr failure; };
+	void arm() {
+		if (pending_ || ready_) { return; }
+		pending_ = true;
+		auto owner = this->shared_from_this();
+		try {
+			stream_.async_read_some(asio::buffer(&byte_, 1), [owner](asio::error_code error, std::size_t size) {
+				owner->completed(error, size);
+			});
+		} catch (...) { pending_ = false; throw; }
+	}
+	void completed(asio::error_code error, std::size_t size) {
+		pending_ = false; ready_ = true; error_ = error; size_ = size;
+		done_.cancel();
+		if (error && error != asio::error::eof) {
+			if (auto c = observer_.lock()) { c->exchange->observe_peer_disconnect(); }
+			if (auto c = owned_observer_.lock()) { c->exchange->observe_peer_disconnect(); }
+		}
+		if (!on_disconnect_) { return; }
+		if (!error) { on_disconnect_ = nullptr; }
+		else if (error != asio::error::operation_aborted) { fire(); }
+	}
+	void fire() {
+		auto callback = std::move(on_disconnect_);
+		on_disconnect_ = nullptr;
+		if (callback) { callback(); }
+	}
 	asio::awaitable<ReadCompletion> read_completed(asio::mutable_buffer output) {
 		try { co_return ReadCompletion{co_await read(output), {}}; }
 		catch (...) { co_return ReadCompletion{0, std::current_exception()}; }
@@ -514,8 +471,8 @@ private:
 		asio::steady_timer timer(stream_.get_executor()); timer.expires_at(deadline);
 		asio::error_code error; co_await timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
 		if (!error) {
-			// The deferred monitor may own a callback-based original read outside
-			// this coroutine's cancellation slot. Cancel that socket operation too,
+			// The monitor read is a callback-based original read outside this
+			// coroutine's cancellation slot. Cancel that socket operation too,
 			// then the OR join and connection drain retain its storage until reap.
 			asio::error_code ignored; stream_.lowest_layer().cancel(ignored);
 		}
@@ -524,6 +481,7 @@ private:
 	Stream& stream_; asio::steady_timer done_;
 	char byte_ = 0; std::size_t size_ = 0; asio::error_code error_;
 	bool pending_ = false, ready_ = false;
+	std::function<void()> on_disconnect_;
 	std::weak_ptr<AsioDeferredControl> observer_;
 	std::weak_ptr<AsioOwnedStreamControl> owned_observer_;
 };
@@ -608,9 +566,68 @@ inline asio::awaitable<bool> write_response(Stream &socket, AsioResponseWriter &
 	control->exchange->settle(outcome);
 	co_return outcome == ReplySettlement::Written && control->exchange->closing_reason() == ReplySettlement::Written;
 }
-inline asio::awaitable<void> invoke_handler(HttpHandler* handler, const Request& request, ResponseWriter& writer) {
-	handler->handle(request, writer); co_return;
+// Maps an exception that escaped handle() to the response: the app's on_error first, then
+// a generic 500 for whatever it left unanswered.
+inline void map_handler_error(HttpHandler* handler, Request& request, AsioResponseWriter& writer, std::exception_ptr error) {
+	if (writer.is_deferred()) { writer.abandon_deferred(); } else if (!writer.ended()) { handler->on_error(error, request, writer); }
+	if (!writer.is_deferred() && !writer.ended()) {
+		writer.status(500);
+		writer.write("Internal Server Error\n");
+		writer.end();
+	}
 }
+
+// A streamed request runs its handler as its own coroutine on the connection's loop,
+// next to the connection coroutine that feeds the body; this is the join between them.
+struct HandlerDone {
+	explicit HandlerDone(asio::any_io_executor executor) : timer(std::move(executor), std::chrono::steady_clock::time_point::max()) {}
+	void finish() { done = true; timer.cancel(); }
+	// Returns once the handler finished, or at once when the waiter is cancelled.
+	asio::awaitable<void> wait() {
+		while (!done) {
+			asio::error_code error;
+			co_await timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
+			if ((co_await asio::this_coro::cancellation_state).cancelled() != asio::cancellation_type::none) { co_return; }
+		}
+	}
+	asio::steady_timer timer;
+	bool done = false;
+};
+inline asio::awaitable<void> run_streamed_handler(HttpHandler* handler, Request& request, AsioResponseWriter& writer) {
+	try { co_await handler->handle(request, writer); }
+	catch (...) { map_handler_error(handler, request, writer, std::current_exception()); }
+}
+
+// Shutdown's hook into one running request: abort() cancels it (its reads stop at their next
+// checkpoint, its writes finish), and force() -- after the shutdown grace -- closes the
+// socket a stalled peer holds. Tracked for the request's whole run, on the reactor's list.
+template<class Stream>
+struct RequestAbort final : reactor::Abortable {
+	RequestAbort(reactor::Reactor& owner, Request& req, Stream& stream) : reactor(owner), request(req), socket(stream) { reactor.track(*this); }
+	~RequestAbort() override { reactor.untrack(*this); }
+	void abort() override { request.cancel(CancelReason::Shutdown); }
+	void force() override { asio::error_code ignored; socket.lowest_layer().close(ignored); }
+	reactor::Reactor& reactor;
+	Request& request;
+	Stream& socket;
+};
+
+// Clears the connection's disconnect watch on every exit, so a late read cannot reach a
+// request that is gone.
+template<class Stream>
+struct WatchGuard {
+	explicit WatchGuard(ConnectionInput<Stream>& in) : input(in) {}
+	~WatchGuard() { input.unwatch(); }
+	ConnectionInput<Stream>& input;
+};
+
+// Serve one connection: a keep-alive loop of parse -> handler -> write, all coroutines on
+// the connection's loop. handle() is awaited, so a handler that waits suspends and the loop
+// serves other connections. A request is admitted at headers-complete (reactor gate, else
+// 503), and from then until its response is written it is tracked for shutdown and watched
+// for a client hang-up; both cancel it (Request::cancel) without destroying its frame. A
+// handler that opted into wants_body_stream runs while the body is still arriving, reading
+// it from a flow-controlled BodyStream that this coroutine feeds.
 template<class Stream>
 inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::shared_ptr<ConnectionInput<Stream>>& input, HttpHandler* handler,
                                               reactor::Reactor* reactor, const AsioResponseOptions* options) {
@@ -623,14 +640,18 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 		if (auto peer = socket.lowest_layer().remote_endpoint(opt_ec); !opt_ec) { remote = peer.address().to_string(); }
 		auto ex = co_await asio::this_coro::executor;
 		RequestParser parser;
-		// The headers-complete hook: build the app's per-request extension, then choose
-		// how to take the body -- concurrent pull streaming (needs a worker), push to an
-		// on_request_body sink, or buffer into Request::body.
-		parser.set_headers_callback([handler, reactor, &remote](Request& req) -> RequestParser::BodyIntake {
+		parser.set_body_limit(options ? options->max_body : 0);
+		reactor::AdmissionGate::Lease admitted;   // held from headers-complete to the settled response
+		// The headers-complete hook: admit the request, build the app's per-request extension,
+		// then choose how to take the body -- a BodyStream, an on_request_body sink, or the
+		// buffer in Request::body.
+		parser.set_headers_callback([handler, reactor, &remote, &admitted](Request& req) -> RequestParser::BodyIntake {
+			admitted = reactor->gate().enter();
+			if (!admitted) { throw RequestRejected(503, "Service Unavailable\n", RejectionContent::Text, 1); }
 			req.remote = remote;
 			req.extension = handler->create_extension(req);
 			RequestParser::BodyIntake intake;
-			if (reactor->pool() != nullptr && handler->wants_body_stream(req)) {
+			if (handler->wants_body_stream(req)) {
 				intake.stream = true;
 			} else {
 				intake.sink = handler->on_request_body(req);
@@ -649,7 +670,20 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 		const auto body_deadline = [&](clock::time_point request_deadline) {
 			return ms(inactivity) ? std::min(request_deadline, clock::now() + inactivity) : request_deadline;
 		};
+		// A parse that stopped for the body cap is a 413; any other parse error drops the connection.
+		const auto parse_failed = [&] {
+			if (parser.body_limit_exceeded()) { throw RequestRejected(413, "Payload Too Large\n"); }
+		};
+		// Writes the response; false when the connection cannot carry on.
+		const auto respond = [&](AsioResponseWriter& writer, bool keep_alive, clock::time_point request_deadline) -> asio::awaitable<bool> {
+			if (writer.is_deferred()) { co_return co_await write_response(socket, writer, keep_alive, input); }
+			std::string head = writer.serialize_head(keep_alive);
+			std::array<asio::const_buffer, 2> buffers{asio::buffer(head), writer.has_body() ? asio::buffer(writer.body()) : asio::const_buffer{}};
+			co_return co_await write_with_progress(socket, buffers, inactivity, request_deadline) == ReplySettlement::Written;
+		};
 		for (;;) {
+			// A shutdown that arrived while the last request ran found cancellation disabled.
+			if (reactor->stopping()) { co_return; }
 			const auto request_deadline = options && options->request_timeout.count() > 0
 				? clock::now() + options->request_timeout
 				: clock::time_point::max();
@@ -668,88 +702,77 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 				}
 				std::size_t used = parser.feed(buffered.data(), buffered.size());
 				buffered.erase(0, used);
-				if (parser.errored()) { co_return; }
+				if (parser.errored()) { parse_failed(); co_return; }
 			}
 
 			if (parser.streaming()) {
-				// ---- CONCURRENT PULL STREAMING ----
+				// ---- STREAMED BODY: the handler runs while this coroutine feeds the body ----
 				Request request = parser.take_headers();
 				request.remote = remote;
+				reactor->lag().note_activity();
 				bool keep_alive = request.keep_alive;
-				auto reader = std::make_shared<ChannelBodyReader>(ex, /*capacity=*/8);
-				request.body_reader = reader;
-				reactor->track(reader);   // so shutdown can unblock a mid-stream read()
+				auto stream = std::make_shared<BodyStream>(ex, /*capacity=*/8);
+				request.body_stream = stream;
 				AsioResponseWriter writer(request, options, &ex, reactor);
-				asio::any_io_executor hexec(reactor->pool()->get_executor());
+				RequestAbort<Stream> tracked(*reactor, request, socket);
+				WatchGuard<Stream> watching(*input);
+				auto handler_done = std::make_shared<HandlerDone>(ex);
 
-				// Feed the body (reactor, flow-controlled) and run the handler (pool)
-				// concurrently, then join. feed never throws -- a socket/parse error
-				// aborts the reader so the handler's read() returns false and unblocks.
-				auto feed = [&]() -> asio::awaitable<void> {
-					asio::error_code fec;
+				asio::co_spawn(ex, run_streamed_handler(handler, request, writer),
+					[handler_done, stream](std::exception_ptr) { handler_done->finish(); stream->abandon(); });
+
+				enum class Fed { Complete, Failed, Abandoned };
+				const auto feed = [&]() -> asio::awaitable<Fed> {
 					for (;;) {
 						// Drain whatever body has been parsed so far -- including bytes that
 						// arrived in the same read as the headers (a small body completes
 						// during phase 1, so this must run before the complete() check).
 						std::string chunk = parser.take_pending_body();
-						if (!chunk.empty()) { co_await reader->push(std::move(chunk)); }
-						if (parser.complete()) { break; }
+						if (!chunk.empty() && !co_await stream->push(std::move(chunk))) { co_return Fed::Abandoned; }
+						if (parser.complete()) { stream->finish(); co_return Fed::Complete; }
 						if (buffered.empty()) {
 							std::size_t n = 0;
-							try { n = co_await input->read(asio::buffer(tmp), body_deadline(request_deadline)); } catch (const asio::system_error& e) { fec = e.code(); }
-							if (fec || n == 0) { reader->abort(); co_return; }
+							asio::error_code failure;
+							try { n = co_await input->read(asio::buffer(tmp), body_deadline(request_deadline)); }
+							catch (const asio::system_error& e) { failure = e.code(); }
+							if (failure || n == 0) { stream->fail(failure ? failure : asio::error::connection_reset); co_return Fed::Failed; }
 							buffered.append(tmp, n);
 						}
 						std::size_t used = parser.feed(buffered.data(), buffered.size());
 						buffered.erase(0, used);
-						if (parser.errored()) { reader->abort(); co_return; }
+						if (parser.errored()) { stream->fail(asio::error::invalid_argument); co_return Fed::Failed; }
 					}
-					co_await reader->finish();   // end-of-body marker
 				};
-				// Run the handler on the POOL (a blocking read() pull), and feed the body
-				// on the reactor -- concurrently. The handler is spawned with an explicit
-				// pool executor + a completion handler that signals a done-channel; the
-				// reactor then feeds and co_awaits done. (co_spawn's executor argument
-				// guarantees the handler runs on the pool -- the awaitable_operators && did
-				// not, which ran the blocking handler on the reactor and deadlocked it.)
-				// feed never throws -- a socket/parse error aborts the reader so the
-				// handler's read() returns false and unblocks.
-				auto done = std::make_shared<asio::experimental::concurrent_channel<void(asio::error_code)>>(ex, 1);
-				asio::co_spawn(hexec,
-					[handler, &request, &writer]() -> asio::awaitable<void> {
-						try { handler->handle(request, writer); }
-						catch (...) { if (writer.is_deferred()) { writer.abandon_deferred(); } else if (!writer.ended()) { handler->on_error(std::current_exception(), request, writer); } }
-						co_return;
-					},
-					[done](std::exception_ptr) { (void)done->try_send(asio::error_code{}); });
-
-				std::exception_ptr feed_error;
-				try { co_await feed(); } catch (...) {
-					feed_error = std::current_exception(); reader->abort();
-					asio::error_code ignored; socket.lowest_layer().close(ignored);
+				// The body is fed until it ends, or until the handler finishes first (it
+				// answered without reading it all): then the feed is cancelled.
+				Fed fed;
+				{
+					using namespace asio::experimental::awaitable_operators;
+					auto first = co_await (feed() || handler_done->wait());
+					fed = first.index() == 0 ? std::get<0>(first) : Fed::Abandoned;
 				}
-				auto cancellation = co_await asio::this_coro::cancellation_state;
-				const bool canceled = cancellation.cancelled() != asio::cancellation_type::none;
-				// The pool handler owns references to request/writer. Cancellation
-				// cannot release either until that original handler has returned.
+				// A feed that stopped early leaves the reader a failed body, never a hung read.
+				if (!stream->closed()) { stream->fail(asio::error::operation_aborted); }
+				// From here the handler and the request/writer it references end only by
+				// completing, never by a frame being destroyed under them. A cancellation that
+				// would have reached this coroutine arrives as Request::cancel through `tracked`.
 				co_await asio::this_coro::reset_cancellation_state(asio::disable_cancellation());
-				co_await done->async_receive(use_awaitable);
-				if (feed_error) { std::rethrow_exception(feed_error); }
-				if (canceled || reactor->stopping()) { co_return; }
-				co_await asio::this_coro::reset_cancellation_state(asio::enable_terminal_cancellation());
+				if (fed == Fed::Failed) { request.cancel(reactor->stopping() ? CancelReason::Shutdown : CancelReason::Disconnect); }
+				else if (fed == Fed::Complete && !handler_done->done) {
+					input->watch([&request] { request.cancel(CancelReason::Disconnect); });
+				}
+				co_await handler_done->wait();
+				input->unwatch();
+				if (fed != Fed::Complete) { keep_alive = false; }
 
 				if (!writer.is_deferred() && !writer.ended()) {
 					writer.status(500);
 					writer.write("Internal Server Error\n");
 					writer.end();
 				}
-				if (writer.is_deferred()) {
-				if (!co_await write_response(socket, writer, keep_alive, input)) { co_return; }
-			} else {
-				std::string head = writer.serialize_head(keep_alive);
-				std::array<asio::const_buffer, 2> buffers{asio::buffer(head), writer.has_body() ? asio::buffer(writer.body()) : asio::const_buffer{}};
-				if (co_await write_with_progress(socket, buffers, inactivity, request_deadline) != ReplySettlement::Written) { co_return; }
-			}
+				if (!co_await respond(writer, keep_alive, request_deadline)) { co_return; }
+				admitted.reset();
+				co_await asio::this_coro::reset_cancellation_state(asio::enable_terminal_cancellation());
 				if (!keep_alive || writer.wants_close()) { break; }
 				parser.reset();
 				continue;
@@ -763,7 +786,7 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 				}
 				std::size_t used = parser.feed(buffered.data(), buffered.size());
 				buffered.erase(0, used);
-				if (parser.errored()) { co_return; }
+				if (parser.errored()) { parse_failed(); co_return; }
 			}
 
 			if (std::chrono::steady_clock::now() >= request_deadline) { co_return; }
@@ -772,45 +795,25 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 			reactor->lag().note_activity();
 			parser.resume();
 			bool keep_alive = request.keep_alive;
-			// The extension and the body (streamed to the app's sink, or buffered into
+			// The extension and the body (pushed to the app's sink, or buffered into
 			// request.body) were already handled at headers-complete by the parser hook.
 
 			AsioResponseWriter writer(request, options, &ex, reactor);
-			bool offload_active = false;
-			try {
-				if (reactor->pool() && handler->should_offload(request)) {
-					if (!reactor->gate().try_enter()) {
-						writer.status(503);
-						writer.write("Service Unavailable\n");
-						writer.end();
-					} else {
-						// co_spawn selects the worker executor for the coroutine body;
-						// awaiting post() alone preserves the parent executor.
-						offload_active = true;
-						co_await asio::co_spawn(reactor->pool()->get_executor(), invoke_handler(handler, request, writer), use_awaitable);
-						reactor->gate().leave();
-						offload_active = false;
-					}
-				} else {
-					handler->handle(request, writer);   // inline on the reactor
-				}
-			} catch (...) {
-				if (offload_active) { reactor->gate().leave(); }
-				if (writer.is_deferred()) { writer.abandon_deferred(); } else if (!writer.ended()) { handler->on_error(std::current_exception(), request, writer); }
-				if (!writer.is_deferred() && !writer.ended()) {
-					writer.status(500);
-					writer.write("Internal Server Error\n");
-					writer.end();
+			RequestAbort<Stream> tracked(*reactor, request, socket);
+			{
+				WatchGuard<Stream> watching(*input);
+				// The handler's frame ends only by completing; see the streamed path.
+				co_await asio::this_coro::reset_cancellation_state(asio::disable_cancellation());
+				input->watch([&request] { request.cancel(CancelReason::Disconnect); });
+				try {
+					co_await handler->handle(request, writer);
+				} catch (...) {
+					map_handler_error(handler, request, writer, std::current_exception());
 				}
 			}
-
-			if (writer.is_deferred()) {
-				if (!co_await write_response(socket, writer, keep_alive, input)) { co_return; }
-			} else {
-				std::string head = writer.serialize_head(keep_alive);
-				std::array<asio::const_buffer, 2> buffers{asio::buffer(head), writer.has_body() ? asio::buffer(writer.body()) : asio::const_buffer{}};
-				if (co_await write_with_progress(socket, buffers, inactivity, request_deadline) != ReplySettlement::Written) { co_return; }
-			}
+			if (!co_await respond(writer, keep_alive, request_deadline)) { co_return; }
+			admitted.reset();
+			co_await asio::this_coro::reset_cancellation_state(asio::enable_terminal_cancellation());
 			if (!keep_alive || writer.wants_close()) { break; }
 		}
 	} catch (const RequestRejected& error) {
@@ -823,7 +826,9 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 		// consumes no publisher reservation and cannot wait on a slow reader.
 		std::string text(rejected->what());
 		std::string head = "HTTP/1.1 " + std::to_string(rejected->status()) + " " + reason_phrase(rejected->status()) +
-			"\r\nContent-Type: " + std::string(rejected->content_type()) + "\r\nContent-Length: " + std::to_string(text.size()) + "\r\nConnection: close\r\n\r\n";
+			"\r\nContent-Type: " + std::string(rejected->content_type()) + "\r\nContent-Length: " + std::to_string(text.size()) +
+			(rejected->retry_after() ? "\r\nRetry-After: " + std::to_string(rejected->retry_after()) : std::string()) +
+			"\r\nConnection: close\r\n\r\n";
 		std::array<asio::const_buffer, 2> buffers{asio::buffer(head), asio::buffer(text)};
 		co_await write_before_deadline(socket, buffers, std::chrono::steady_clock::now() + std::chrono::seconds(1));
 	}
@@ -845,7 +850,7 @@ inline asio::awaitable<void> serve_connection(Stream socket, HttpHandler* handle
 
 // The HTTP service: an application HttpHandler served over a reactor::TcpServer. The
 // server owns the runtime (N shared-nothing reactors on N threads, one port via
-// SO_REUSEPORT or a portable shared acceptor, per-reactor offload pool, graceful
+// SO_REUSEPORT or a portable shared acceptor, per-reactor admission gate, graceful
 // shutdown); this class is the thin HTTP-shaped adapter -- it turns the handler + the
 // response options into the per-connection Session (detail::serve_connection) and
 // exposes the same surface callers had before the runtime was extracted.
@@ -855,21 +860,21 @@ public:
 		HttpHandler*, reactor::Reactor*, const AsioResponseOptions*)>;
 	using TimedConnectionFactory = std::function<asio::awaitable<void>(asio::ip::tcp::socket,
 		HttpHandler*, reactor::Reactor*, const AsioResponseOptions*, reactor::SessionContext)>;
-	// `reactors` runtimes; each with `workers` offload threads (0 => inline) and an
-	// offload admission window of `queue_limit`.
-	HttpAsioService(HttpHandler& handler, std::size_t reactors, std::size_t workers, std::size_t queue_limit,
+	// `reactors` loops, each admitting at most `in_flight_limit` requests at a time (0 =
+	// no cap); a request over the cap is refused with a 503 and `Retry-After: 1`.
+	HttpAsioService(HttpHandler& handler, std::size_t reactors, std::size_t in_flight_limit,
 		ConnectionFactory connection = {})
-		: HttpAsioService(handler, reactors, workers, queue_limit, TimedConnectionFactory{
+		: HttpAsioService(handler, reactors, in_flight_limit, TimedConnectionFactory{
 			[connection = std::move(connection)](asio::ip::tcp::socket socket, HttpHandler* handler,
 				reactor::Reactor* reactor, const AsioResponseOptions* options, reactor::SessionContext) {
 				if (connection) { return connection(std::move(socket), handler, reactor, options); }
 				return detail::serve_connection(std::move(socket), handler, reactor, options);
 			}}, 0) {}
-	// Explicit sixth argument keeps existing five-argument brace calls unambiguous.
-	HttpAsioService(HttpHandler& handler, std::size_t reactors, std::size_t workers, std::size_t queue_limit,
+	// Explicit fifth argument keeps existing four-argument brace calls unambiguous.
+	HttpAsioService(HttpHandler& handler, std::size_t reactors, std::size_t in_flight_limit,
 		TimedConnectionFactory connection, std::size_t maximum_connections)
 		: handler_(handler), connection_(std::move(connection)),
-		  server_(reactors, workers, static_cast<int>(queue_limit), reactor::TimedSession{
+		  server_(reactors, static_cast<int>(in_flight_limit), reactor::TimedSession{
 			[this](asio::ip::tcp::socket socket, reactor::Reactor& reactor, reactor::SessionContext context) {
 				if (connection_) { return connection_(std::move(socket), &handler_, &reactor, &response_, context); }
 				return detail::serve_connection(std::move(socket), &handler_, &reactor, &response_);
@@ -900,6 +905,15 @@ public:
 	void set_idle_timeout(std::chrono::milliseconds timeout) { response_.idle_timeout = checked_timeout(timeout); }
 	void set_header_timeout(std::chrono::milliseconds timeout) { response_.header_timeout = checked_timeout(timeout); }
 	void set_inactivity_timeout(std::chrono::milliseconds timeout) { response_.inactivity_timeout = checked_timeout(timeout); }
+	// The largest body buffered into Request::body (16 MiB by default; 0 = no cap). A larger
+	// request is answered 413 and the connection closes. Streamed and sunk bodies are not capped.
+	void set_max_body(std::size_t bytes) {
+		if (started_) { throw std::logic_error("body cap must be set before startup"); }
+		response_.max_body = bytes;
+	}
+	// How long stop() lets in-flight requests finish after asking them to stop (5 s by
+	// default) before it closes the sockets a stalled peer still holds; see reactor::TcpServer.
+	void set_shutdown_grace(std::chrono::milliseconds grace) { server_.set_shutdown_grace(grace); }
 	void enable_compression(CompressionOptions options = {}) {
 		response_.compress = true;
 		response_.compression = std::move(options);
@@ -915,8 +929,9 @@ public:
 	// listening; the caller keeps its thread and stops with stop().
 	void start(unsigned short port) { started_ = true; server_.start(port); }
 
-	// Abort in-flight streams, stop the loops, join. Also runs from the destructor
-	// (server_'s own dtor), so a service going out of scope tears down cleanly.
+	// Cancel in-flight requests (their responses are still written), force the sockets
+	// that are still busy after the grace, stop the loops, join. Also runs from the
+	// destructor (server_'s own dtor), so a service going out of scope tears down cleanly.
 	void stop() { server_.stop(); }
 
 	std::size_t reactors() const { return server_.reactors(); }

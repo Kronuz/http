@@ -22,8 +22,7 @@ static void check(bool ok, const std::string& m) {
 }
 
 struct App : http::HttpHandler {
-	void handle(const http::Request&, http::ResponseWriter& w) override { w.send(200, "ok\n"); }
-	bool should_offload(const http::Request&) const override { return false; }
+	asio::awaitable<void> handle(http::Request&, http::ResponseWriter& w) override { w.send(200, "ok\n"); co_return; }
 };
 
 // A keep-alive client: one connection, sequential GET /x, each answer read in full.
@@ -69,7 +68,7 @@ int main() {
 	std::printf("== http reactor lag probe test ==\n");
 	App app;
 	{
-		http::HttpAsioService off(app, 2, 0, 16);
+		http::HttpAsioService off(app, 2, 16);
 		const auto port = free_port();
 		off.start(port);
 		Client c(port);
@@ -80,7 +79,7 @@ int main() {
 		off.stop();
 	}
 	{
-		http::HttpAsioService on(app, 2, 0, 16);
+		http::HttpAsioService on(app, 2, 16);
 		on.enable_lag_probe();
 		const auto port = free_port();
 		on.start(port);

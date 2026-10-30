@@ -31,10 +31,13 @@
 // framing -- it picks Content-Length for a buffered body and chunked transfer
 // encoding once a response streams.
 //
-// The scoped writer and request must not escape handle(). For delayed replies,
-// transfer response authority with defer() and retain only the owned capability.
-// Synchronous handlers call end() before returning; offloaded handlers complete
-// before the transport resumes.
+// handle() is a coroutine awaited on the connection's loop. It may suspend (a timer, a
+// task, a body read); while it does, the loop serves other connections. The request and
+// the writer stay valid until the coroutine completes, and a request's frame is never
+// destroyed early: a handler that sees Request::cancelled() returns, and the transport
+// still writes its response. The scoped writer and request must not escape handle(). For
+// delayed replies, transfer response authority with defer() and retain only the owned
+// capability. A handler calls end() before it completes.
 //
 // A ready-made HttpHandler that dispatches by method + path -- the application's
 // routing table -- lives in http_router.h (the radix-tree Router).
@@ -48,6 +51,9 @@
 #include <string>
 #include <utility>
 
+#include <asio/awaitable.hpp>
+
+#include "http_body_stream.h"
 #include "http_message.h"
 #include "http_deferred.h"
 #include "http_owned_stream.h"
@@ -63,13 +69,17 @@ class RequestRejected : public std::invalid_argument {
 		return std::string(body);
 	}
 public:
-	RequestRejected(int status, std::string_view body, RejectionContent content = RejectionContent::Text)
-		: std::invalid_argument(checked(status, body)), status_(status), content_(content) {}
+	// retry_after_seconds > 0 adds a Retry-After header (an overload refusal).
+	RequestRejected(int status, std::string_view body, RejectionContent content = RejectionContent::Text,
+		unsigned retry_after_seconds = 0)
+		: std::invalid_argument(checked(status, body)), status_(status), content_(content), retry_after_(retry_after_seconds) {}
 	int status() const noexcept { return status_; }
+	unsigned retry_after() const noexcept { return retry_after_; }
 	const char* content_type() const noexcept { return content_ == RejectionContent::Json ? "application/json" : "text/plain"; }
 private:
 	int status_;
 	RejectionContent content_;
+	unsigned retry_after_;
 };
 
 // The output side of the seam. A handler sets the status and headers, then
@@ -161,67 +171,43 @@ public:
 };
 
 
-// Concurrent streaming intake -- the reusable "true streaming" path. When a handler
-// returns true from wants_body_stream(), the framework runs handle() on a worker
-// *concurrently* with the body read and hands it a BodyReader to PULL raw body chunks
-// from: read() blocks the worker until the next chunk arrives (or the body ends), while
-// the reactor feeds chunks with flow control -- it suspends when the reader's bounded
-// buffer is full, so a multi-gigabyte body flows through in O(buffer) memory, the
-// reactor stays free, and back-pressure reaches the socket. The application parses and
-// consumes the chunks in whatever format it owns (NDJSON, MsgPack, a file upload); the
-// framework owns the transport, the concurrency, and the back-pressure. This is the
-// abstract seam -- the transport provides the concrete (Asio-backed) implementation.
-class BodyReader {
-public:
-	virtual ~BodyReader() = default;
-	// Pull the next body chunk into `chunk`. Blocks until one is available; returns
-	// false once the body is fully delivered. Call from the handler (on its worker
-	// thread), never from the reactor.
-	virtual bool read(std::string& chunk) = 0;
-	// Unblock a pending read() (make it return false) -- the transport calls this on
-	// shutdown so a handler stuck mid-stream doesn't wedge the join. Default no-op.
-	virtual void abort() {}
-};
-
-
 class HttpHandler {
 public:
 	virtual ~HttpHandler() = default;
-	virtual void handle(const Request& request, ResponseWriter& response) = 0;
+
+	// Handles one request on the connection's loop. Write the response through `response`
+	// and call end() before completing. Suspending (co_await) is the way to wait; never
+	// block the thread. A request cancelled by a client hang-up or by shutdown (see
+	// Request::on_cancel) is still answered: reads stop at their next checkpoint, writes
+	// run to completion, and the response is attempted.
+	virtual asio::awaitable<void> handle(Request& request, ResponseWriter& response) = 0;
 
 	// Opt in to streaming the request body: return a sink to receive it
 	// incrementally, or nullptr (default) to have it buffered into Request::body.
 	// Called once when the headers are complete, before any body byte, so the
 	// decision can use the method, path, and headers (e.g. Content-Type). Ignored when
-	// wants_body_stream() returns true (that path takes precedence).
+	// wants_body_stream() returns true (that path takes precedence). Sinks run inside the
+	// parser on the loop, so keep their work light.
 	virtual std::unique_ptr<BodySink> on_request_body(Request& /*request*/) { return nullptr; }
 
-	// Opt in to CONCURRENT body streaming (the true-streaming path, for a large or
-	// unbounded body consumed by heavy work -- indexing a RESTORE). Return true and the
-	// framework runs handle() on a worker while it feeds the body, which the handler
-	// PULLS from Request::body_reader (see BodyReader) with flow control -- O(buffer)
-	// memory for any size. Decided at headers-complete (method/path/headers known).
-	// Default false: the body buffers into Request::body (or an on_request_body sink)
-	// and handle() runs after it is fully received. Takes precedence over
-	// on_request_body(). A streaming handler MUST drain body_reader to completion.
+	// Opt in to a streamed body read with co_await (see BodyStream): return true and
+	// handle() runs while the body is still arriving, reading it from
+	// Request::body_stream with flow control -- O(buffer) memory for any size. Decided at
+	// headers-complete (method/path/headers known). Default false: the body is buffered
+	// into Request::body (up to the service's body cap, then 413) and handle() runs after
+	// it is fully received. Takes precedence over on_request_body(). A handler that
+	// returns without reading the whole body gets its response written, then the
+	// connection closes.
 	virtual bool wants_body_stream(const Request& /*request*/) { return false; }
 
 	// Create this request's typed application extension (see RequestExtension), or
 	// nullptr (default) for none. Called once at headers-complete -- before
-	// on_request_body() and should_offload() -- so an app can build its per-request
+	// on_request_body() and wants_body_stream() -- so an app can build its per-request
 	// state (decoded body plumbing, parsed routes, timings) from the method/path/
 	// headers and read it back in handle() via Request::ext<T>(). This is how an app
-	// extends the request rather than carrying a parallel request object.
+	// extends the request rather than carrying a parallel request object. It may throw
+	// RequestRejected to refuse the request before its body is read.
 	virtual std::unique_ptr<RequestExtension> create_extension(const Request& /*request*/) { return nullptr; }
-
-	// Per-request offload policy (only consulted when a Dispatcher is configured).
-	// Return true (default) to run this request on a worker thread -- correct for
-	// heavy or potentially-blocking handlers (e.g. a search). Return false to run it
-	// inline on the reactor: the cheap fast path, which skips the worker handoff for
-	// trivial endpoints (a health check, a cached/metrics GET) so they are served
-	// even while every worker is busy. A handler classified cheap MUST be cheap and
-	// non-blocking -- it runs on the reactor and a slow one would stall the loop.
-	virtual bool should_offload(const Request& /*request*/) const { return true; }
 
 	// Map an exception that escaped handle() to a response. The connection's backstop
 	// calls this when handle() threw without having answered; the app rethrows the

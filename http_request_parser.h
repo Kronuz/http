@@ -54,7 +54,7 @@ namespace http {
 class RequestParser {
 public:
 	// The transport's decision at headers-complete for how to take the body:
-	//   stream=true  -> CONCURRENT pull streaming (the handler pulls via a BodyReader);
+	//   stream=true  -> streamed to the handler's BodyStream (the transport feeds it);
 	//   sink!=null   -> push streaming (each chunk handed to the sink as parsed);
 	//   both empty   -> buffer into Request::body.
 	struct BodyIntake {
@@ -79,6 +79,13 @@ public:
 		parser_.data = this;
 	}
 
+	// Cap on a buffered body (0 => none). A request that advertises a longer Content-Length
+	// is refused at headers-complete, and a body that grows past it (chunked) as bytes
+	// arrive; either stops the parse and sets body_limit_exceeded(). Streamed and sunk
+	// bodies are not buffered, so the cap does not apply to them.
+	void set_body_limit(std::size_t limit) { body_limit_ = limit; }
+	bool body_limit_exceeded() const { return limit_exceeded_; }
+
 	// Install the headers-complete hook (once per connection; it runs for every request).
 	void set_headers_callback(HeadersCallback cb) { headers_cb_ = std::move(cb); }
 
@@ -95,8 +102,8 @@ public:
 	// True once the request line + headers are parsed (the body may still be arriving).
 	bool headers_done() const { return headers_done_; }
 
-	// True when the handler opted into concurrent pull streaming for this request. The
-	// transport then runs the handler while feeding body chunks it drains via
+	// True when the handler opted into a streamed body for this request. The transport
+	// then runs the handler while feeding it the body chunks it drains via
 	// take_pending_body(); the body is not in Request::body.
 	bool streaming() const { return pull_; }
 
@@ -105,7 +112,7 @@ public:
 	// the method/path/headers/extension but no body.
 	Request take_headers() { return std::move(request_); }
 
-	// Drain the body bytes staged since the last call (streaming/pull mode only).
+	// Drain the body bytes staged since the last call (streaming mode only).
 	std::string take_pending_body() {
 		std::string out;
 		out.swap(pending_body_);
@@ -123,6 +130,7 @@ public:
 		complete_ = false;
 		headers_done_ = false;
 		pull_ = false;
+		limit_exceeded_ = false;
 		body_sink_.reset();
 		http_parser_pause(&parser_, 0);
 	}
@@ -149,6 +157,7 @@ public:
 		complete_ = false;
 		headers_done_ = false;
 		pull_ = false;
+		limit_exceeded_ = false;
 		pending_body_.clear();
 		body_sink_.reset();
 		return out;
@@ -177,7 +186,9 @@ private:
 	bool reading_value_ = false;
 	bool complete_ = false;
 	bool headers_done_ = false;
-	bool pull_ = false;                     // concurrent pull streaming (body -> pending_body_)
+	bool pull_ = false;                     // streamed to a BodyStream (body -> pending_body_)
+	std::size_t body_limit_ = 0;            // cap on a buffered body; 0 => none
+	bool limit_exceeded_ = false;
 	HeadersCallback headers_cb_;
 	std::string pending_body_;              // staged body bytes for the pull path
 	std::unique_ptr<BodySink> body_sink_;   // non-null => push streaming to the sink
@@ -229,7 +240,7 @@ private:
 		}
 		c->finalize();
 		// Let the transport build the extension and choose how to take the body:
-		// concurrent pull streaming, push to a sink, or buffer into Request::body.
+		// stream it to a BodyStream, push to a sink, or buffer into Request::body.
 		if (c->headers_cb_) {
 			BodyIntake intake = c->headers_cb_(c->request_);
 			c->pull_ = intake.stream;
@@ -237,6 +248,7 @@ private:
 		}
 		if (!c->pull_ && !c->body_sink_) {
 			auto cl = c->content_length();
+			if (c->body_limit_ != 0 && cl > c->body_limit_) { c->limit_exceeded_ = true; return -1; }
 			if (cl != 0) { c->request_.body.reserve(std::min(cl, kMaxBufferedReserve)); }
 		}
 		c->headers_done_ = true;
@@ -245,10 +257,14 @@ private:
 	static int on_body_cb(http_parser* p, const char* at, std::size_t len) {
 		auto* c = self(p);
 		if (c->pull_) {
-			c->pending_body_.append(at, len);                  // stage for the pull reader
+			c->pending_body_.append(at, len);                  // stage for the BodyStream
 		} else if (c->body_sink_) {
 			c->body_sink_->write(std::string_view(at, len));   // push: never accumulated
 		} else {
+			if (c->body_limit_ != 0 && len > c->body_limit_ - std::min(c->body_limit_, c->request_.body.size())) {
+				c->limit_exceeded_ = true;                     // a chunked body past the cap
+				return -1;
+			}
 			c->request_.body.append(at, len);                  // buffer (small bodies)
 		}
 		return 0;

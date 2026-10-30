@@ -26,7 +26,7 @@ static void check(bool ok, const char* what) {
 }
 
 struct Echo : http::HttpHandler {
-	void handle(const http::Request& req, http::ResponseWriter& w) override { w.send(200, std::to_string(req.body.size())); }
+	asio::awaitable<void> handle(http::Request& req, http::ResponseWriter& w) override { w.send(200, std::to_string(req.body.size())); co_return; }
 };
 
 static unsigned short free_port() {
@@ -72,7 +72,7 @@ int main() {
 	std::signal(SIGPIPE, SIG_IGN);  // a send to a closed connection fails instead
 	Echo echo;
 	const unsigned short port = free_port();
-	http::HttpAsioService svc(echo, 1, 0, 64);
+	http::HttpAsioService svc(echo, 1, 64);
 	svc.set_idle_timeout(300ms);
 	svc.set_header_timeout(400ms);
 	svc.set_inactivity_timeout(300ms);
@@ -128,7 +128,7 @@ int main() {
 
 	{  // unset: a silent connection stays open past every bound above
 		const unsigned short p2 = free_port();
-		http::HttpAsioService plain(echo, 1, 0, 64);
+		http::HttpAsioService plain(echo, 1, 64);
 		plain.start(p2);
 		int fd = dial(p2);
 		timeval tv{.tv_sec = 1, .tv_usec = 200000};

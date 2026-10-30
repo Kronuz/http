@@ -59,32 +59,36 @@ class KvApp : public http::HttpHandler {
 
 public:
 	KvApp() {
-		router_.route("GET", "/kv/", [this](const http::Request&, http::ResponseWriter& resp, const http::Params&) {
+		router_.route("GET", "/kv/", [this](http::Request&, http::ResponseWriter& resp, const http::Params&) -> asio::awaitable<void> {
 			std::lock_guard<std::mutex> lk(mutex_);   // GET /kv/ -> list keys
 			std::string body;
 			for (const auto& [k, v] : store_) { body += k; body += '\n'; }
 			resp.send(200, body);
+			co_return;
 		});
-		router_.route("GET", "/kv/:key", [this](const http::Request&, http::ResponseWriter& resp, const http::Params& p) {
+		router_.route("GET", "/kv/:key", [this](http::Request&, http::ResponseWriter& resp, const http::Params& p) -> asio::awaitable<void> {
 			std::lock_guard<std::mutex> lk(mutex_);
 			auto it = store_.find(std::string(p.get("key")));
-			if (it == store_.end()) { resp.send(404, "not found\n"); return; }
+			if (it == store_.end()) { resp.send(404, "not found\n"); co_return; }
 			resp.send(200, it->second);
+			co_return;
 		});
-		router_.route("PUT", "/kv/:key", [this](const http::Request& req, http::ResponseWriter& resp, const http::Params& p) {
+		router_.route("PUT", "/kv/:key", [this](http::Request& req, http::ResponseWriter& resp, const http::Params& p) -> asio::awaitable<void> {
 			std::lock_guard<std::mutex> lk(mutex_);
 			std::string key(p.get("key"));
 			bool created = store_.find(key) == store_.end();
 			store_[key] = req.body;
 			resp.send(created ? 201 : 204, created ? "created\n" : "");
+			co_return;
 		});
-		router_.route("DELETE", "/kv/:key", [this](const http::Request&, http::ResponseWriter& resp, const http::Params& p) {
+		router_.route("DELETE", "/kv/:key", [this](http::Request&, http::ResponseWriter& resp, const http::Params& p) -> asio::awaitable<void> {
 			std::lock_guard<std::mutex> lk(mutex_);
 			resp.send(store_.erase(std::string(p.get("key"))) ? 204 : 404, "");
+			co_return;
 		});
 		// A streaming response: emit N lines as chunks, never holding them all in
 		// memory. The same seam produces a chunked body -- the writer frames it.
-		router_.route("GET", "/stream/:n", [](const http::Request&, http::ResponseWriter& resp, const http::Params& p) {
+		router_.route("GET", "/stream/:n", [](http::Request&, http::ResponseWriter& resp, const http::Params& p) -> asio::awaitable<void> {
 			long n = std::atol(std::string(p.get("n")).c_str());
 			resp.status(200);
 			resp.content_type("text/plain; charset=utf-8");
@@ -92,17 +96,19 @@ public:
 				resp.write("line " + std::to_string(i) + "\n");
 			}
 			resp.end();
+			co_return;
 		});
 		// A streamed request body: POST NDJSON; the body is counted line-by-line as
 		// it arrives (see on_request_body) and never buffered whole.
-		router_.route("POST", "/bulk", [](const http::Request& req, http::ResponseWriter& resp, const http::Params&) {
+		router_.route("POST", "/bulk", [](http::Request& req, http::ResponseWriter& resp, const http::Params&) -> asio::awaitable<void> {
 			auto ctx = std::static_pointer_cast<BulkCtx>(req.user_data);
 			resp.send(200, "received " + std::to_string(ctx ? ctx->lines : 0) + " lines\n");
+			co_return;
 		});
 	}
 
-	void handle(const http::Request& request, http::ResponseWriter& response) override {
-		router_.handle(request, response);
+	asio::awaitable<void> handle(http::Request& request, http::ResponseWriter& response) override {
+		co_await router_.handle(request, response);
 	}
 
 	// Stream the body for POST /bulk instead of buffering it; everything else
@@ -125,12 +131,12 @@ int main(int argc, char** argv) {
 	unsigned int port = (argc > 1) ? static_cast<unsigned int>(std::atoi(argv[1])) : 8080;
 
 	KvApp app;
-	// The Asio transport: N shared-nothing reactors (thread-per-core), each with a
-	// small offload pool for the un-stallable path and a bounded offload window. The
-	// default bind (no SO_REUSEPORT) uses the portable shared-acceptor, so this runs
-	// the same on Linux and macOS.
+	// The Asio transport: N shared-nothing reactors (thread-per-core), each admitting at
+	// most 256 requests at a time. Handlers run on the reactors; the store's mutex is
+	// shared by all of them. The default bind (no SO_REUSEPORT) uses the portable
+	// shared-acceptor, so this runs the same on Linux and macOS.
 	std::size_t reactors = std::max(1u, std::thread::hardware_concurrency());
-	http::HttpAsioService service(app, reactors, /*workers=*/2, /*queue_limit=*/256);
+	http::HttpAsioService service(app, reactors, /*in_flight_limit=*/256);
 
 	std::signal(SIGINT, on_signal);
 	std::signal(SIGTERM, on_signal);
