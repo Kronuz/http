@@ -7,6 +7,8 @@
 //   [E] the buffered-body cap answers 413 (Content-Length and chunked), streams are not capped
 //   [F] shutdown: cancel, the response is still written, frames outlive the cancel, bounded by the grace
 //   [G] pipelined and keep-alive requests are unaffected by the per-request watch
+//   [H] a body cut short (FIN, half-close, RST, chunked) fails the reader, never eof, with the request cancelled
+//   [I] a throwing on_cancel callback is dropped: the handler's frames outlive it, streamed and buffered
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -67,6 +69,7 @@ struct Conn {
 	void send(const std::string& s) { std::size_t off = 0; while (off < s.size()) { ssize_t n = ::send(fd, s.data() + off, s.size() - off, 0); if (n <= 0) { break; } off += static_cast<std::size_t>(n); } }
 	void shut_wr() { ::shutdown(fd, SHUT_WR); }
 	void close() { if (fd >= 0) { ::close(fd); fd = -1; } }
+	void rst() { linger l{1, 0}; ::setsockopt(fd, SOL_SOCKET, SO_LINGER, &l, sizeof(l)); close(); }
 	bool fill() {
 		char b[16384];
 		ssize_t n = ::recv(fd, b, sizeof(b), 0);
@@ -125,6 +128,9 @@ struct Obs {
 	std::atomic<int> reason{-1};           // CancelReason once cancelled
 	std::atomic<bool> frame_ok{true};
 	std::atomic<double> cancelled_after_ms{-1};
+	std::atomic<int> end_kind{0};          // how a body read ended: 1 eof, 2 operation_aborted, 3 another error
+	std::atomic<bool> cancelled_at_end{false};
+	std::atomic<bool> cancelled_late{false};
 	clk::time_point t0{};
 };
 struct App : http::HttpHandler {
@@ -147,7 +153,7 @@ struct App : http::HttpHandler {
 		asio::steady_timer t(co_await asio::this_coro::executor, d);
 		co_await t.async_wait(asio::use_awaitable);
 	}
-	bool wants_body_stream(const http::Request& r) override { return r.path == "/stream"; }
+	bool wants_body_stream(const http::Request& r) override { return r.path == "/stream" || r.path == "/tbody" || r.path == "/throwcb-stream"; }
 	std::unique_ptr<http::BodySink> on_request_body(http::Request& r) override {
 		struct Null : http::BodySink { std::size_t n = 0; void write(std::string_view c) override { n += c.size(); } void end() override {} };
 		return r.path == "/sink" ? std::make_unique<Null>() : nullptr;
@@ -183,6 +189,31 @@ struct App : http::HttpHandler {
 				total += chunk.size();
 			}
 			w.send(200, "streamed " + std::to_string(total));
+			co_return;
+		}
+		if (req.path == "/tbody") {   // reads a streamed body to its end and records how it ended
+			auto o = get_obs(id);
+			std::string chunk;
+			for (;;) {
+				asio::error_code ec;
+				co_await req.body_stream->async_read(chunk, asio::redirect_error(asio::use_awaitable, ec));
+				if (!ec) { continue; }
+				o->cancelled_at_end = req.cancelled();
+				o->end_kind = ec == asio::error::eof ? 1 : ec == asio::error::operation_aborted ? 2 : 3;
+				break;
+			}
+			o->finished = true;
+			w.send(200, "ended");
+			co_return;
+		}
+		if (req.path == "/throwcb" || req.path == "/throwcb-stream") {   // a cancel callback that throws
+			auto o = get_obs(id);
+			req.on_cancel([](http::CancelReason) { throw std::runtime_error("callback throws"); });
+			o->started = true;
+			co_await sleep_for(300ms);
+			o->cancelled_late = req.cancelled() && !req.path.empty();   // touches the request after the cancel
+			o->finished = true;
+			w.send(200, "survived");
 			co_return;
 		}
 		if (req.path == "/read" || req.path == "/write") {
@@ -541,6 +572,78 @@ int main() {
 			if (k.read_response().body == "fast") { ++ok; }
 		}
 		check(ok == 200, "[G] 200 sequential keep-alive requests, each with the watch armed and released");
+	}
+
+	// [H] A body cut short never reads as a clean end: the reader gets an error other than eof,
+	// and the request is already cancelled when its read returns.
+	{
+		unsigned short port = free_port();
+		http::HttpAsioService svc(app, 1, 64);
+		svc.start(port); wait_listen(port);
+		const auto head = [](const std::string& id) {
+			return "POST /tbody?id=" + id + " HTTP/1.1\r\nHost: x\r\nContent-Length: 100000\r\n\r\n" + std::string(1000, 'a');
+		};
+		const auto outcome = [&](const std::string& id, const char* what) {
+			auto o = app.get_obs(id);
+			until([&] { return o->finished.load(); }, 3000);
+			std::printf("  [H] %s: end_kind=%d cancelled=%d\n", what, o->end_kind.load(), int(o->cancelled_at_end.load()));
+			check(o->finished && o->end_kind == 3 && o->cancelled_at_end,
+				std::string("[H] ") + what + ": the reader gets an error (not eof) and the request is cancelled");
+		};
+		{ Conn c(port); c.send(head("trunc-fin")); std::this_thread::sleep_for(80ms); c.close(); outcome("trunc-fin", "Content-Length body, client close"); }
+		{ Conn c(port); c.send(head("trunc-rst")); std::this_thread::sleep_for(80ms); c.rst(); outcome("trunc-rst", "Content-Length body, client reset"); }
+		{ Conn c(port); c.send(head("trunc-half")); std::this_thread::sleep_for(80ms); c.shut_wr(); outcome("trunc-half", "Content-Length body, half-close"); }
+		{
+			Conn c(port);
+			c.send("POST /tbody?id=trunc-chunked HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n");
+			std::this_thread::sleep_for(80ms); c.close();
+			outcome("trunc-chunked", "chunked body cut after a chunk");
+		}
+		{   // a body that does complete still ends with eof
+			Conn c(port);
+			c.send("POST /stream HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello");
+			auto r = c.read_response();
+			check(r.status == 200 && r.body == "streamed 5", "[H] a complete body still ends cleanly");
+		}
+	}
+
+	// [I] A cancel callback that throws is dropped; the handler's frames end by completing.
+	{
+		unsigned short port = free_port();
+		http::HttpAsioService svc(app, 1, 64);
+		svc.start(port); wait_listen(port);
+		{   // streamed: the connection frame must not unwind under the running handler
+			auto o = app.get_obs("sx");
+			Conn c(port);
+			c.send("POST /throwcb-stream?id=sx HTTP/1.1\r\nHost: x\r\nContent-Length: 100000\r\n\r\n" + std::string(100, 'a'));
+			until([&] { return o->started.load(); });
+			std::this_thread::sleep_for(50ms);
+			c.close();
+			std::this_thread::sleep_for(120ms);
+			check(!o->finished && svc.reactor(0).gate().inflight.load() == 1,
+				"[I] streamed: after the throwing callback the connection still holds its request (the handler runs)");
+			until([&] { return o->finished.load(); }, 3000);
+			check(o->finished && o->cancelled_late, "[I] streamed: the handler finishes and its request was intact");
+			check(until([&] { return svc.reactor(0).gate().inflight.load() == 0; }), "[I] streamed: the request is released afterwards");
+		}
+		{   // buffered: the throw must not leave io_context::run()
+			auto o = app.get_obs("bx");
+			Conn c(port);
+			c.send(get("/throwcb?id=bx"));
+			until([&] { return o->started.load(); });
+			std::this_thread::sleep_for(50ms);
+			c.close();
+			until([&] { return o->finished.load(); }, 3000);
+			check(o->finished && o->cancelled_late, "[I] buffered: the handler finishes after a throwing callback");
+			check(one(port, get("/fast", "Connection: close\r\n")).body == "fast", "[I] buffered: the server keeps serving");
+		}
+		{   // a late registration that throws
+			http::Request r;
+			r.cancel(http::CancelReason::Disconnect);
+			bool threw = false;
+			try { r.on_cancel([](http::CancelReason) { throw std::runtime_error("late"); }); } catch (...) { threw = true; }
+			check(!threw && r.cancelled(), "[I] a late on_cancel that throws is dropped");
+		}
 	}
 
 	std::printf("\n%s (%d failures)\n", g_fail == 0 ? "PASS" : "FAIL", g_fail);

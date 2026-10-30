@@ -44,7 +44,8 @@ example by requesting a `task::cancel_source` from the callback. Writes take no 
 once the request is admitted its work completes and the transport attempts its response,
 so a client that half-closes after a `PUT` still receives the answer. A task that is
 queued on a lock, an event or a chore is not woken by the callback; it checks the flag
-when it resumes.
+when it resumes. A callback that throws is dropped: the transport's frames end only by
+completing, and a throw would unwind them under a running handler.
 
 Two rules read the one-byte socket watch, and they differ on purpose:
 
@@ -75,8 +76,10 @@ co_await request.body_stream->async_read(chunk, asio::redirect_error(asio::use_a
 ```
 
 `ec` is clear with a non-empty chunk, `asio::error::eof` at the end (sticky), or the error
-the body failed with (`connection_reset` when the client closed mid-body,
-`operation_aborted` at shutdown, the read deadline's error). Buffered chunks are
+the body failed with (`connection_reset` when the client ended before the body was
+complete -- a close, a half-close, a reset, or a chunked body cut short -- with
+`cancelled()` already true when the read returns; `operation_aborted` at shutdown, the
+read deadline's error). `eof` means only a complete body. Buffered chunks are
 delivered before the end or the error. A full channel suspends the feed, so back-pressure
 reaches the socket. If the handler answers without reading it all, the feed is cancelled
 and the connection closes after the response. The stream is not thread-safe; use it on

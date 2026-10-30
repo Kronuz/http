@@ -6,8 +6,8 @@
 # An application implements one interface -- HttpHandler (Request in, response
 # written out) -- and the framework does the rest: an Asio C++20-coroutine
 # connection parses with http-parser, routes on a radix tree, negotiates content
-# and encodings, streams or buffers the body, runs the handler (inline or offloaded
-# so a slow handler never stalls the loop), and frames the response. The search
+# and encodings, streams or buffers the body, runs the handler (a coroutine on the
+# connection's loop, suspended while it waits), and frames the response. The search
 # engine becomes one HttpHandler; the demo is another.
 
 cmake_minimum_required(VERSION 3.16)
@@ -63,7 +63,7 @@ endif()
 # REACTOR_INCLUDE_DIR to use a local checkout instead of fetching (dev iteration).
 set(REACTOR_INCLUDE_DIR "" CACHE PATH "use an existing Kronuz/reactor dir instead of fetching")
 if(REACTOR_INCLUDE_DIR STREQUAL "")
-	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG 7dcf73cc5c0241e05945b3261901eca17a4f6ced)
+	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG 76c32b44de7632909e1287c76ea0f36c5f75d695)
 	FetchContent_MakeAvailable(reactor)
 	set(REACTOR_INCLUDE_DIR "${reactor_SOURCE_DIR}")
 endif()

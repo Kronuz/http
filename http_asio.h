@@ -720,6 +720,11 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 					[handler_done, stream](std::exception_ptr) { handler_done->finish(); stream->abandon(); });
 
 				enum class Fed { Complete, Failed, Abandoned };
+				// The body failed: cancel the request first, so a reader woken by the error sees cancelled().
+				const auto fail_body = [&](asio::error_code error) {
+					request.cancel(reactor->stopping() ? CancelReason::Shutdown : CancelReason::Disconnect);
+					stream->fail(error);
+				};
 				const auto feed = [&]() -> asio::awaitable<Fed> {
 					for (;;) {
 						// Drain whatever body has been parsed so far -- including bytes that
@@ -733,12 +738,18 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 							asio::error_code failure;
 							try { n = co_await input->read(asio::buffer(tmp), body_deadline(request_deadline)); }
 							catch (const asio::system_error& e) { failure = e.code(); }
-							if (failure || n == 0) { stream->fail(failure ? failure : asio::error::connection_reset); co_return Fed::Failed; }
+							if (failure || n == 0) {
+								// The peer ended (or the read timed out) before the body was complete: the
+								// reader sees a failed body, never eof, and the request is already cancelled.
+								if (!failure || failure == asio::error::eof) { failure = asio::error::connection_reset; }
+								fail_body(failure);
+								co_return Fed::Failed;
+							}
 							buffered.append(tmp, n);
 						}
 						std::size_t used = parser.feed(buffered.data(), buffered.size());
 						buffered.erase(0, used);
-						if (parser.errored()) { stream->fail(asio::error::invalid_argument); co_return Fed::Failed; }
+						if (parser.errored()) { fail_body(asio::error::invalid_argument); co_return Fed::Failed; }
 					}
 				};
 				// The body is fed until it ends, or until the handler finishes first (it
@@ -750,16 +761,20 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 					auto first = co_await (feed() || handler_done->wait());
 					fed = first.index() == 0 ? std::get<0>(first) : Fed::Abandoned;
 				} catch (...) { feed_error = std::current_exception(); }
-				// A feed that stopped early leaves the reader a failed body, never a hung read.
-				if (!stream->closed()) { stream->fail(asio::error::operation_aborted); }
 				// From here the handler and the request/writer it references end only by
 				// completing, never by a frame being destroyed under them. A cancellation that
 				// would have reached this coroutine arrives as Request::cancel through `tracked`.
 				co_await asio::this_coro::reset_cancellation_state(asio::disable_cancellation());
-				if (fed == Fed::Failed) { request.cancel(reactor->stopping() ? CancelReason::Shutdown : CancelReason::Disconnect); }
-				else if (fed == Fed::Complete && !handler_done->done) {
-					input->watch([&request] { request.cancel(CancelReason::Disconnect); });
-				}
+				// Nothing between here and the wait may leave this frame: whatever throws is held
+				// and rethrown once the handler has completed.
+				try {
+					// A feed that stopped early leaves the reader a failed body, never a hung read.
+					if (!stream->closed()) { stream->fail(asio::error::operation_aborted); }
+					if (fed == Fed::Failed) { request.cancel(reactor->stopping() ? CancelReason::Shutdown : CancelReason::Disconnect); }
+					else if (fed == Fed::Complete && !handler_done->done) {
+						input->watch([&request] { request.cancel(CancelReason::Disconnect); });
+					}
+				} catch (...) { if (!feed_error) { feed_error = std::current_exception(); } }
 				co_await handler_done->wait();
 				input->unwatch();
 				if (feed_error) { std::rethrow_exception(feed_error); }   // after the handler has completed

@@ -123,14 +123,15 @@ struct Request {
 	// is thread-safe: both run on the connection's loop.
 	bool cancelled() const noexcept { return cancel_reason_ != CancelReason::None; }
 	CancelReason cancel_reason() const noexcept { return cancel_reason_; }
+	// A callback that throws is dropped: the transport's frames must end by completing.
 	void on_cancel(std::function<void(CancelReason)> callback) {
 		cancel_callback_ = std::move(callback);
-		if (cancelled() && cancel_callback_) { cancel_callback_(cancel_reason_); }
+		if (cancelled()) { run_cancel_callback(); }
 	}
 	void cancel(CancelReason reason) {
 		if (cancelled()) { return; }
 		cancel_reason_ = reason;
-		if (cancel_callback_) { cancel_callback_(reason); }
+		run_cancel_callback();
 	}
 
 	// Typed per-request application state (see RequestExtension). Created once at
@@ -167,6 +168,10 @@ struct Request {
 	}
 
 private:
+	void run_cancel_callback() noexcept {
+		if (!cancel_callback_) { return; }
+		try { cancel_callback_(cancel_reason_); } catch (...) {}
+	}
 	CancelReason cancel_reason_ = CancelReason::None;
 	std::function<void(CancelReason)> cancel_callback_;
 };

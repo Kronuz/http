@@ -87,6 +87,8 @@ public:
 	bool body_limit_exceeded() const { return limit_exceeded_; }
 
 	// Install the headers-complete hook (once per connection; it runs for every request).
+	// It may throw RequestRejected: the exception unwinds through http_parser's C frames, so
+	// this needs a C build with unwind tables.
 	void set_headers_callback(HeadersCallback cb) { headers_cb_ = std::move(cb); }
 
 	// Feed `len` received bytes. Returns the number consumed; a short count means a
