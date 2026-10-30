@@ -30,8 +30,9 @@
 - Next: the code review; then the lead merges in order reactor, http, http-log, prism and moves their pins to `main`.
 - Blocked on: nothing.
 - Findings folded in: none yet (not reviewed). Self-found and fixed: a request tracked after the force walk was never forced (reactor d442d87);
-  `std::promise` on the caller's stack in `abort_all` (linux-asan-ubsan CI, reactor f6abdd6).
-- Heads: reactor f6abdd6, http ead53b4, http-log fa1e87a, prism (this ledger's commit message names it).
+  `abort_all` waited on heap state (`std::promise`, then a `shared_ptr`) while the accept-pressure test stops the server out of descriptors, where clang's UBSan vptr check cannot look up a new type (linux-asan-ubsan CI); the wait now uses reactor-owned members (reactor 7dcf73c).
+- Heads: reactor 7dcf73c, http 0553e53 (plus this ledger's docs-only commit), http-log 86661b3, prism 51e21bf.
+- CI at those heads: reactor 8/8 jobs green (including linux-asan-ubsan and linux-tsan); http, http-log and prism: every job green.
 - Last verified: macOS x86_64, Apple clang Debug: reactor 9/9, http 11/11, http-log 2/2; Homebrew LLVM 23 ASan+UBSan and TSan as above; libFuzzer 181 s,
   1.9M runs, no crash; TSan reactor_test 518 runs, no hang (one abort in the older `free_port` test: bind on a port another process took).
 - Known cost for the lead to measure (not measured here): after a keep-alive request the one-byte watch read has consumed the first byte of
@@ -68,7 +69,7 @@ cancelled coroutine throws, so the code was redundant and was removed.
 
 Revert checks: each new test is new, so "fails without the fix" is the mutant above that undoes that fix.
 
-## What X3 must change (Xapiand `d71cf7a97` with pins reactor f6abdd6, http ead53b4, http-log fa1e87a)
+## What X3 must change (Xapiand `d71cf7a97` with pins reactor 7dcf73c, http 0553e53, http-log 86661b3)
 
 CMake configures. Compiling `src/server/search_service.o`, `search_views.o` and `manager.o` stops at:
 
