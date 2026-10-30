@@ -63,7 +63,7 @@ endif()
 # REACTOR_INCLUDE_DIR to use a local checkout instead of fetching (dev iteration).
 set(REACTOR_INCLUDE_DIR "" CACHE PATH "use an existing Kronuz/reactor dir instead of fetching")
 if(REACTOR_INCLUDE_DIR STREQUAL "")
-	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG f6abdd6d919ad03fa72bc09dd2f442f407756715)
+	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG 7dcf73cc5c0241e05945b3261901eca17a4f6ced)
 	FetchContent_MakeAvailable(reactor)
 	set(REACTOR_INCLUDE_DIR "${reactor_SOURCE_DIR}")
 endif()
