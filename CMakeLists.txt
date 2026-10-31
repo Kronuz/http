@@ -39,7 +39,7 @@ FetchContent_MakeAvailable(http_parser)
 # Response compression (http_compression.h) negotiates Accept-Encoding and applies a
 # coding. The codecs are Kronuz/compressors (has compiled units + lz4/zstd/zlib
 # wiring). Previously reached transitively via Kronuz/server; now a direct dependency.
-FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG ed590c87201afd270afbfbb2d58d5d467c6d23b6)
+FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 8f57675a9630590419ccd1f748720eafb542165f)
 FetchContent_MakeAvailable(compressors)
 
 # --- standalone Asio (the runtime + transport substrate) ---
