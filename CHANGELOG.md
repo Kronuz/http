@@ -2,10 +2,10 @@
 
 Newest first. Dates are 2026.
 
-## 2026-11-01: trailers and CONNECT
+## 2026-11-01: trailers, CONNECT, and http-parser's hardening
 
 A security review of http-parser's hardening against request smuggling found two ways to
-smuggle through this library whatever the parser does.
+smuggle through this library whatever the parser does, and one the parser now closes.
 
 ### Security
 
@@ -19,6 +19,16 @@ smuggle through this library whatever the parser does.
   `Content-Length` were served as the next request. A `CONNECT` is now answered and the
   connection closed, since the service opens no tunnel and a `CONNECT` has no content
   (RFC 9110 section 9.3.6).
+- **http-parser pinned to its hardened head (ef12ec6).** It rejects what request smuggling relies on
+  (bare LF, obs-fold, control bytes in values, `Transfer-Encoding` other than `chunked`,
+  malformed `Content-Length` and chunk lines), and closes the connection after an HTTP/1.0
+  request with `Transfer-Encoding` (RFC 9112 section 6.1): such a request with
+  `Connection: keep-alive` had the request behind it served.
+
+### Fixed
+
+- The docs and the CMake comment said http-parser accepts arbitrary request methods. Its
+  method table is fixed, with Xapiand's verbs in it; they say so now.
 
 ## 2026-11-01: the README follows the family standard
 

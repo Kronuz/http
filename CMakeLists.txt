@@ -28,11 +28,10 @@ FetchContent_Declare(radix_router GIT_REPOSITORY https://github.com/Kronuz/radix
 FetchContent_MakeAvailable(radix_router)
 
 # --- http-parser (the HTTP parser) ---
-# The Joyent http_parser fork, chosen over stricter parsers (e.g. llhttp) because
-# it accepts arbitrary request methods: Xapiand's REST API uses custom verbs
-# (COUNT, INFO, DUMP, RESTORE, ...) that a method-validating parser rejects. The
-# seam stays parser-agnostic, so this is contained inside the connection.
-FetchContent_Declare(http_parser GIT_REPOSITORY https://github.com/Kronuz/http-parser.git GIT_TAG 476ba600c52c66c67c620f7b2f25aef57f2a58f8)
+# The Joyent http_parser fork: its fixed method table holds Xapiand's REST verbs
+# (COUNT, INFO, DUMP, RESTORE, ...), which stock llhttp rejects. The seam stays
+# parser-agnostic, so this is contained inside the connection.
+FetchContent_Declare(http_parser GIT_REPOSITORY https://github.com/Kronuz/http-parser.git GIT_TAG ef12ec6b75ef29f024698a1fced200ae4c87afdc)
 FetchContent_MakeAvailable(http_parser)
 
 # --- compressors (the deflate/gzip + zstd codecs) ---

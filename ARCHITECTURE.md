@@ -43,10 +43,9 @@ application code:
 
 - **Parser (http-parser).** Parsing lives only inside the connection and just
   *produces* a `Request`. The parser is the Joyent `http_parser` fork
-  ([Kronuz/http-parser](https://github.com/Kronuz/http-parser)), chosen because it
-  accepts arbitrary request methods — Xapiand's REST API uses custom verbs
-  (`COUNT`, `INFO`, `DUMP`, `RESTORE`, …) that a stricter parser like llhttp
-  rejects. Swapping it for another parser is contained here; the handler and the
+  ([Kronuz/http-parser](https://github.com/Kronuz/http-parser)), whose fixed method
+  table holds Xapiand's REST verbs (`COUNT`, `INFO`, `DUMP`, `RESTORE`, …) that stock
+  llhttp rejects. Swapping it for another parser is contained here; the handler and the
   `Request`/`ResponseWriter` are parser-agnostic.
 - **Concurrency (coroutines on the loop).** `handle` is a coroutine awaited on the connection's loop. A handler that must wait `co_await`s and the loop serves other connections; nothing runs off the loop, so there is no worker pool to size. Excess requests receive 503 from the reactor's admission gate. The scoped writer and request remain valid until the coroutine completes, and a request's frame is never destroyed early. Delayed work transfers exclusive reply authority through `ResponseWriter::defer()` and retains the returned move-only `DeferredReply`, never the writer or request. The connection awaits one reply before handling the next keep-alive request.
 - **Request body (buffered or streamed).** A handler opts into streaming per

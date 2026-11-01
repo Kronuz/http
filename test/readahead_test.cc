@@ -15,7 +15,8 @@
 //       and the request it held is released
 //   [S] request smuggling: ambiguous framing and a request hidden in a body are never executed
 //       as a request, as the first request and as one that arrives inside the read-ahead; trailer
-//       fields never become headers; nothing after a CONNECT is read as a request
+//       fields never become headers; nothing after a CONNECT, or after an HTTP/1.0 message with
+//       Transfer-Encoding, is read as a request
 //   [W] the reply's inactivity slices: every byte arrives, at every alignment of head and body
 //       against the 64 KiB slice
 #include <arpa/inet.h>
@@ -634,7 +635,8 @@ int main() {
 	}
 	// [S] CONNECT opens no tunnel, and has no content (RFC 9110 section 9.3.6): it is answered,
 	// the connection closes, and nothing after its header section runs as a request, whatever
-	// framing it named.
+	// framing it named. And after an HTTP/1.0 message with Transfer-Encoding the connection
+	// closes too (RFC 9112 section 6.1).
 	{
 		Server s; s.start();
 		const std::string hidden = get("/smuggled");
@@ -642,6 +644,8 @@ int main() {
 			{"CONNECT with Content-Length", "CONNECT x:443 HTTP/1.1\r\nHost: x:443\r\nContent-Length: " + std::to_string(hidden.size()) + "\r\n\r\n" + hidden},
 			{"CONNECT with Transfer-Encoding", "CONNECT x:443 HTTP/1.1\r\nHost: x:443\r\nTransfer-Encoding: chunked\r\n\r\n" + hidden},
 			{"CONNECT", "CONNECT x:443 HTTP/1.1\r\nHost: x:443\r\n\r\n" + hidden},
+			{"HTTP/1.0 with Transfer-Encoding and keep-alive",
+				"POST /echo HTTP/1.0\r\nHost: x\r\nConnection: keep-alive\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n" + hidden},
 		};
 		for (const auto& [what, request] : cases) {
 			Conn k(s.port);

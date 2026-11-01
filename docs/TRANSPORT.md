@@ -15,7 +15,7 @@ Settlement runs once, outside the exchange lock, with Written, TimedOut, Disconn
 
 The common HTTP parser and response path operate on the plaintext stream. The connection's input keeps one owned read pending while a handler runs or a deferred response waits; it reads up to 4096 bytes ahead, and the bytes it took go to the next read, first and in order. Fatal read errors notify the current deferred exchange. The original four-argument TCP service API remains available without an OpenSSL dependency.
 
-The trailer section of a chunked request goes to `Request::trailers` and never to `Request::headers`, so a trailer cannot stand in for a header a front end set or removed. A `CONNECT` request is answered and the connection closes: the service opens no tunnel, a `CONNECT` has no content (RFC 9110 section 9.3.6), and nothing after its header section is read as a request.
+The parser is http-parser in its strict default (it rejects what request smuggling relies on, and the connection is dropped without a response). The trailer section of a chunked request goes to `Request::trailers` and never to `Request::headers`, so a trailer cannot stand in for a header a front end set or removed. A `CONNECT` request is answered and the connection closes: the service opens no tunnel, a `CONNECT` has no content (RFC 9110 section 9.3.6), and nothing after its header section is read as a request. The connection also closes after an HTTP/1.0 request with `Transfer-Encoding` (RFC 9112 section 6.1).
 
 ## Request lifetime, admission and shutdown
 
