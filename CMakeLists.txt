@@ -31,7 +31,7 @@ FetchContent_MakeAvailable(radix_router)
 # The Joyent http_parser fork: its fixed method table holds Xapiand's REST verbs
 # (COUNT, INFO, DUMP, RESTORE, ...), which stock llhttp rejects. The seam stays
 # parser-agnostic, so this is contained inside the connection.
-FetchContent_Declare(http_parser GIT_REPOSITORY https://github.com/Kronuz/http-parser.git GIT_TAG ef12ec6b75ef29f024698a1fced200ae4c87afdc)
+FetchContent_Declare(http_parser GIT_REPOSITORY https://github.com/Kronuz/http-parser.git GIT_TAG c7023b0042c32a1c102c09c11f2f28b2eb2e4285)
 FetchContent_MakeAvailable(http_parser)
 
 # --- compressors (the deflate/gzip + zstd codecs) ---
