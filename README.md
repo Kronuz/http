@@ -98,11 +98,11 @@ curl localhost:8080/kv/greeting
 ## ⚡ Performance
 
 A fixed 14-byte keep-alive reply through `HttpAsioService` on one reactor, driven by
-`wrk -t1 -c1` and `wrk -t2 -c64` for 4 s (`examples/bench_http PORT 1 [timeouts]`;
-`timeouts` sets the request, idle, header and inactivity timeouts of a production service).
+`wrk -t1 -c1` and `wrk -t2 -c64` for 4 s (`examples/bench_http PORT 1 [--timeouts]`;
+`--timeouts` sets the request, idle, header and inactivity timeouts of a production service).
 A minimal Asio server answering the same bytes is the reference.
 
-| machine | 1 connection | 64 connections | with `timeouts`, 1 / 64 | minimal Asio, 1 / 64 |
+| machine | 1 connection | 64 connections | with `--timeouts`, 1 / 64 | minimal Asio, 1 / 64 |
 |---|---|---|---|---|
 | Apple M4 Pro, arm64 | 81 us | 42.4k req/s | 98 us / 42.2k req/s | 64 us / 42.1k req/s |
 | Intel i9-9980HK, x86_64 | 55 us | 85.4k req/s | 87 us / 48.4k req/s | 33 us / 130.6k req/s |
@@ -121,6 +121,8 @@ small request is a few percent of this; a larger one is dominated by the handler
   request deadlines, and early rejections.
 - [docs/OWNED_STREAMING.md](docs/OWNED_STREAMING.md): owned response streaming.
 - [docs/AUDIT.md](docs/AUDIT.md): transport audit findings, measured before and after.
+- [docs/perf/timeouts-cpu.md](docs/perf/timeouts-cpu.md): per-request CPU and latency against a
+  minimal Asio server, and how to reproduce it (`bench/`).
 - [CHANGELOG.md](CHANGELOG.md): behavior and performance changes, newest first.
 - [AGENTS.md](AGENTS.md): file map, invariants, and dependencies.
 - [prism](https://github.com/Kronuz/prism): a full app server built on this library.

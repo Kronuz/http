@@ -5,11 +5,8 @@
 - Design: Xapiand `docs/design/phase7c.md` D2, D3, D12, D16 and section 5's L3; reviews: Xapiand
   `docs/reviews/phase7c-design.md` R3, R6, C14, C17; owner ruling Q3 (strata
   `docs/status/xapiand-on-strata.md`): the offload path is removed from http entirely.
-- Branches / worktrees (all `phase7c/l3-http` unless noted):
-  - reactor: `~/code/Kronuz/reactor-wt/l3-http`
-  - http: `~/code/Kronuz/http-wt/l3-http`
-  - http-log: `~/code/Kronuz/http-log-wt/l3-http`
-  - prism: `phase7c/l3-prism` at `~/code/Kronuz/prism-wt/l3-prism`
+- Branches (all `phase7c/l3-http` unless noted): reactor, http and http-log, and prism as
+  `phase7c/l3-prism`.
 - State: review conditions fixed (L3-B1, L3-B2, L3-N1); waiting for the lead to rerun the review probes and land
 - Done criteria: the lead's list was the task message; they are the checkboxes below.
   - [x] Offload removed: worker pool, `should_offload`, body hand-off, `ChannelBodyReader`, `Reactor::pool`
@@ -101,7 +98,7 @@ Other consumers of reactor or http still on their own pins (not touched): Detent
 | Finding | Fix | Test | Revert / mutant evidence |
 |---|---|---|---|
 | L3-B1 | `feed()` maps EOF (and a zero-byte read) before the body is complete to `connection_reset`, and cancels the request before failing the stream, so `cancelled()` is true when the reader's read returns | coroutine_test [H]: Content-Length FIN, RST, half-close and chunked cut; the reader's end is not `eof` and `cancelled()` is true; a complete body still ends with `eof` | no eof mapping: [H] fails x3 (FIN, half-close, chunked); cancel left to the later call: [H] fails x4 |
-| L3-B2 | `Request::cancel` and a late `on_cancel` drop a throwing callback; the streamed path holds any throw between the `co_spawn` and `handler_done->wait()` in one `try` and rethrows after the wait | coroutine_test [I]: streamed (the request stays admitted while the handler runs, which the unwinding connection frame released early), buffered (survives), late registration | callback catch removed: the process terminates in [I]; guard removed with a throw injected after the cancel: ASan heap-use-after-free in the handler, passes with the guard (injection harness in `.scratch/inject.sh`, not committed) |
+| L3-B2 | `Request::cancel` and a late `on_cancel` drop a throwing callback; the streamed path holds any throw between the `co_spawn` and `handler_done->wait()` in one `try` and rethrows after the wait | coroutine_test [I]: streamed (the request stays admitted while the handler runs, which the unwinding connection frame released early), buffered (survives), late registration | callback catch removed: the process terminates in [I]; guard removed with a throw injected after the cancel: ASan heap-use-after-free in the handler, passes with the guard (injection harness not committed) |
 | L3-N1 (reactor `76c32b4`) | per-connection accept errors (ECONNABORTED, ECONNRESET, EPROTO, the network errors, EINVAL on macOS) skip the connection; 64 in a row back off; a real listener error ends the loop and is logged on stderr and through `L_EXC` | reactor_test [N]: 1500 reset pending connections against both accept strategies, then the listener serves | per-connection branch removed: [N] fails x2 |
 | L3-N5 (partly) | http `CMakeLists.txt` header, http-log `AGENTS.md` (`body_stream`), reactor `test/test.cc` header | | |
 | L3-N11 | note on `set_headers_callback` | | |

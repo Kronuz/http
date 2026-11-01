@@ -6,8 +6,9 @@ Newest first. Dates are 2026.
 
 A keep-alive request cost 91 us at one connection against 60 us for a minimal Asio server, and
 with the production timeouts on, 45 us of CPU per request and 27.5k requests per second at 64
-connections against 24 us and 43.5k. The survey (`campaign/survey/J.md`, cluster J) traced it to
-the connection's disconnect watch and to the timer and the split write around it.
+connections against 24 us and 43.5k. A profile of the server at one connection traced it to
+the connection's disconnect watch and to the timer and the split write around it
+(`docs/perf/timeouts-cpu.md`).
 
 ### Changed
 
@@ -33,14 +34,18 @@ the connection's disconnect watch and to the timer and the split write around it
   benchmarks; its differential test holds every callback, its bytes and every field of
   `struct http_parser` to the previous parser, so nothing the transport sees changes. Its
   CHANGELOG has the numbers.
-- `examples/bench_http` takes a third argument, `timeouts`, that turns on the request, idle,
+- `examples/bench_http` takes a third argument, `--timeouts`, that turns on the request, idle,
   header and inactivity timeouts of a production service.
+- `bench/` holds the server comparison behind `docs/perf/timeouts-cpu.md`: `http_server_compare`
+  (`-DHTTP_BUILD_BENCH=ON`) serves the same bytes from a minimal Asio server, `reactor::TcpServer`
+  and `http`, `bench/run.sh` and `bench/compare.sh` drive it with `wrk`, and `bench/summarize.py`
+  takes medians.
 
 ### Performance
 
-`server_min` (campaign/bench/J2) answers a 14-byte keep-alive reply through `HttpAsioService`
+`http_server_compare` (`bench/`) answers a 14-byte keep-alive reply through `HttpAsioService`
 with one reactor, driven by `wrk` (4 s runs); "off" has no timeouts and "on" has the production
-ones (`bench_http PORT 1 timeouts`). Latency is in us, req/s is at 64 connections, CPU is the
+ones (`bench_http PORT 1 --timeouts`). Latency is in us, req/s is at 64 connections, CPU is the
 server's user plus system time per request in us. Medians of three rounds, the order of the
 variants rotating by round. "Before" is main with the http-parser it pinned (178f873), "parser"
 is main with http-parser 476ba60, "after" is this change with 476ba60, and Asio is a minimal Asio

@@ -5,7 +5,7 @@
 Reviewer: independent code reviewer. Scope: reactor `phase7c/l3-http` (4 commits), http (8), http-log (the
 `AccessLog` coroutine commit), prism `phase7c/l3-prism`. Design: Xapiand `docs/design/phase7c.md` D2, D3, D16;
 `docs/reviews/phase7c-design.md` R3, R6, C14, C17. I did not redo the developer's proof (`coroutine_test`, the 23
-mutants, CI). Everything below comes from probes in `.scratch/review-l3/` of this worktree.
+mutants, CI). Everything below comes from probes that live in the review worktree, outside this repository.
 
 ## Verdict: APPROVE WITH CONDITIONS
 
@@ -45,7 +45,7 @@ The reader cannot disambiguate: the probe records `request.cancelled()` at the m
 commit a truncated stream and answer 200 to nobody. The old `BodyReader::read` was also ambiguous, but the point of
 the new typed errors is to remove that ambiguity, and the docs promise it.
 
-Probe: `.scratch/review-l3/probe_truncated.cc` (ASan and TSan, same result). Four cases against a `/t` streamed route:
+Probe: `probe_truncated.cc` (ASan and TSan, same result). Four cases against a `/t` streamed route:
 
 ```
 Content-Length 100000, 1000 sent, close()      -> End of file  [EOF = looks like a clean end]
@@ -100,7 +100,7 @@ frame under the handler. Test: `probe_throwcb` in both modes must pass under ASa
 
 ## What held (probes run, all clean)
 
-All under ASan+UBSan, and under TSan where noted (`build.sh NAME asan|tsan`; sources in `.scratch/review-l3/`).
+All under ASan+UBSan, and under TSan where noted (`build.sh NAME asan|tsan`; the sources are in the review worktree).
 
 1. Risk 2, pipelining and the watch byte. `probe_pipeline`: 120 random rounds, 2 to 6 requests each (GET with
    suspended handler, buffered POST, streamed POST up to 200 KB, chunked buffered, chunked streamed), split at random
@@ -186,7 +186,7 @@ All under ASan+UBSan, and under TSan where noted (`build.sh NAME asan|tsan`; sou
   but it relies on unwinding through C frames; a one-line note in `http_request_parser.h` would keep a future
   `-fno-exceptions`-style C build from breaking it.
 
-## Probes (all in `.scratch/review-l3/` of the http worktree, kept)
+## Probes (all in the http review worktree, kept outside this repository)
 
 | File | Checks |
 |---|---|

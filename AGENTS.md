@@ -43,7 +43,11 @@ examples/kv_store.cc  A complete REST app: buffered routes, a streamed response 
                       streamed request-body route (POST /bulk).
 examples/bench_asio.cc Raw-Asio throughput ceiling (no framework) — the reference bench_http
                       is measured against.
-examples/bench_http.cc Framework throughput: the same fixed response through HttpAsioService.
+examples/bench_http.cc Framework throughput: the same fixed response through HttpAsioService
+                      (`--timeouts` turns on the production timeouts).
+bench/server_compare.cc http_server_compare (-DHTTP_BUILD_BENCH=ON): a minimal Asio server,
+                      reactor::TcpServer and http answering the same bytes. bench/run.sh and
+                      bench/compare.sh drive it with wrk; bench/summarize.py takes medians.
 test/test.cc          ctest: method dispatch, 404 vs 405, param capture (transport-agnostic).
 test/deferred_test.cc, deferred_asio_test.cc, owned_stream_test.cc,
 owned_stream_asio_test.cc
@@ -61,6 +65,9 @@ docs/status/phase7c-l3.md  The L3 ledger.
 docs/TRANSPORT.md     Deferred replies, TLS, connection and request limits, rejections.
 docs/OWNED_STREAMING.md  Owned response streaming: framing, backpressure, footprint.
 docs/AUDIT.md         Transport audit findings with their before/after measurements.
+docs/perf/timeouts-cpu.md  Per-request CPU and latency against a minimal Asio server, with the
+                      timeouts off and on, what each part of the connection input costs, and
+                      how to reproduce it.
 test/asio_test.cc     ctest "asio": the transport end-to-end over real TCP — suspended
                       handlers, 503 backpressure, N reactors (both bind modes), keep-alive,
                       compression, streamed request bodies, error mapping.
