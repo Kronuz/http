@@ -7,10 +7,10 @@
  * The handler runs on the reactor, which is what a cheap handler
  * wants -- max throughput, the loop never leaves the core.
  *
- *   ./bench_http <port> <reactors> [timeouts]
+ *   ./bench_http <port> <reactors> [--timeouts]
  *   wrk -t4 -c100 -d10s http://127.0.0.1:<port>/
  *
- * `timeouts` sets the request, idle, header and inactivity timeouts a production service
+ * `--timeouts` sets the request, idle, header and inactivity timeouts a production service
  * turns on (30 s, 60 s, 10 s, 30 s), which put a deadline on every read and write.
  */
 
@@ -52,7 +52,7 @@ int main(int argc, char** argv) {
 	// so each reactor binds its own acceptor (best on Linux); the portable shared
 	// acceptor kicks in automatically where SO_REUSEPORT is unavailable.
 	http::HttpAsioService service(app, reactors, /*in_flight_limit=*/0);
-	if (argc > 3 && std::string(argv[3]) == "timeouts") {
+	if (argc > 3 && (std::string(argv[3]) == "--timeouts" || std::string(argv[3]) == "timeouts")) {
 		service.set_request_timeout(std::chrono::seconds(30));
 		service.set_idle_timeout(std::chrono::seconds(60));
 		service.set_header_timeout(std::chrono::seconds(10));

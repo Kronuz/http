@@ -91,6 +91,15 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	add_executable(bench_http examples/bench_http.cc)
 	target_link_libraries(bench_http PRIVATE http)
 
+	# The server comparison behind docs/perf/timeouts-cpu.md: a minimal Asio server, reactor::TcpServer and http
+	# answering the same bytes, driven by wrk (bench/compare.sh). The Asio comparator is the library's own
+	# transport dependency, so nothing extra is fetched.
+	option(HTTP_BUILD_BENCH "Build the http_server_compare benchmark server" OFF)
+	if(HTTP_BUILD_BENCH)
+		add_executable(http_server_compare bench/server_compare.cc)
+		target_link_libraries(http_server_compare PRIVATE http)
+	endif()
+
 	enable_testing()
 	add_executable(http_owned_stream_test test/owned_stream_test.cc)
 	target_include_directories(http_owned_stream_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")

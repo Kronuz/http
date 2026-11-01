@@ -12,3 +12,5 @@ concurrency:
 jobs:
   ci:
     uses: Kronuz/cpp-libraries/.github/workflows/cmake.yml@main
+    with:
+      cmake_args: "-DHTTP_BUILD_BENCH=ON"   # compile the bench server on every platform
