@@ -2,6 +2,20 @@
 
 Newest first. Dates are 2026.
 
+## 2026-11-01: the README follows the family standard
+
+### Changed
+
+- The README states the description as its first sentence, puts Quick start before
+  Installation, pins FetchContent to a commit, lists the limits as "Not for" bullets, and
+  takes its Performance table from `docs/perf/timeouts-cpu.md` (the M4 Pro row held older
+  numbers). It names CMake 3.16, the version `CMakeLists.txt` requires, where it said 3.14.
+
+### Removed
+
+- The README diagram (`docs/http.d2`, `docs/http.svg`). It drew a worker pool and a
+  `should_offload` hook that the library does not have; `ARCHITECTURE.md` maps the layers.
+
 ## 2026-10-31: the disconnect watch reads ahead
 
 A keep-alive request cost 91 us at one connection against 60 us for a minimal Asio server, and
@@ -99,3 +113,13 @@ client saturates first at 64 connections with the timeouts off, so that row does
   inactivity timeout, a slow reader that keeps moving receives the whole reply.
 - ASan with UBSan and TSan, on Linux CI and on an M1 Pro, report nothing on `readahead_test`,
   `coroutine_test` and `timeouts_test`.
+
+## 2026-10-30 and earlier: `response_ended()`
+
+- Buffered response decorators can tell `response_started()` from `response_ended()`:
+  setting a status or writing bytes does not complete a response, and Asio reports
+  completion only after `end()` succeeds. The query defaults to the started approximation
+  for existing custom `BufferedResponse` writers; override it for accurate middleware error
+  mapping. The change is source compatible but extends a virtual interface, so rebuild all
+  consumers together instead of mixing header revisions. It does not indicate confirmed
+  network delivery.

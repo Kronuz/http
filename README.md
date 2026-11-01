@@ -7,48 +7,30 @@ Part of [Kronuz C++ Libraries](https://github.com/Kronuz/cpp-libraries), a colle
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)
 ![Header-only](https://img.shields.io/badge/header--only-yes-green.svg)
 
-An HTTP/1.1 application framework for C++20 on standalone Asio coroutines. Your app
-implements one coroutine, `handle(Request&, ResponseWriter&)`; the framework handles
-sockets, parsing, keep-alive, negotiation, compression, and backpressure. Handlers
-run on the connection's loop and suspend instead of block.
-
-Buffered response decorators can distinguish `response_started()` from `response_ended()`: setting a status or writing bytes does not complete a response; Asio reports completion only after `end()` succeeds. The new query defaults to the historical started approximation for existing custom `BufferedResponse` writers. Override it for accurate middleware error mapping. This is source compatible but extends a virtual interface: rebuild all consumers together rather than mixing header revisions. It does not indicate confirmed network delivery.
-
-![http: connections on per-core reactors parse into a Request, the handler writes a response](docs/http.svg)
+Header-only HTTP/1.1 framework for C++20 on Asio coroutines: write one handler, get parsing, routing and streaming.
+The application implements one coroutine, `handle(Request&, ResponseWriter&)`, and never sees
+the parser, the socket or the event loop; each reactor's connection coroutine parses bytes into
+a `Request` and frames what the handler writes. Reach for it when a C++ service needs an
+HTTP/1.1 front: a REST API, a search or storage server, an admin endpoint.
 
 ## ✨ Highlights
 
-- 🔌 **One seam**: the handler never sees the parser, the socket, or the event loop.
-- 🧵 **Shared-nothing reactors**: one Asio `io_context` per core and nothing off it.
-  A handler that must wait `co_await`s, and the loop serves other connections. Past
-  the per-reactor in-flight limit, requests get `503` with `Retry-After`.
-- ✂️ **Cancellation**: a client hang-up or a shutdown cancels a running request
+- **One seam.** The handler takes a `Request` and writes through a `ResponseWriter`; the
+  parser, the socket and the loop stay behind it.
+- **Shared-nothing reactors.** One Asio `io_context` per thread, nothing off the loop: a
+  handler that waits `co_await`s and the loop serves other connections. Past the
+  per-reactor in-flight limit, a request gets `503` with `Retry-After`.
+- **Cancellation.** A client hang-up or a shutdown cancels the running request
   (`Request::on_cancel`); reads stop at their next checkpoint, writes finish.
-- 🌊 **Bounded memory for any body**: read request bodies with `co_await` from a
-  `BodyStream`, or push them to a `BodySink`, chunk by chunk; a buffered body is capped
-  (`413`). Responses stream with backpressure.
-- 🤝 **Batteries**: a radix-tree `Router`, content negotiation, zstd/gzip compression,
-  ETags with `304`, and byte ranges with `206`.
-- 🔒 **Optional TLS**, connection caps, and per-request deadlines; OpenSSL is linked
-  only when you use the TLS adapter.
-- 🗣️ **Custom methods**: built on [http-parser](https://github.com/Kronuz/http-parser),
-  so verbs like `COUNT` or `RESTORE` parse.
-
-## 📦 Installation
-
-Requires a C++20 compiler and CMake 3.14 or newer. Asio and the Kronuz dependencies
-are fetched at configure time. CI builds it on Linux (x86_64, arm64), macOS (arm64,
-x86_64), and FreeBSD, plus ASan, UBSan, and TSan builds.
-
-```cmake
-include(FetchContent)
-FetchContent_Declare(http
-  GIT_REPOSITORY https://github.com/Kronuz/http.git
-  GIT_TAG        main)
-FetchContent_MakeAvailable(http)
-
-target_link_libraries(my_app PRIVATE http::http)
-```
+- **Bounded memory for any body.** Read a request body chunk by chunk from a `BodyStream`
+  or push it to a `BodySink`; a buffered body has a cap (`413`). Responses stream with
+  backpressure.
+- **Batteries.** A radix-tree `Router`, content negotiation, and opt-in zstd and gzip
+  compression, ETags with `304`, and byte ranges with `206`.
+- **Optional TLS and limits.** `http_asio_tls.h` adds TLS over OpenSSL, linked only when you
+  use it; connection caps, timeouts and per-request deadlines are settings.
+- **Custom methods.** [http-parser](https://github.com/Kronuz/http-parser) accepts any verb,
+  so `COUNT` or `RESTORE` route like `GET`.
 
 ## 🚀 Quick start
 
@@ -57,6 +39,7 @@ target_link_libraries(my_app PRIVATE http::http)
 #include "http_router.h"
 
 #include <chrono>
+#include <string>
 #include <thread>
 
 struct App : http::HttpHandler {
@@ -67,77 +50,129 @@ struct App : http::HttpHandler {
 			co_return;
 		});
 	}
-	asio::awaitable<void> handle(http::Request& req, http::ResponseWriter& resp) override { co_await router.handle(req, resp); }
+	asio::awaitable<void> handle(http::Request& req, http::ResponseWriter& resp) override {
+		co_await router.handle(req, resp);
+	}
 };
 
 int main() {
 	App app;
 	http::HttpAsioService service(app, /*reactors=*/4, /*in_flight_limit=*/256);
-	service.start(8080);   // curl localhost:8080/hello/world
+	service.start(8080);  // curl localhost:8080/hello/world prints "hello, world"
 	std::this_thread::sleep_for(std::chrono::minutes(1));
 	service.stop();
 }
 ```
 
-[`examples/kv_store.cc`](examples/kv_store.cc) is a complete REST key/value app,
-including a streamed response and a request body pushed to a sink:
+[`examples/kv_store.cc`](examples/kv_store.cc) is a complete REST key/value app, with a
+streamed response and a request body pushed to a sink:
 
 ```sh
-cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
 ./build/kv_store 8080 &
 curl -XPUT localhost:8080/kv/greeting -d 'hello'
 curl localhost:8080/kv/greeting
 ```
 
+## 📦 Installation
+
+Requires a C++20 compiler and CMake 3.16 or newer; it fetches standalone Asio 1.36.0,
+[http-parser](https://github.com/Kronuz/http-parser),
+[radix-router](https://github.com/Kronuz/radix-router),
+[compressors](https://github.com/Kronuz/compressors) and
+[reactor](https://github.com/Kronuz/reactor) at pinned commits. compressors needs zlib and
+uses the system's LZ4 and zstd when it finds them, fetching them otherwise; TLS needs
+OpenSSL 3. CI builds it on Linux (x86_64, arm64), macOS (arm64, x86_64), and FreeBSD,
+plus ASan, UBSan, and TSan builds.
+
+```cmake
+include(FetchContent)
+FetchContent_Declare(http
+  GIT_REPOSITORY https://github.com/Kronuz/http.git
+  GIT_TAG        c9777e49f04ca493004728ef932f23fec43b278e)  # or main, to track the tip
+FetchContent_MakeAvailable(http)
+
+target_link_libraries(my_app PRIVATE http::http)
+```
+
+```cpp
+#include "http_asio.h"
+```
+
 ## 🎯 When to use it
 
-- ✅ A C++ service that needs a solid HTTP/1.1 front: REST APIs, search or storage
-  servers, admin endpoints.
-- ❌ HTTP/2, HTTP/3, or WebSockets: not implemented.
+Use it for a C++ service that answers HTTP/1.1 and wants coroutine handlers, streamed bodies
+and per-core reactors without writing the connection layer.
+
+Not for:
+
+- **HTTP/2, HTTP/3 or WebSockets.** None is implemented.
+- **Blocking handlers.** A handler runs on its connection's loop, so a blocking call stalls
+  every connection of that reactor; `co_await` instead, or hand the work to your own pool
+  through `ResponseWriter::defer()`.
+- **HTTP clients.** The library is a server.
 
 ## ⚡ Performance
 
-A fixed 14-byte keep-alive reply through `HttpAsioService` on one reactor, driven by
-`wrk -t1 -c1` and `wrk -t2 -c64` for 4 s (`examples/bench_http PORT 1 [--timeouts]`;
-`--timeouts` sets the request, idle, header and inactivity timeouts of a production service).
-A minimal Asio server answering the same bytes is the reference.
+A 14-byte keep-alive reply on one reactor, driven by `wrk` for 4 s at one connection
+(`-t1 -c1`) and at 64 (`-t2 -c64`). "Timeouts on" sets the request, idle, header and
+inactivity timeouts of a production service; the minimal server is plain Asio 1.36.0
+answering the same bytes. Latency is the `wrk` average and CPU is the server's user plus
+system time per request, both in microseconds; medians of three rounds, Apple clang 17
+with `-O3 -DNDEBUG`:
 
-| machine | 1 connection | 64 connections | with `--timeouts`, 1 / 64 | minimal Asio, 1 / 64 |
-|---|---|---|---|---|
-| Apple M4 Pro, arm64 | 81 us | 42.4k req/s | 98 us / 42.2k req/s | 64 us / 42.1k req/s |
-| Intel i9-9980HK, x86_64 | 55 us | 85.4k req/s | 87 us / 48.4k req/s | 33 us / 130.6k req/s |
+| machine | server | 1 connection: latency / CPU | 64 connections: req/s / CPU |
+| --- | --- | ---: | ---: |
+| Apple M4 Pro | minimal Asio | 60.9 / 29.1 | 41,785 / 24.5 |
+| | `http` | 80.1 / 35.6 | 42,059 / 25.4 |
+| | `http`, timeouts on | 95.6 / 45.8 | 41,888 / 28.7 |
+| Intel Core i9-9980HK | minimal Asio | 33.2 / 22.9 | 130,595 / 9.6 |
+| | `http` | 55.2 / 36.1 | 85,420 / 14.9 |
+| | `http`, timeouts on | 86.8 / 67.6 | 48,423 / 26.1 |
 
-The disconnect watch reads up to 4096 bytes ahead, so a keep-alive request costs one `recv`
-(see [the coroutine mechanisms](docs/mechanisms/coroutine-handlers.md)). The parse cost of a
-small request is a few percent of this; a larger one is dominated by the handler.
+`wrk` saturates at about 43k req/s on the M4 Pro, so there the CPU column separates the
+servers at 64 connections. [docs/perf/timeouts-cpu.md](docs/perf/timeouts-cpu.md) has the
+method and where the time goes. Run it with:
+
+```sh
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DHTTP_BUILD_BENCH=ON
+cmake --build build --target http_server_compare
+sh bench/compare.sh build/http_server_compare > out.txt
+python3 bench/summarize.py < out.txt
+```
 
 ## 📚 Documentation
 
-- [ARCHITECTURE.md](ARCHITECTURE.md): the two layers, why the seam has this shape,
-  the request lifecycle, and the response transforms.
+- [ARCHITECTURE.md](ARCHITECTURE.md): the two layers, the shape of the seam, the request
+  lifecycle and the response transforms.
 - [docs/mechanisms/coroutine-handlers.md](docs/mechanisms/coroutine-handlers.md): how a
-  request runs, is cancelled, is admitted, and stops at shutdown.
-- [docs/TRANSPORT.md](docs/TRANSPORT.md): deferred replies, TLS, connection caps,
-  request deadlines, and early rejections.
+  request runs, is cancelled, is admitted and stops at shutdown.
+- [docs/TRANSPORT.md](docs/TRANSPORT.md): deferred replies, TLS, connection caps, request
+  deadlines and early rejections.
 - [docs/OWNED_STREAMING.md](docs/OWNED_STREAMING.md): owned response streaming.
-- [docs/AUDIT.md](docs/AUDIT.md): transport audit findings, measured before and after.
-- [docs/perf/timeouts-cpu.md](docs/perf/timeouts-cpu.md): per-request CPU and latency against a
-  minimal Asio server, and how to reproduce it (`bench/`).
+- [docs/perf/](docs/perf/): per-request CPU and latency against a minimal Asio server.
 - [CHANGELOG.md](CHANGELOG.md): behavior and performance changes, newest first.
-- [AGENTS.md](AGENTS.md): file map, invariants, and dependencies.
-- [prism](https://github.com/Kronuz/prism): a full app server built on this library.
+- [AGENTS.md](AGENTS.md): file map, invariants and dependencies.
+- [Kronuz C++ Libraries](https://github.com/Kronuz/cpp-libraries): the catalog;
+  [prism](https://github.com/Kronuz/prism) is an app server built on this library.
 
 ## 🛠️ Building and testing
 
 ```sh
-cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build
 ctest --test-dir build
 ```
 
+Add `-DHTTP_BUILD_BENCH=ON` to build the `http_server_compare` benchmark server, and
+`-DHTTP_FUZZ=ON` (Clang) for the libFuzzer target; the checked-in fuzz corpus replays as a
+CTest test in every build.
+
 ## 🤝 Contributing
 
-Issues and pull requests are welcome. Read [AGENTS.md](AGENTS.md) first. CI must
-pass on every platform.
+Read [AGENTS.md](AGENTS.md) and the [catalog's rules](https://github.com/Kronuz/cpp-libraries/blob/main/AGENTS.md)
+first.
 
 ## 📄 License
 
