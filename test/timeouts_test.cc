@@ -166,25 +166,31 @@ int main() {
 		check(got.size() < big && s < 3.0, "a reply the client stops reading is cut at the inactivity timeout");
 		::close(fd);
 	}
+	svc.stop();
+
 	{  // a slow reader that keeps moving: every 64 KiB slice completes in time, though the whole reply takes longer than the bound
-		int fd = dial(port);
-		constexpr std::size_t size = 2u << 20;
+		const unsigned short p4 = free_port();
+		http::HttpAsioService mover(echo, 1, 64);
+		mover.set_inactivity_timeout(1000ms);
+		mover.start(p4);
+		int fd = dial(p4);
+		constexpr std::size_t size = 4u << 20;
 		put(fd, "GET /big?n=" + std::to_string(size) + " HTTP/1.1\r\nConnection: close\r\nHost: x\r\n\r\n");
 		std::string got;
-		char b[32768];
+		char b[16384];
 		const auto t0 = clk::now();
 		for (;;) {
 			const ssize_t n = ::recv(fd, b, sizeof(b), 0);
 			if (n <= 0) { break; }
 			got.append(b, static_cast<std::size_t>(n));
-			std::this_thread::sleep_for(6ms);   // 64 or more reads: at least 380 ms, and two or more reads per 64 KiB slice
+			std::this_thread::sleep_for(8ms);   // 256 or more reads: at least 2 s in all, four or more reads per 64 KiB slice
 		}
 		const double s = std::chrono::duration<double>(clk::now() - t0).count();
-		check(got.size() > size && got.compare(got.size() - size, size, std::string(size, 'x')) == 0 && s > 0.3,
+		check(got.size() > size && got.compare(got.size() - size, size, std::string(size, 'x')) == 0 && s > 1.0,
 			"a slow reader that keeps moving receives the whole reply, taking longer than the inactivity timeout");
 		::close(fd);
+		mover.stop();
 	}
-	svc.stop();
 
 	{  // under the header timeout a slow client is served: a request trickled a byte every 10 ms
 		const unsigned short p3 = free_port();
