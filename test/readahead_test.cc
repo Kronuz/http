@@ -14,7 +14,8 @@
 //   [B] a client that disconnects in the middle of a buffered body never reaches the handler,
 //       and the request it held is released
 //   [S] request smuggling: ambiguous framing and a request hidden in a body are never executed
-//       as a request, as the first request and as one that arrives inside the read-ahead
+//       as a request, as the first request and as one that arrives inside the read-ahead; trailer
+//       fields never become headers; nothing after a CONNECT is read as a request
 //   [W] the reply's inactivity slices: every byte arrives, at every alignment of head and body
 //       against the 64 KiB slice
 #include <arpa/inet.h>
@@ -167,6 +168,13 @@ struct App : http::HttpHandler {
 		{ std::lock_guard<std::mutex> lk(mutex); ++hits[req.path]; }
 		if (req.path == "/echo") { w.send(200, req.body); co_return; }
 		if (req.path == "/fast") { w.send(200, "fast"); co_return; }
+		if (req.path == "/who") {   // the identity headers the handler sees, and the trailers apart
+			std::string out = "x-user=" + std::string(req.header("X-User")) + ";xff=" + std::string(req.header("X-Forwarded-For")) +
+				";headers=" + std::to_string(req.headers.size()) + ";trailers=";
+			for (const auto& [k, v] : req.trailers) { out += k + ":" + v + ","; }
+			w.send(200, out);
+			co_return;
+		}
 		if (req.path == "/body") {   // a body of the size the query names, from a known pattern
 			w.send(200, pattern(std::stoul(param(req.query, "n")), 5));
 			co_return;
@@ -605,6 +613,44 @@ int main() {
 				check(r1.body == "held" && r2.body == inner && s.app.hit_count("/smuggled") == 0,
 					"[S] a request inside a chunk of " + std::to_string(inner.size()) + " bytes is data, answered once, never run");
 			}
+		}
+	}
+
+	// [S] The trailer section of a chunked body: a front end that sets identity headers in the
+	// header section cannot be overridden from the trailers (RFC 9110 section 6.5.1).
+	{
+		Server s; s.start();
+		const std::vector<std::pair<std::string, std::string>> cases = {
+			{"X-User: admin\r\nX-Forwarded-For: 6.6.6.6\r\nX-Pad: 1\r\n", "X-User:admin,X-Forwarded-For:6.6.6.6,X-Pad:1,"},
+			{"X-User: admin\r\nX-Forwarded-For: 6.6.6.6\r\n", "X-User:admin,X-Forwarded-For:6.6.6.6,"},
+			{"X-User: admin\r\n", "X-User:admin,"},
+		};
+		for (const auto& [trailers, want] : cases) {
+			Conn k(s.port);
+			k.send("POST /who HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n" + trailers + "\r\n");
+			auto r = k.read_response();
+			check(r.status == 200 && r.body == "x-user=;xff=;headers=3;trailers=" + want, "[S] trailer fields are trailers, never headers: " + r.body);
+		}
+	}
+	// [S] CONNECT opens no tunnel, and has no content (RFC 9110 section 9.3.6): it is answered,
+	// the connection closes, and nothing after its header section runs as a request, whatever
+	// framing it named.
+	{
+		Server s; s.start();
+		const std::string hidden = get("/smuggled");
+		const std::vector<std::pair<std::string, std::string>> cases = {
+			{"CONNECT with Content-Length", "CONNECT x:443 HTTP/1.1\r\nHost: x:443\r\nContent-Length: " + std::to_string(hidden.size()) + "\r\n\r\n" + hidden},
+			{"CONNECT with Transfer-Encoding", "CONNECT x:443 HTTP/1.1\r\nHost: x:443\r\nTransfer-Encoding: chunked\r\n\r\n" + hidden},
+			{"CONNECT", "CONNECT x:443 HTTP/1.1\r\nHost: x:443\r\n\r\n" + hidden},
+		};
+		for (const auto& [what, request] : cases) {
+			Conn k(s.port);
+			k.send(request);
+			auto r = k.read_response();
+			const bool closed = k.ends_silently();
+			check(r.complete && closed && s.app.hit_count("/smuggled") == 0,
+				"[S] " + what + ": answered " + std::to_string(r.status) + ", then the connection " + (closed ? "closes" : "stays open") +
+				", /smuggled ran " + std::to_string(s.app.hit_count("/smuggled")) + "x");
 		}
 	}
 

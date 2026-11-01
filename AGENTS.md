@@ -101,7 +101,10 @@ library does not.
 rejects with `HPE_INVALID_METHOD`. The seam is parser-agnostic, so the choice is
 contained in `http_request_parser.h`. Note http_parser has no
 `on_header_value_complete`, so headers are paired via the field→value→field
-transition (`reading_value_`).
+transition (`reading_value_`); fields after headers-complete are the trailer section and
+go to `Request::trailers`, never to the headers. A `CONNECT` request is answered and the
+connection closes: no tunnel is opened, and what follows its header section is not a
+request.
 
 ## The un-stallable model (Asio coroutine)
 

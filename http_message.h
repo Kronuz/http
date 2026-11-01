@@ -99,6 +99,10 @@ struct Request {
 	std::string path;          // "/items/42"
 	std::string query;         // "pretty=1"
 	Headers headers;
+	// The trailer section of a chunked body, kept apart from the headers: a trailer field
+	// cannot change what the header section said (RFC 9110 section 6.5.1), and header()
+	// does not look here. Buffered bodies only; a streamed body's trailers are dropped.
+	Headers trailers;
 	std::string body;
 	int http_major = 1;
 	int http_minor = 1;
@@ -158,7 +162,7 @@ struct Request {
 
 	void clear() {
 		method.clear(); target.clear(); path.clear(); query.clear();
-		headers.clear(); body.clear();
+		headers.clear(); trailers.clear(); body.clear();
 		http_major = 1; http_minor = 1; keep_alive = true;
 		user_data.reset();
 		body_stream.reset();

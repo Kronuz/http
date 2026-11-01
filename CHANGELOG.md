@@ -2,6 +2,24 @@
 
 Newest first. Dates are 2026.
 
+## 2026-11-01: trailers and CONNECT
+
+A security review of http-parser's hardening against request smuggling found two ways to
+smuggle through this library whatever the parser does.
+
+### Security
+
+- **Trailer fields are not headers.** The trailer section of a chunked request went into
+  `Request::headers`: every trailer field but the last was merged there, after the front end
+  had set or stripped the headers it controls, so `X-User: admin` in a trailer reached the
+  handler as a header. Trailers now go to `Request::trailers` (RFC 9110 section 6.5.1), and
+  `header()` reads the header section only.
+- **CONNECT closes the connection.** The parser stops at the end of a `CONNECT` request's
+  header section, and the connection read on: the bytes a front end framed as its body by
+  `Content-Length` were served as the next request. A `CONNECT` is now answered and the
+  connection closed, since the service opens no tunnel and a `CONNECT` has no content
+  (RFC 9110 section 9.3.6).
+
 ## 2026-11-01: the README follows the family standard
 
 ### Changed

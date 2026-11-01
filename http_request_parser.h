@@ -200,6 +200,10 @@ private:
 		request_.http_major = parser_.http_major;
 		request_.http_minor = parser_.http_minor;
 		request_.keep_alive = http_should_keep_alive(&parser_) != 0;
+		// No tunnel is ever opened, and a CONNECT has no content (RFC 9110 section 9.3.6):
+		// what follows its header section is not a request, so the connection closes after
+		// the response, whatever framing the request named.
+		if (parser_.method == HTTP_CONNECT) { request_.keep_alive = false; }
 		auto qpos = request_.target.find('?');
 		if (qpos == std::string::npos) {
 			request_.path = request_.target;
@@ -215,14 +219,17 @@ private:
 		self(p)->request_.target.append(at, len);
 		return 0;
 	}
+	// A field and its value, complete: to the headers, or after headers-complete (the
+	// trailer section of a chunked body) to the trailers.
+	void commit_field() {
+		(headers_done_ ? request_.trailers : request_.headers).emplace_back(std::move(cur_field_), std::move(cur_value_));
+		cur_field_.clear();
+		cur_value_.clear();
+		reading_value_ = false;
+	}
 	static int on_header_field_cb(http_parser* p, const char* at, std::size_t len) {
 		auto* c = self(p);
-		if (c->reading_value_) {
-			c->request_.headers.emplace_back(std::move(c->cur_field_), std::move(c->cur_value_));
-			c->cur_field_.clear();
-			c->cur_value_.clear();
-			c->reading_value_ = false;
-		}
+		if (c->reading_value_) { c->commit_field(); }
 		c->cur_field_.append(at, len);
 		return 0;
 	}
@@ -234,12 +241,7 @@ private:
 	}
 	static int on_headers_complete_cb(http_parser* p) {
 		auto* c = self(p);
-		if (!c->cur_field_.empty()) {
-			c->request_.headers.emplace_back(std::move(c->cur_field_), std::move(c->cur_value_));
-			c->cur_field_.clear();
-			c->cur_value_.clear();
-			c->reading_value_ = false;
-		}
+		if (!c->cur_field_.empty()) { c->commit_field(); }
 		c->finalize();
 		// Let the transport build the extension and choose how to take the body:
 		// stream it to a BodyStream, push to a sink, or buffer into Request::body.
@@ -273,6 +275,7 @@ private:
 	}
 	static int on_message_complete_cb(http_parser* p) {
 		auto* c = self(p);
+		if (!c->cur_field_.empty()) { c->commit_field(); }   // the last trailer field
 		if (c->body_sink_) { c->body_sink_->end(); }
 		c->complete_ = true;
 		http_parser_pause(p, 1);   // stop after this message so pipelined bytes wait for take()
