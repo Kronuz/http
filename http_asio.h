@@ -47,9 +47,12 @@
 
 #include <asio.hpp>
 #include <asio/experimental/awaitable_operators.hpp>
+#include <asio/experimental/channel.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstring>
 #include <exception>
 #include <functional>
 #include <memory>
@@ -343,8 +346,10 @@ inline asio::awaitable<ReplySettlement> write_before_deadline(Stream& socket,
 	if (winner.index() == 0) { co_return write_error ? ReplySettlement::Disconnected : ReplySettlement::Written; }
 	co_return timer_error ? ReplySettlement::Failed : ReplySettlement::TimedOut;
 }
-// Writes buffers before `deadline`, and with an inactivity bound, 64 KiB at a time, each
-// slice before `inactivity` from its start (whichever deadline comes first).
+// Writes buffers before `deadline`, and with an inactivity bound, 64 KiB of the buffers
+// taken together at a time (a slice spans the buffers it covers, so a head and a small body
+// leave in one send), each slice before `inactivity` from its start (whichever deadline
+// comes first).
 template<class Stream, std::size_t N>
 inline asio::awaitable<ReplySettlement> write_with_progress(Stream& socket, std::array<asio::const_buffer, N> buffers,
 	std::chrono::milliseconds inactivity, std::chrono::steady_clock::time_point deadline) {
@@ -357,31 +362,46 @@ inline asio::awaitable<ReplySettlement> write_with_progress(Stream& socket, std:
 		co_return co_await write_before_deadline(socket, buffers, deadline);
 	}
 	constexpr std::size_t slice = 64 * 1024;
-	for (const auto& b : buffers) {
-		for (std::size_t at = 0; at < b.size(); at += slice) {
-			const auto* data = static_cast<const char*>(b.data()) + at;
-			const std::size_t n = std::min(slice, b.size() - at);
-			const auto until = std::min(deadline, std::chrono::steady_clock::now() + inactivity);
-			const auto r = co_await write_before_deadline(socket, std::array<asio::const_buffer, 1>{asio::buffer(data, n)}, until);
-			if (r != ReplySettlement::Written) { co_return r; }
+	std::size_t total = 0;
+	for (const auto& b : buffers) { total += b.size(); }
+	for (std::size_t at = 0; at < total; at += slice) {
+		// The window [at, at + slice) of the buffers laid end to end: a slice of each buffer it touches.
+		std::array<asio::const_buffer, N> window{};
+		std::size_t skip = at, room = slice;
+		for (std::size_t i = 0; i < N; ++i) {
+			if (skip >= buffers[i].size()) { skip -= buffers[i].size(); continue; }
+			const std::size_t n = std::min(buffers[i].size() - skip, room);
+			window[i] = asio::const_buffer(static_cast<const char*>(buffers[i].data()) + skip, n);
+			room -= n;
+			skip = 0;
 		}
+		const auto until = std::min(deadline, std::chrono::steady_clock::now() + inactivity);
+		const auto r = co_await write_before_deadline(socket, window, until);
+		if (r != ReplySettlement::Written) { co_return r; }
 	}
 	co_return ReplySettlement::Written;
 }
 
-// One owned one-byte read keeps watching the socket while a handler runs or a deferred
-// response waits, and consumed pipelined input is returned to the parser, never discarded
-// by a race. Two rules read it, and they differ on purpose:
+// One owned read keeps watching the socket while a handler runs or a deferred response
+// waits. It reads ahead, up to kReadAhead bytes into the input's own buffer, so the request
+// a quick keep-alive or pipelining client sends meanwhile arrives with that one read: the
+// pending read is the next request's read, and a request costs one recv, not a one-byte
+// recv and a second one for the rest. What the watch took is returned to the parser by
+// read(), first and in order, never discarded by a race, and no further read-ahead is
+// armed until it is all consumed, so at most kReadAhead bytes are held outside the kernel
+// however much the client sends. Two rules read it, and they differ on purpose:
 //   * a deferred or owned-stream reply (monitor): only a read error other than EOF is a
 //     disconnect, because the client may half-close after sending and still expect the reply;
 //   * a request in flight (watch): EOF and any read error but our own cancellation are a
 //     disconnect, because a client that closed has nobody to read what a search computes.
-//     A pipelined byte (the client sent the next request early) ends the watch for the
+//     Pipelined input (the client sent the next request early) ends the watch for the
 //     rest of that request: a later disconnect is not seen until the next read.
 template<class Stream>
 class ConnectionInput : public std::enable_shared_from_this<ConnectionInput<Stream>> {
 public:
-	explicit ConnectionInput(Stream& stream) : stream_(stream), done_(stream.get_executor()) {}
+	// The most the watch reads ahead of the parser.
+	static constexpr std::size_t kReadAhead = 4096;
+	explicit ConnectionInput(Stream& stream) : stream_(stream), done_(stream.get_executor(), 1) {}
 	template<class Control>
 	void monitor(const std::shared_ptr<Control>& control) {
 		if constexpr (std::is_same_v<Control, AsioDeferredControl>) observer_ = control;
@@ -403,10 +423,17 @@ public:
 	}
 	void unwatch() noexcept { on_disconnect_ = nullptr; }
 	asio::awaitable<std::size_t> read(asio::mutable_buffer output) {
-		co_await drain();
+		if (pending_) { co_await drain(); }
 		if (ready_) {
+			if (size_) {
+				// What the watch read ahead, oldest first; the rest stays for the next read.
+				const std::size_t n = (std::min)(output.size(), size_ - taken_);
+				std::memcpy(output.data(), buffer_ + taken_, n);
+				taken_ += n;
+				if (taken_ == size_) { size_ = taken_ = 0; ready_ = false; }
+				co_return n;
+			}
 			ready_ = false;
-			if (size_) { *static_cast<char*>(output.data()) = byte_; co_return 1; }
 			if (error_) { throw asio::system_error(error_); }
 			co_return 0;
 		}
@@ -424,13 +451,13 @@ public:
 		auto error = std::get<1>(winner);
 		throw asio::system_error(error ? error : asio::error::timed_out);
 	}
-	// Waits for the pending one-byte read. A cancelled waiter ends the wait: the next
-	// co_await of a cancelled coroutine throws operation_aborted, and the socket close that
-	// follows reaps the read.
+	// Waits for the pending read. A cancelled waiter ends the wait: the next co_await of a
+	// cancelled coroutine throws operation_aborted, and the socket close that follows reaps
+	// the read. The channel holds one completion token that nobody may be waiting for; a
+	// stale token only makes a later wait return once more, and the loop asks pending_ again.
 	asio::awaitable<void> drain() {
 		while (pending_) {
-			done_.expires_at(std::chrono::steady_clock::time_point::max());
-			asio::error_code error; co_await done_.async_wait(asio::redirect_error(asio::use_awaitable, error));
+			asio::error_code error; co_await done_.async_receive(asio::redirect_error(asio::use_awaitable, error));
 		}
 	}
 private:
@@ -440,14 +467,14 @@ private:
 		pending_ = true;
 		auto owner = this->shared_from_this();
 		try {
-			stream_.async_read_some(asio::buffer(&byte_, 1), [owner](asio::error_code error, std::size_t size) {
+			stream_.async_read_some(asio::buffer(buffer_, sizeof buffer_), [owner](asio::error_code error, std::size_t size) {
 				owner->completed(error, size);
 			});
 		} catch (...) { pending_ = false; throw; }
 	}
 	void completed(asio::error_code error, std::size_t size) {
-		pending_ = false; ready_ = true; error_ = error; size_ = size;
-		done_.cancel();
+		pending_ = false; ready_ = true; error_ = error; size_ = size; taken_ = 0;
+		done_.try_send(asio::error_code{});
 		if (error && error != asio::error::eof) {
 			if (auto c = observer_.lock()) { c->exchange->observe_peer_disconnect(); }
 			if (auto c = owned_observer_.lock()) { c->exchange->observe_peer_disconnect(); }
@@ -476,8 +503,11 @@ private:
 		}
 		co_return error;
 	}
-	Stream& stream_; asio::steady_timer done_;
-	char byte_ = 0; std::size_t size_ = 0; asio::error_code error_;
+	Stream& stream_;
+	asio::experimental::channel<void(asio::error_code)> done_;   // a completed read wakes drain()
+	char buffer_[kReadAhead];
+	std::size_t size_ = 0, taken_ = 0;   // bytes the last read returned, and how many read() has handed out
+	asio::error_code error_;
 	bool pending_ = false, ready_ = false;
 	std::function<void()> on_disconnect_;
 	std::weak_ptr<AsioDeferredControl> observer_;

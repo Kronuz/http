@@ -47,7 +47,7 @@ queued on a lock, an event or a chore is not woken by the callback; it checks th
 when it resumes. A callback that throws is dropped: the transport's frames end only by
 completing, and a throw would unwind them under a running handler.
 
-Two rules read the one-byte socket watch, and they differ on purpose:
+Two rules read the socket watch, and they differ on purpose:
 
 1. **A request in flight (`ConnectionInput::watch`).** EOF and any read error other than
    our own cancellation call `cancel(Disconnect)`. A client that closed has nobody to
@@ -57,11 +57,17 @@ Two rules read the one-byte socket watch, and they differ on purpose:
    other than EOF is a disconnect: the client may half-close after sending and still
    expect the reply. This rule is unchanged.
 
-The watch reads one byte. If the client pipelines the next request while a handler runs,
-that byte ends the watch for the rest of that request, and a disconnect after it is not
-seen until the connection reads again. The byte is handed back to the parser. A request
-whose bytes arrived in the same read as the previous one has no byte pending and is
-watched normally. A watch armed after EOF was already seen cancels the request at once.
+The watch reads ahead: one pending read of up to 4096 bytes into the connection's input
+buffer (`ConnectionInput::kReadAhead`). If the client pipelines the next request while a
+handler runs, the read takes it, or its first 4096 bytes, and that data ends the watch for
+the rest of that request: a disconnect after it is not seen until the connection reads
+again. The bytes go back to the parser. `read()` returns them first and in order, in
+whatever pieces the caller asks for, and nothing more is read ahead until they are all
+consumed, so a connection holds at most 4096 bytes of input outside the kernel however much
+the client sends. The pending read is also the read for the next request: it serves the first
+read after the reply, so a keep-alive request costs one `recv`. A request whose bytes arrived
+in the same read as the previous one has nothing pending and is watched normally. A watch
+armed after EOF was already seen cancels the request at once.
 
 ## Streamed bodies
 

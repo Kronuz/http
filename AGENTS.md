@@ -50,6 +50,12 @@ owned_stream_asio_test.cc
                       ctest: deferred replies, owned streaming.
 test/coroutine_test.cc ctest "coroutine": coroutine handlers, BodyStream, disconnect cancels
                       reads not writes, the admission 503, the body cap's 413, shutdown.
+test/readahead_test.cc ctest "readahead": the connection's read-ahead watch (its 4096-byte bound,
+                      order, disconnect rules), a pipelined request inside the window at every
+                      alignment, a flood of pipelined requests, bodies cut short, request
+                      smuggling, and the sliced reply write.
+test/timeouts_test.cc ctest "timeouts": the idle, header and inactivity timeouts over real TCP,
+                      slow clients under and over them, stalled and slow readers.
 docs/mechanisms/coroutine-handlers.md  How a request runs, is cancelled, admitted and stopped.
 docs/status/phase7c-l3.md  The L3 ledger.
 docs/TRANSPORT.md     Deferred replies, TLS, connection and request limits, rejections.
@@ -118,10 +124,14 @@ handoff. Invariants -- do not break these when touching `serve_connection`:
 - **Tracked and watched for the whole run.** `RequestAbort` (a stack `reactor::Abortable`)
   is on the reactor's intrusive list from before the handler to after the write:
   `abort()` is `Request::cancel(Shutdown)`, `force()` closes the socket after the grace.
-  `ConnectionInput::watch` keeps one one-byte read pending: EOF or a read error (not our
-  own cancellation) calls `Request::cancel(Disconnect)`. That is the per-request rule and
-  it differs from the deferred-reply monitor's (EOF is a half-close there). A pipelined
-  byte ends the watch for the rest of the request. `WatchGuard` unwatches on every exit.
+  `ConnectionInput::watch` keeps one read pending, up to 4096 bytes ahead of the parser: EOF
+  or a read error (not our own cancellation) calls `Request::cancel(Disconnect)`. That is the
+  per-request rule and it differs from the deferred-reply monitor's (EOF is a half-close
+  there). Pipelined input the watch reads ends the watch for the rest of the request; `read()`
+  hands those bytes to the parser first, in order, in whatever pieces its caller asks for, and
+  nothing more is read ahead until they are all consumed, so at most 4096 bytes are held
+  outside the kernel. The pending read is also the next request's read, so a keep-alive
+  request costs one `recv`. `WatchGuard` unwatches on every exit.
 - **Cancel reads, never writes.** A handler stops reading at its next checkpoint when
   `Request::cancelled()`; the transport still writes the response (a half-closed client
   gets its answer). Nothing in the transport aborts a write for a disconnect.

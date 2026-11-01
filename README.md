@@ -95,6 +95,22 @@ curl localhost:8080/kv/greeting
   servers, admin endpoints.
 - ❌ HTTP/2, HTTP/3, or WebSockets: not implemented.
 
+## ⚡ Performance
+
+A fixed 14-byte keep-alive reply through `HttpAsioService` on one reactor, driven by
+`wrk -t1 -c1` and `wrk -t2 -c64` for 4 s (`examples/bench_http PORT 1 [timeouts]`;
+`timeouts` sets the request, idle, header and inactivity timeouts of a production service).
+A minimal Asio server answering the same bytes is the reference.
+
+| machine | 1 connection | 64 connections | with `timeouts`, 1 / 64 | minimal Asio, 1 / 64 |
+|---|---|---|---|---|
+| Apple M4 Pro, arm64 | 81 us | 42.4k req/s | 98 us / 42.2k req/s | 64 us / 42.1k req/s |
+| Intel i9-9980HK, x86_64 | 55 us | 85.4k req/s | 87 us / 48.4k req/s | 33 us / 130.6k req/s |
+
+The disconnect watch reads up to 4096 bytes ahead, so a keep-alive request costs one `recv`
+(see [the coroutine mechanisms](docs/mechanisms/coroutine-handlers.md)). The parse cost of a
+small request is a few percent of this; a larger one is dominated by the handler.
+
 ## 📚 Documentation
 
 - [ARCHITECTURE.md](ARCHITECTURE.md): the two layers, why the seam has this shape,
@@ -105,6 +121,7 @@ curl localhost:8080/kv/greeting
   request deadlines, and early rejections.
 - [docs/OWNED_STREAMING.md](docs/OWNED_STREAMING.md): owned response streaming.
 - [docs/AUDIT.md](docs/AUDIT.md): transport audit findings, measured before and after.
+- [CHANGELOG.md](CHANGELOG.md): behavior and performance changes, newest first.
 - [AGENTS.md](AGENTS.md): file map, invariants, and dependencies.
 - [prism](https://github.com/Kronuz/prism): a full app server built on this library.
 

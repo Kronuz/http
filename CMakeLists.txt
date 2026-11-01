@@ -32,7 +32,7 @@ FetchContent_MakeAvailable(radix_router)
 # it accepts arbitrary request methods: Xapiand's REST API uses custom verbs
 # (COUNT, INFO, DUMP, RESTORE, ...) that a method-validating parser rejects. The
 # seam stays parser-agnostic, so this is contained inside the connection.
-FetchContent_Declare(http_parser GIT_REPOSITORY https://github.com/Kronuz/http-parser.git GIT_TAG 178f873450364b67f0abca9c96fbbc735589d435)
+FetchContent_Declare(http_parser GIT_REPOSITORY https://github.com/Kronuz/http-parser.git GIT_TAG 476ba600c52c66c67c620f7b2f25aef57f2a58f8)
 FetchContent_MakeAvailable(http_parser)
 
 # --- compressors (the deflate/gzip + zstd codecs) ---
@@ -160,4 +160,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	target_link_libraries(timeouts_test PRIVATE http)
 	add_test(NAME timeouts COMMAND timeouts_test)
 	set_tests_properties(timeouts PROPERTIES TIMEOUT 60)
+
+	# The connection's read-ahead watch and the sliced reply write over real TCP: the watch
+	# bound, pipelining inside the window, disconnects, cut-short bodies, request smuggling.
+	add_executable(readahead_test test/readahead_test.cc)
+	target_link_libraries(readahead_test PRIVATE http)
+	add_test(NAME readahead COMMAND readahead_test)
+	set_tests_properties(readahead PROPERTIES TIMEOUT 120)
 endif()
