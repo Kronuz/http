@@ -2,6 +2,23 @@
 
 Newest first. Dates are 2026.
 
+## 2026-11-01: Beast and cpp-httplib in the server comparison
+
+### Added
+
+- `bench/server_beast.cc` (`-DHTTP_BENCH_BEAST=ON`, Boost 1.92) and `bench/server_httplib.cc`
+  (`-DHTTP_BENCH_HTTPLIB=ON`, cpp-httplib v0.64.0 fetched by the bench target only) answer the
+  comparison's reply on the same number of threads. `bench/verify.py` sends the bench request to
+  every server and aborts `bench/compare.sh` unless the answers are the same bytes, headers
+  included. `compare.sh` takes `BUILD`, `KINDS`, `CONNS` and `REPS` to run a piece of the
+  comparison and prints the wrk, Asio, Boost and cpp-httplib versions it ran.
+
+### Fixed
+
+- The minimal Asio server and the `reactor` kind answered without the `Connection: keep-alive`
+  field that `http` always states, so the servers did not send the same bytes. They send it
+  now, and the README table is measured with identical replies.
+
 ## 2026-11-01: trailers, CONNECT, and http-parser's hardening
 
 A security review of http-parser's hardening against request smuggling found two ways to

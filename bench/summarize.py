@@ -10,14 +10,14 @@ import statistics
 import sys
 
 LINE = re.compile(
-    r"(\w+)\s+(\S+)\s+R=\d+ C=(\d+)\s+keepalive req/s\s+([\d.]+)\s+avg\s+([\d.]+)(us|ms)\s+.*server CPU ([\d.]+)")
+    r"(\w+)\s+(\S+)\s+R=\d+ C=(\d+)\s+keepalive req/s\s+([\d.]+)\s+avg\s+([\d.]+)(us|ms|s)\s+.*server CPU ([\d.]+)")
 runs = collections.defaultdict(list)
 for line in sys.stdin:
     m = LINE.match(line)
     if not m:
         continue
     kind, build, conns, rps, avg, unit, cpu = m.groups()
-    runs[(int(conns), kind, build)].append((float(rps), float(avg) * (1000 if unit == "ms" else 1), float(cpu)))
+    runs[(int(conns), kind, build)].append((float(rps), float(avg) * {"us": 1, "ms": 1000, "s": 1000000}[unit], float(cpu)))
 
 print("conns kind   build                    runs   req/s   avg us  spread  cpu us")
 for (conns, kind, build), v in sorted(runs.items()):

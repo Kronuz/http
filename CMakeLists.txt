@@ -91,12 +91,31 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	target_link_libraries(bench_http PRIVATE http)
 
 	# The server comparison behind docs/perf/timeouts-cpu.md: a minimal Asio server, reactor::TcpServer and http
-	# answering the same bytes, driven by wrk (bench/compare.sh). The Asio comparator is the library's own
-	# transport dependency, so nothing extra is fetched.
+	# answering the same bytes, driven by wrk (bench/compare.sh). The Asio server is the library's own transport
+	# dependency, so nothing extra is fetched for it. The comparators are separate executables, each OFF by default
+	# and never a dependency of the http target: Boost.Beast (Boost from the system, find_package) and cpp-httplib
+	# (a pinned release, a single header fetched here).
 	option(HTTP_BUILD_BENCH "Build the http_server_compare benchmark server" OFF)
+	option(HTTP_BENCH_BEAST "With HTTP_BUILD_BENCH, build http_server_beast (needs Boost 1.92)" OFF)
+	option(HTTP_BENCH_HTTPLIB "With HTTP_BUILD_BENCH, build http_server_httplib (fetches cpp-httplib)" OFF)
 	if(HTTP_BUILD_BENCH)
 		add_executable(http_server_compare bench/server_compare.cc)
 		target_link_libraries(http_server_compare PRIVATE http)
+		if(HTTP_BENCH_BEAST)
+			find_package(Boost 1.92.0 REQUIRED)
+			add_executable(http_server_beast bench/server_beast.cc)
+			target_link_libraries(http_server_beast PRIVATE Boost::headers Threads::Threads)
+			target_compile_features(http_server_beast PRIVATE cxx_std_20)
+		endif()
+		if(HTTP_BENCH_HTTPLIB)
+			# SOURCE_SUBDIR points at a directory without a CMakeLists.txt: only the header is wanted.
+			FetchContent_Declare(httplib GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git GIT_TAG v0.64.0 SOURCE_SUBDIR none)
+			FetchContent_MakeAvailable(httplib)
+			add_executable(http_server_httplib bench/server_httplib.cc)
+			target_include_directories(http_server_httplib PRIVATE "${httplib_SOURCE_DIR}")
+			target_link_libraries(http_server_httplib PRIVATE Threads::Threads)
+			target_compile_features(http_server_httplib PRIVATE cxx_std_20)
+		endif()
 	endif()
 
 	enable_testing()

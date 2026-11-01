@@ -7,22 +7,23 @@
 //   httpt    the same with the request, idle, header and inactivity timeouts a production service sets
 //
 //   http_server_compare KIND PORT REACTORS
+//   http_server_compare version
 //
 // SIGUSR2 prints the process's user and system CPU time (microseconds) to stderr as "RUSAGE <user> <system>";
-// bench/run.sh reads it to report CPU per request. The Asio server is the comparator: Asio is already the
-// library's transport dependency, so nothing is fetched for it. Built only with -DHTTP_BUILD_BENCH=ON.
+// bench/run.sh reads it to report CPU per request. The Asio server is the lower bound: Asio is already the
+// library's transport dependency, so nothing is fetched for it. The Beast and cpp-httplib comparators are
+// bench/server_beast.cc and bench/server_httplib.cc. Built only with -DHTTP_BUILD_BENCH=ON.
 #include <asio.hpp>
-#include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
 #include <string>
-#include <sys/resource.h>
 #include <thread>
 #include <vector>
 
+#include "bench_common.h"
 #include "http_asio.h"
 #include "http_handler.h"
 #include "reactor.h"
@@ -30,8 +31,6 @@
 using asio::awaitable;
 using asio::use_awaitable;
 using asio::ip::tcp;
-
-static const std::string RESP = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 14\r\n\r\nHello, World!\n";
 
 // The same request loop for the asio and reactor kinds: read, find the blank line, answer.
 static awaitable<void> serve(tcp::socket socket) {
@@ -50,15 +49,6 @@ static awaitable<void> serve(tcp::socket socket) {
 		}
 	} catch (const std::exception&) {
 	}
-}
-
-static std::atomic<bool> g_stop{false};
-static void on_signal(int) { g_stop.store(true); }
-static void on_usr2(int) {
-	rusage ru{};
-	getrusage(RUSAGE_SELF, &ru);
-	std::fprintf(stderr, "RUSAGE %lld %lld\n", (long long)ru.ru_utime.tv_sec * 1000000 + ru.ru_utime.tv_usec,
-	             (long long)ru.ru_stime.tv_sec * 1000000 + ru.ru_stime.tv_usec);
 }
 
 static awaitable<void> asio_acceptor(std::vector<std::unique_ptr<asio::io_context>>& ios, unsigned short port) {
@@ -90,6 +80,10 @@ public:
 
 int main(int argc, char** argv) {
 	std::string kind = argc > 1 ? argv[1] : "asio";
+	if (kind == "version") {
+		std::printf("asio %d.%d.%d\n", ASIO_VERSION / 100000, ASIO_VERSION / 100 % 1000, ASIO_VERSION % 100);
+		return 0;
+	}
 	unsigned short port = static_cast<unsigned short>(argc > 2 ? std::atoi(argv[2]) : 8080);
 	std::size_t reactors = static_cast<std::size_t>(argc > 3 ? std::atoi(argv[3]) : 1);
 	std::signal(SIGINT, on_signal);

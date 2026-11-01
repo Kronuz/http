@@ -115,30 +115,49 @@ Not for:
 
 ## ⚡ Performance
 
-A 14-byte keep-alive reply on one reactor, driven by `wrk` for 4 s at one connection
-(`-t1 -c1`) and at 64 (`-t2 -c64`). "Timeouts on" sets the request, idle, header and
-inactivity timeouts of a production service; the minimal server is plain Asio 1.36.0
-answering the same bytes. Latency is the `wrk` average and CPU is the server's user plus
-system time per request, both in microseconds; medians of three rounds, Apple clang 17
-with `-O3 -DNDEBUG`:
+One request, `GET /`, answered with the same 103-byte keep-alive reply (a 14-byte
+`Hello, World!\n` body) by every server on one thread, driven by
+[wrk](https://github.com/wg/wrk) 4.2.0 on the same host over loopback for 4 s, at one
+connection (`-t1 -c1`) and at 64 (`-t2 -c64`). A cell is "latency / CPU" at one connection
+and "req/s / CPU" at 64: latency is the `wrk` average in microseconds, req/s is requests per
+second, and CPU is the server's user plus system time per request in microseconds. Lower is
+better, except for req/s.
 
-| machine | server | 1 connection: latency / CPU | 64 connections: req/s / CPU |
-| --- | --- | ---: | ---: |
-| Apple M4 Pro | minimal Asio | 60.9 / 29.1 | 41,785 / 24.5 |
-| | `http` | 80.1 / 35.6 | 42,059 / 25.4 |
-| | `http`, timeouts on | 95.6 / 45.8 | 41,888 / 28.7 |
-| Intel Core i9-9980HK | minimal Asio | 33.2 / 22.9 | 130,595 / 9.6 |
-| | `http` | 55.2 / 36.1 | 85,420 / 14.9 |
-| | `http`, timeouts on | 86.8 / 67.6 | 48,423 / 26.1 |
+Each row is a server. **Minimal Asio** is the lower bound, not a framework: a hand-written
+read-and-reply loop on standalone [Asio](https://github.com/chriskohlhoff/asio) 1.36.0, the
+tag `CMakeLists.txt` fetches on both machines. **`http`** is this library, and
+**`http`, timeouts on** is the same server with a production service's request, idle, header
+and inactivity timeouts set: a configuration of `http`, not another server.
+[Boost.Beast](https://github.com/boostorg/beast) (Boost 1.92.0, using Boost.Asio rather than
+the standalone Asio) and [cpp-httplib](https://github.com/yhirose/cpp-httplib) v0.64.0 are
+the comparators, each on one io_context or one pool thread. Before timing, `bench/verify.py`
+sends the request to every server and aborts the run unless each answers the same bytes,
+headers included.
 
-`wrk` saturates at about 43k req/s on the M4 Pro, so there the CPU column separates the
-servers at 64 connections. [docs/perf/timeouts-cpu.md](docs/perf/timeouts-cpu.md) has the
-method and where the time goes. Run it with:
+Medians of three rounds on an Apple M4 Pro (macOS) and an Intel Core i9-9980HK (macOS 15,
+x86-64), Apple clang 17, `-O3 -DNDEBUG`:
+
+| server | M4 Pro, 1 connection: latency / CPU | M4 Pro, 64 connections: req/s / CPU | i9, 1 connection: latency / CPU | i9, 64 connections: req/s / CPU |
+| --- | ---: | ---: | ---: | ---: |
+| minimal Asio | 70.8 / 32.7 | 34,823 / 28.7 | 33.8 / 23.4 | 126,259 / 9.9 |
+| `http` | 87.7 / 38.4 | 35,232 / 29.5 | 56.6 / 36.9 | 84,642 / 15.0 |
+| `http`, timeouts on | 104.0 / 48.5 | 35,773 / 32.6 | 87.1 / 68.1 | 47,946 / 26.5 |
+| Boost.Beast | 73.2 / 35.5 | 35,312 / 29.9 | 39.6 / 31.2 | 86,066 / 14.7 |
+| cpp-httplib | 73.7 / 33.2 | 13,326 / 33.4 | 43.0 / 29.1 | 22,472 / 29.1 |
+
+At one connection `http` takes 1.2 to 1.4 times Beast's latency and 1.1 to 1.2 times its
+CPU, and cpp-httplib is faster than `http`; at 64 connections `http` and Beast tie. `wrk`
+saturates at about 35,000 req/s on the M4 Pro, so there the CPU column separates the
+servers. cpp-httplib serves a connection on one pool thread until it closes, so with one
+thread only one of the 64 connections is answered and its 64-connection row is that
+connection's throughput. [docs/perf/timeouts-cpu.md](docs/perf/timeouts-cpu.md) has the
+method, the spread, and where the time goes. Rebuild and rerun the table (Boost from
+Homebrew for Beast):
 
 ```sh
-cmake -B build -DCMAKE_BUILD_TYPE=Release -DHTTP_BUILD_BENCH=ON
-cmake --build build --target http_server_compare
-sh bench/compare.sh build/http_server_compare > out.txt
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DHTTP_BUILD_BENCH=ON -DHTTP_BENCH_BEAST=ON -DHTTP_BENCH_HTTPLIB=ON
+cmake --build build --target http_server_compare http_server_beast http_server_httplib
+sh bench/compare.sh > out.txt
 python3 bench/summarize.py < out.txt
 ```
 
@@ -151,7 +170,7 @@ python3 bench/summarize.py < out.txt
 - [docs/TRANSPORT.md](docs/TRANSPORT.md): deferred replies, TLS, connection caps, request
   deadlines and early rejections.
 - [docs/OWNED_STREAMING.md](docs/OWNED_STREAMING.md): owned response streaming.
-- [docs/perf/](docs/perf/): per-request CPU and latency against a minimal Asio server.
+- [docs/perf/](docs/perf/): per-request CPU and latency against a minimal Asio server, Boost.Beast and cpp-httplib.
 - [CHANGELOG.md](CHANGELOG.md): behavior and performance changes, newest first.
 - [AGENTS.md](AGENTS.md): file map, invariants and dependencies.
 - [Kronuz C++ Libraries](https://github.com/Kronuz/cpp-libraries): the catalog;

@@ -1,12 +1,18 @@
 #!/bin/sh
 # Drives one http_server_compare server with wrk and prints one line: req/s, latency, and the server's CPU per request.
 #   sh bench/run.sh KIND REACTORS CONNECTIONS SECONDS [close]
-# KIND is asio, reactor, http or httpt (see server_compare.cc). BIN names the server binary (default
-# build/http_server_compare), LABEL what to print for it (default its file name); `close` sends Connection: close,
-# one request per connection. Needs wrk on PATH.
+# KIND is asio, reactor, http or httpt (see server_compare.cc), beast (server_beast.cc) or httplib (server_httplib.cc).
+# BIN names the server binary (default: the one in $BUILD, default build, that serves KIND), LABEL what to print for it
+# (default its file name); `close` sends Connection: close, one request per connection. Needs wrk on PATH.
 set -u
 KIND=$1; R=$2; C=$3; S=$4; CLOSE=${5:-}
-BIN=${BIN:-build/http_server_compare}
+BUILD=${BUILD:-build}
+case $KIND in
+	beast) DEFAULT_BIN=$BUILD/http_server_beast ;;
+	httplib) DEFAULT_BIN=$BUILD/http_server_httplib ;;
+	*) DEFAULT_BIN=$BUILD/http_server_compare ;;
+esac
+BIN=${BIN:-$DEFAULT_BIN}
 LABEL=${LABEL:-$(basename "$BIN")}
 PORT=$((20000 + $$ % 20000))
 HDR=""
