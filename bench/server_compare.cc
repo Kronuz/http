@@ -5,14 +5,21 @@
 //   reactor  reactor::TcpServer with the same session body (the runtime without the http library)
 //   http     http::HttpAsioService and a handler that writes the same body, no timeouts
 //   httpt    the same with the request, idle, header and inactivity timeouts a production service sets
+//   httpr    http through a Router whose one route yields once (asio::post) before it answers: the cost of a
+//            handler that suspends, which "http" never pays
 //
 //   http_server_compare KIND PORT REACTORS
 //   http_server_compare version
 //
 // SIGUSR2 prints the process's user and system CPU time (microseconds) to stderr as "RUSAGE <user> <system>";
 // bench/run.sh reads it to report CPU per request. The Asio server is the lower bound: Asio is already the
-// library's transport dependency, so nothing is fetched for it. The Beast and cpp-httplib comparators are
+// library's transport dependency, so nothing is fetched for it. With -DHTTP_BENCH_COUNT_ALLOCS=ON (bench/counting.h)
+// it also prints "ALLOCS <operator new calls>" and "HANDLERS <Asio handler invocations>"; bench/run.sh divides them by
+// the requests served. That build is for counting, never for timing. The Beast and cpp-httplib comparators are
 // bench/server_beast.cc and bench/server_httplib.cc. Built only with -DHTTP_BUILD_BENCH=ON.
+#ifdef HTTP_BENCH_COUNT_ALLOCS
+#include "counting.h"
+#endif
 #include <asio.hpp>
 #include <chrono>
 #include <csignal>
@@ -26,6 +33,7 @@
 #include "bench_common.h"
 #include "http_asio.h"
 #include "http_handler.h"
+#include "http_router.h"
 #include "reactor.h"
 
 using asio::awaitable;
@@ -78,6 +86,19 @@ public:
 	}
 };
 
+// The same reply through a Router route that suspends once on the reactor before it writes.
+static http::Router make_yield_router() {
+	http::Router router;
+	router.route("GET", "/", [](http::Request&, http::ResponseWriter& response, const http::Params&) -> awaitable<void> {
+		co_await asio::post(co_await asio::this_coro::executor, use_awaitable);
+		response.status(200);
+		response.set_header("Content-Type", "text/plain");
+		response.write("Hello, World!\n");
+		response.end();
+	});
+	return router;
+}
+
 int main(int argc, char** argv) {
 	std::string kind = argc > 1 ? argv[1] : "asio";
 	if (kind == "version") {
@@ -113,7 +134,9 @@ int main(int argc, char** argv) {
 		while (!g_stop.load()) std::this_thread::sleep_for(std::chrono::milliseconds(100));
 		server.stop();
 	} else {
-		HelloApp app;
+		HelloApp hello;
+		http::Router yielding = make_yield_router();
+		http::HttpHandler& app = kind == "httpr" ? static_cast<http::HttpHandler&>(yielding) : hello;
 		http::HttpAsioService service(app, reactors, /*in_flight_limit=*/0);
 		if (kind == "httpt") {
 			service.set_request_timeout(std::chrono::seconds(30));

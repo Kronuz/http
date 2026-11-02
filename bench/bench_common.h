@@ -10,6 +10,10 @@
 // states `Connection: keep-alive`, so the others state it too.
 inline const std::string RESP = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 14\r\nConnection: keep-alive\r\n\r\nHello, World!\n";
 
+// Event counters of the instrumented build (-DHTTP_BENCH_COUNT_ALLOCS, bench/counting.h); SIGUSR2 prints them.
+inline std::atomic<unsigned long long> g_allocs{0};
+inline std::atomic<unsigned long long> g_handlers{0};
+
 inline std::atomic<bool> g_stop{false};
 inline void on_signal(int) { g_stop.store(true); }
 inline void on_usr2(int) {
@@ -17,4 +21,8 @@ inline void on_usr2(int) {
 	getrusage(RUSAGE_SELF, &ru);
 	std::fprintf(stderr, "RUSAGE %lld %lld\n", (long long)ru.ru_utime.tv_sec * 1000000 + ru.ru_utime.tv_usec,
 	             (long long)ru.ru_stime.tv_sec * 1000000 + ru.ru_stime.tv_usec);
+#ifdef HTTP_BENCH_COUNT_ALLOCS
+	std::fprintf(stderr, "ALLOCS %llu\nHANDLERS %llu\n", g_allocs.load(std::memory_order_relaxed),
+	             g_handlers.load(std::memory_order_relaxed));
+#endif
 }

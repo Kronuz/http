@@ -4,7 +4,7 @@
 # per run, wrk on the same host over loopback. Every server's reply is checked byte for byte first (bench/verify.py).
 # Give several builds of http_server_compare (from different revisions, with different file names) to compare them:
 # the other servers run from $BUILD, and the http kinds from every build in an order that rotates by round.
-#   sh bench/compare.sh [BIN ...]            REPS=3 rounds, KINDS="asio http httpt beast httplib", CONNS="1 64"
+#   sh bench/compare.sh [BIN ...]            REPS=3 rounds, KINDS="asio http httpt beast httplib" (httpr too), CONNS="1 64"
 #   python3 bench/summarize.py < output      medians per connection count, kind and build
 # BUILD (default build) holds the binaries; KINDS, CONNS and REPS select a piece of the run (a long one is run in parts).
 set -u
@@ -35,7 +35,7 @@ while [ $i -lt $REPS ]; do
 	for c in $CONNS; do
 		for k in $KINDS; do
 			case $k in
-				http|httpt)
+				http|httpt|httpr)
 					n=$#; j=0
 					while [ $j -lt $n ]; do   # rotate the starting build by round
 						j=$((j+1))
