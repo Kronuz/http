@@ -16,6 +16,9 @@ more.
 | 64 connections | 97,986 (10.2 us) | 82,380 (12.1 us) | 98,730 (10.1 us) | 0.99 |
 
 Against START: 0.85 and 0.83 before, 1.08 and 0.99 after (the A/A spread is 0.84 to 1.02).
+On the M4 Pro (3 rounds) `wrk` sets the rate at about 37,000 req/s for all three, and the CPU
+per request shows the change: START 22.5 and 22.1 us, `e70ba34` 22.7 and 22.4 us, this change
+21.7 and 21.5 us at 8 and 64 connections (req/s against START 1.02 and 1.01, A/A 1.01).
 
 ### Changed
 
