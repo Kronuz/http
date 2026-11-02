@@ -49,6 +49,17 @@ class BodyStream;   // http_body_stream.h -- the streamed request body (Request:
 // Cancellation stops reads at their next checkpoint; the response is still written.
 enum class CancelReason : unsigned char { None, Disconnect, Shutdown };
 
+// A transport's watch for a client hang-up that starts when the handler first asks about
+// cancellation (Request::on_cancel, cancelled() or cancel_reason()), so a handler that never
+// asks never pays for it. engage() runs on the connection's loop, at most once per request,
+// and calls Request::cancel(Disconnect) before it returns when the client has already gone.
+class CancelWatch {
+public:
+	virtual void engage() noexcept = 0;
+protected:
+	~CancelWatch() = default;
+};
+
 // The base for an application's typed per-request state. The library owns the
 // Request; an application attaches its own working state (a decoded body, resolved
 // routes, timings, ...) by subclassing this and returning it from
@@ -124,19 +135,25 @@ struct Request {
 	// service stops (Shutdown), and the handler registers what to do with on_cancel() --
 	// typically requesting a task::cancel_source. Only the first cancel() counts, and the
 	// callback runs once. A callback registered after cancel() runs at once. Neither call
-	// is thread-safe: both run on the connection's loop.
-	bool cancelled() const noexcept { return cancel_reason_ != CancelReason::None; }
-	CancelReason cancel_reason() const noexcept { return cancel_reason_; }
+	// is thread-safe: both run on the connection's loop. The first of these calls while the
+	// handler runs engages the transport's disconnect watch (CancelWatch), which reports a
+	// hang-up that happened before it at once.
+	bool cancelled() const noexcept { engage_watch(); return cancel_reason_ != CancelReason::None; }
+	CancelReason cancel_reason() const noexcept { engage_watch(); return cancel_reason_; }
 	// A callback that throws is dropped: the transport's frames must end by completing.
 	void on_cancel(std::function<void(CancelReason)> callback) {
 		cancel_callback_ = std::move(callback);
-		if (cancelled()) { run_cancel_callback(); }
+		if (cancel_reason_ != CancelReason::None) { run_cancel_callback(); return; }
+		engage_watch();   // a hang-up it finds cancels here, which runs the callback
 	}
 	void cancel(CancelReason reason) {
-		if (cancelled()) { return; }
+		if (cancel_reason_ != CancelReason::None) { return; }
 		cancel_reason_ = reason;
 		run_cancel_callback();
 	}
+	// For a transport: the watch the handler's first interest in cancellation engages, or
+	// null. The transport clears it before the watch goes away.
+	void set_cancel_watch(CancelWatch* watch) noexcept { cancel_watch_ = watch; }
 
 	// Typed per-request application state (see RequestExtension). Created once at
 	// headers-complete by HttpHandler::create_extension(), before on_request_body()
@@ -169,6 +186,7 @@ struct Request {
 		extension.reset();
 		cancel_reason_ = CancelReason::None;
 		cancel_callback_ = nullptr;
+		cancel_watch_ = nullptr;
 	}
 
 private:
@@ -176,8 +194,12 @@ private:
 		if (!cancel_callback_) { return; }
 		try { cancel_callback_(cancel_reason_); } catch (...) {}
 	}
+	void engage_watch() const noexcept {
+		if (cancel_watch_ && cancel_reason_ == CancelReason::None) { std::exchange(cancel_watch_, nullptr)->engage(); }
+	}
 	CancelReason cancel_reason_ = CancelReason::None;
 	std::function<void(CancelReason)> cancel_callback_;
+	mutable CancelWatch* cancel_watch_ = nullptr;   // engaged once, then cleared
 };
 
 

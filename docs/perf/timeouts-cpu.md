@@ -90,10 +90,12 @@ one thread and all 8 on 8 threads. The 64-connection row is therefore one connec
 With the timeouts on, `http` spends 1.5x (M4 Pro) to 2.9x (i9) the CPU of a minimal server on a keep-alive request
 at one connection, and most of the gap is the connection's input and its deadlines:
 
-- **The disconnect watch.** While a handler runs, one read stays pending on the socket so a hang-up cancels the
-  request. The watch reads up to 4096 bytes ahead into the connection's own buffer, and that pending read is the next
-  request's read, so a keep-alive request costs one `recv`. A watch that read one byte cost a second `recv` for the
-  rest of the request and a `kevent`.
+- **The disconnect watch.** While a handler runs, a read on the socket lets a hang-up cancel the request. On plain
+  TCP the read starts only when the handler first asks about cancellation (`on_cancel()`, `cancelled()`), after a
+  peek at what the client did meanwhile, so a handler that never asks costs no read. Once started, the watch reads
+  up to 4096 bytes ahead into the connection's own buffer, and that pending read is the next request's read. A
+  watch that read one byte cost a second `recv` for the rest of the request and a `kevent`. The tables on this page
+  measure `84adc1d`, whose watch started before every handler; `CHANGELOG.md` has the change's numbers.
 - **The wake-up.** A completed read wakes whoever waits for it through a capacity-1 `asio::experimental::channel`. A
   timer used as a condition variable costs a pipe `write` and `read` and a `kevent` each time on kqueue when it is the
   earliest timer.

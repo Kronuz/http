@@ -19,8 +19,9 @@ chore, a device read) resumes the handler by posting to the loop, which is what
 ```
 headers complete   gate.enter() -- empty: 503 + Retry-After: 1, close      (admit)
                    create_extension, then BodyStream | BodySink | buffer (cap: 413)
-handler start      RequestAbort on the reactor's list; ConnectionInput::watch armed;
-                   connection coroutine's cancellation disabled
+handler start      RequestAbort on the reactor's list; ConnectionInput::watch set (on plain
+                   TCP it reads once the handler first asks); connection coroutine's
+                   cancellation disabled
 handler runs       co_await handle(request, writer)
                      client EOF / read error   -> Request::cancel(Disconnect)
                      abort_all() at shutdown   -> Request::cancel(Shutdown)
@@ -65,9 +66,20 @@ again. The bytes go back to the parser. `read()` returns them first and in order
 whatever pieces the caller asks for, and nothing more is read ahead until they are all
 consumed, so a connection holds at most 4096 bytes of input outside the kernel however much
 the client sends. The pending read is also the read for the next request: it serves the first
-read after the reply, so a keep-alive request costs one `recv`. A request whose bytes arrived
-in the same read as the previous one has nothing pending and is watched normally. A watch
-armed after EOF was already seen cancels the request at once.
+read after the reply. A request whose bytes arrived in the same read as the previous one has
+nothing pending and is watched normally. A watch armed after EOF was already seen cancels the
+request at once.
+
+On plain TCP a buffered request's watch waits for the handler to ask. The request holds a
+`CancelWatch` hook, and the handler's first `on_cancel()`, `cancelled()` or `cancel_reason()`
+engages it: a peek at the socket (`recv` with `MSG_PEEK | MSG_DONTWAIT`) applies the rules
+above to what the client did meanwhile (data waiting ends the watch and stays in the kernel;
+EOF or a socket error cancels the request before the call returns, so `cancelled()` is
+already true and an `on_cancel` callback has already run), and with nothing waiting the read
+is armed. A handler that never asks cannot observe a hang-up, so its request pays for no
+read: the next request's read is the socket's own, after the reply. A TLS stream cannot be
+peeked through its records, and the streamed path watches only after the body, so both arm
+the read when the watch is set.
 
 ## Streamed bodies
 

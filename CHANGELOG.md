@@ -2,6 +2,47 @@
 
 Newest first. Dates are 2026.
 
+## 2026-11-01: the disconnect watch waits for the handler to ask
+
+`bench_http` under `wrk` (a 14-byte reply through `HttpAsioService`, 2 reactors, keep-alive,
+4 s runs, START, `e70ba34` and this change built and run in one hold, median of 4 rounds, A/A
+is a second copy of the START binary): on the i9 `e70ba34` served 15% and 17% fewer requests
+per second than START (`c23bb99`, before coroutine handlers), and this change serves as many or
+more.
+
+| i9-9980HK, req/s (CPU per request) | START `c23bb99` | `e70ba34` | this change | A/A |
+| --- | ---: | ---: | ---: | ---: |
+| 8 connections | 87,316 (11.1 us) | 74,503 (13.3 us) | 93,657 (10.6 us) | 0.95 |
+| 64 connections | 97,986 (10.2 us) | 82,380 (12.1 us) | 98,730 (10.1 us) | 0.99 |
+
+Against START: 0.85 and 0.83 before, 1.08 and 0.99 after (the A/A spread is 0.84 to 1.02).
+
+### Changed
+
+- **The disconnect watch reads only once the handler asks about cancellation.** The watch
+  started a read before every handler: a `recv` that found nothing ahead of every reply, and a
+  wake-up through a channel post when the next request arrived. A handler that never asks
+  about cancellation cannot observe a hang-up, so on plain TCP the request now carries a
+  `CancelWatch` hook (`Request::set_cancel_watch`) that the handler's first `on_cancel()`,
+  `cancelled()` or `cancel_reason()` engages. Engaging peeks at the socket (`MSG_PEEK |
+  MSG_DONTWAIT`) and applies the watch's rules to what the client did meanwhile: data waiting
+  ends the watch, EOF or a socket error cancels the request before the call returns (so
+  `cancelled()` is already true and an `on_cancel` callback has already run), and otherwise
+  the read-ahead watch starts as before. Cancellation, admission, the body cap and the
+  smuggling defenses are unchanged; TLS and the streamed path watch from the start.
+- **A buffered reply goes out at once.** On plain TCP the connection's socket is non-blocking
+  and the reply's head and body leave in one `write_some`; only what the send buffer does not
+  take is written asynchronously (with its deadlines). The head's string is reused across the
+  connection's replies, and a read with nothing read ahead is the socket's own operation.
+
+### Added
+
+- `readahead_test` [L] (the lazy watch and the `Request` hook), [Q] (a hang-up before the
+  first question, pipelined input before it, a handler that never asks) and [N] (replies of
+  1 byte to 4 MiB to a client that reads late). Removing the laziness, the peek, the hook in
+  `on_cancel()`, the buffer advance after a partial send, or the partial-send check each fails
+  named checks.
+
 ## 2026-11-01: Beast and cpp-httplib in the server comparison
 
 ### Added

@@ -5,6 +5,12 @@
 //   [U] ConnectionInput on its own: the watch holds at most kReadAhead bytes outside the kernel,
 //       hands them back in order whatever the output size, arms nothing until they are consumed,
 //       and keeps the disconnect rules (EOF with nothing read fires; data ends the watch)
+//   [L] the lazy watch: it reads nothing until the handler asks (CancelWatch::engage), and the
+//       first question decides what happened meanwhile as the read would have; the Request hook
+//       engages it once, from on_cancel(), cancelled() or cancel_reason()
+//   [Q] the same over real TCP: a hang-up before the first question is seen by it, pipelined input
+//       before it ends the watch, a handler that never asks has its pipelined successors answered
+//   [N] a buffered reply sent at once as far as the socket takes it: replies to 4 MiB arrive whole
 //   [P] a pipelined request that arrives inside the read-ahead (while the handler of the one
 //       before runs) is parsed and answered, at every alignment of the 4096-byte window against
 //       the request line, the headers, the CRLF CRLF, the body and the next request
@@ -29,6 +35,7 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -147,6 +154,7 @@ static std::string post(const std::string& path, const std::string& body, const 
 struct Obs {
 	std::atomic<bool> started{false}, finished{false}, release{false};
 	std::atomic<int> reason{-1};   // CancelReason once cancelled
+	std::atomic<bool> at_once{false};   // /lazy: the callback ran inside on_cancel()
 };
 struct App : http::HttpHandler {
 	std::mutex mutex;
@@ -178,6 +186,25 @@ struct App : http::HttpHandler {
 		}
 		if (req.path == "/body") {   // a body of the size the query names, from a known pattern
 			w.send(200, pattern(std::stoul(param(req.query, "n")), 5));
+			co_return;
+		}
+		if (req.path == "/lazy") {   // waits for the test without asking about cancellation, then asks (or never does)
+			auto o = get_obs(param(req.query, "id"));
+			o->started = true;
+			asio::steady_timer t(co_await asio::this_coro::executor);
+			for (auto end = clk::now() + 5s; !o->release.load() && clk::now() < end;) {
+				t.expires_after(2ms);
+				co_await t.async_wait(asio::use_awaitable);
+			}
+			const std::string ask = param(req.query, "ask");
+			if (ask == "cb") {
+				req.on_cancel([o](http::CancelReason r) { o->reason = static_cast<int>(r); });
+				o->at_once = o->reason.load() != -1;
+			} else if (ask == "poll") {
+				o->reason = req.cancelled() ? static_cast<int>(req.cancel_reason()) : 0;
+			}
+			o->finished = true;
+			w.send(200, "lazy");
 			co_return;
 		}
 		if (req.path == "/hold") {   // runs until the test releases it, noting how a cancel reached it
@@ -236,6 +263,144 @@ static Read read_once(Pair& p, const std::shared_ptr<Input>& in, std::size_t max
 	p.io.restart();
 	for (auto end = clk::now() + 2s; !r.done && clk::now() < end;) { p.io.run_one_for(5ms); }
 	return r;
+}
+
+// The lazy watch (a plain TCP socket): it reads nothing until engage(), and engage() decides
+// what happened meanwhile as the read would have.
+static void lazy_watch_tests() {
+	static_assert(Input::kLazyWatch, "a plain TCP socket's watch waits for engage()");
+	{   // nothing is read while nobody asks; asking ends the watch on data and leaves the data in the kernel
+		Pair p;
+		const std::string data = pattern(10000);
+		p.send(data);
+		check(p.arrived(10000), "[L] 10000 bytes reached the server's receive queue");
+		auto in = std::make_shared<Input>(p.server);
+		int fired = 0;
+		in->watch([&] { ++fired; }, /*lazy=*/true);
+		p.settle();
+		check(pending_bytes(p.server.native_handle()) == 10000 && fired == 0, "[L] a lazy watch reads nothing before engage()");
+		in->engage();
+		p.settle();
+		check(pending_bytes(p.server.native_handle()) == 10000 && fired == 0, "[L] engage() with data waiting ends the watch, reads nothing, fires nothing");
+		::shutdown(p.client, SHUT_WR);
+		p.settle();
+		check(fired == 0, "[L] and a later EOF does not fire the ended watch");
+		auto a = read_once(p, in, 65536), b = read_once(p, in, 65536), c = read_once(p, in, 65536);
+		check(a.data + b.data + c.data == data, "[L] the bytes are read from the socket, in order");
+	}
+	{   // EOF before anyone asked: engage() fires at once, before it returns
+		Pair p;
+		auto in = std::make_shared<Input>(p.server);
+		int fired = 0;
+		in->watch([&] { ++fired; }, true);
+		::shutdown(p.client, SHUT_WR);
+		p.settle();
+		check(until([&] { char b; return ::recv(p.server.native_handle(), &b, 1, MSG_PEEK | MSG_DONTWAIT) == 0; }), "[L] the EOF reached the server");
+		check(fired == 0, "[L] an EOF nobody asked about fires nothing");
+		in->engage();
+		check(fired == 1, "[L] engage() after the EOF fires the disconnect before it returns");
+		in->engage();
+		p.settle();
+		check(fired == 1, "[L] once");
+		auto r = read_once(p, in, 100);
+		check(r.done && r.error == asio::error::eof, "[L] and the EOF is read afterwards");
+	}
+	{   // a reset before anyone asked is a disconnect too
+		Pair p;
+		auto in = std::make_shared<Input>(p.server);
+		int fired = 0;
+		in->watch([&] { ++fired; }, true);
+		linger l{1, 0}; ::setsockopt(p.client, SOL_SOCKET, SO_LINGER, &l, sizeof(l)); ::close(p.client); p.client = -1;
+		check(until([&] { char b; return ::recv(p.server.native_handle(), &b, 1, MSG_PEEK | MSG_DONTWAIT) < 0 && errno != EAGAIN && errno != EWOULDBLOCK; }), "[L] the reset reached the server");
+		in->engage();
+		check(fired == 1, "[L] engage() after a reset fires the disconnect");
+	}
+	{   // asked before anything happened: from then on it is the read-ahead watch
+		Pair p;
+		auto in = std::make_shared<Input>(p.server);
+		int fired = 0;
+		in->watch([&] { ++fired; }, true);
+		in->engage();
+		p.settle();
+		check(fired == 0, "[L] engage() with nothing waiting fires nothing");
+		::shutdown(p.client, SHUT_WR);
+		p.settle();
+		check(fired == 1, "[L] and the read it armed sees the EOF that follows");
+	}
+	{
+		Pair p;
+		auto in = std::make_shared<Input>(p.server);
+		int fired = 0;
+		in->watch([&] { ++fired; }, true);
+		in->engage();
+		p.settle();
+		const std::string data = pattern(10000, 3);
+		p.send(data);
+		check(p.arrived(10000 - static_cast<int>(Input::kReadAhead)), "[L] 10000 bytes sent after engage()");
+		p.settle();
+		check(pending_bytes(p.server.native_handle()) == 10000 - static_cast<int>(Input::kReadAhead) && fired == 0,
+			"[L] the engaged watch reads ahead kReadAhead bytes, and the data ends it");
+		auto a = read_once(p, in, 65536), b = read_once(p, in, 65536);
+		check(a.data + b.data == data, "[L] and the stream is intact");
+	}
+	{   // unwatched (the handler returned): engage() does nothing
+		Pair p;
+		auto in = std::make_shared<Input>(p.server);
+		int fired = 0;
+		in->watch([&] { ++fired; }, true);
+		in->unwatch();
+		::shutdown(p.client, SHUT_WR);
+		p.settle();
+		in->engage();
+		p.settle();
+		check(fired == 0, "[L] engage() after unwatch() neither fires nor reads");
+		auto r = read_once(p, in, 100);
+		check(r.done && r.error == asio::error::eof, "[L] the EOF stays for the next read");
+	}
+	// Request: the first on_cancel(), cancelled() or cancel_reason() engages the watch, once.
+	struct Probe : http::CancelWatch {
+		http::Request* request = nullptr;
+		bool gone = false;
+		int engaged = 0;
+		void engage() noexcept override { ++engaged; if (gone) { request->cancel(http::CancelReason::Disconnect); } }
+	};
+	{
+		http::Request r;
+		Probe w; w.request = &r;
+		r.set_cancel_watch(&w);
+		check(w.engaged == 0, "[L] setting the watch engages nothing");
+		check(!r.cancelled() && w.engaged == 1, "[L] cancelled() engages the watch");
+		(void)r.cancelled(); (void)r.cancel_reason(); r.on_cancel([](http::CancelReason) {});
+		check(w.engaged == 1, "[L] once");
+	}
+	for (int how = 0; how < 3; ++how) {
+		http::Request r;
+		Probe w; w.request = &r; w.gone = true;
+		r.set_cancel_watch(&w);
+		int calls = 0;
+		bool seen = false;
+		if (how == 0) { seen = r.cancelled(); }
+		if (how == 1) { seen = r.cancel_reason() == http::CancelReason::Disconnect; }
+		if (how == 2) { r.on_cancel([&](http::CancelReason why) { ++calls; seen = why == http::CancelReason::Disconnect; }); }
+		check(seen && w.engaged == 1 && calls == (how == 2 ? 1 : 0),
+			std::string("[L] a hang-up engage() finds is seen by the call that engaged it: ") + (how == 0 ? "cancelled()" : how == 1 ? "cancel_reason()" : "on_cancel() runs the callback once"));
+	}
+	{
+		http::Request r;
+		Probe w; w.request = &r;
+		r.set_cancel_watch(&w);
+		r.cancel(http::CancelReason::Shutdown);
+		check(r.cancelled() && w.engaged == 0, "[L] a request already cancelled engages nothing");
+		http::Request q;
+		q.set_cancel_watch(&w);
+		q.clear();
+		(void)q.cancelled();
+		check(w.engaged == 0, "[L] clear() drops the watch");
+		q.set_cancel_watch(&w);
+		q.set_cancel_watch(nullptr);
+		(void)q.cancelled();
+		check(w.engaged == 0, "[L] and so does set_cancel_watch(nullptr)");
+	}
 }
 
 static void input_tests() {
@@ -405,6 +570,7 @@ static void input_tests() {
 		}
 		check(bad == 0, "[U] " + std::to_string(total) + " random walks of sends, watches and reads return the stream byte for byte");
 	}
+	lazy_watch_tests();
 }
 #endif  // READAHEAD_TEST_INTEGRATION_ONLY
 
@@ -656,6 +822,72 @@ int main() {
 				"[S] " + what + ": answered " + std::to_string(r.status) + ", then the connection " + (closed ? "closes" : "stays open") +
 				", /smuggled ran " + std::to_string(s.app.hit_count("/smuggled")) + "x");
 		}
+	}
+
+	// [Q] The watch starts when the handler first asks about cancellation, and the first question
+	// sees what happened before it: a hang-up is a disconnect (polled or by callback, which runs
+	// inside on_cancel), pipelined input ends the watch, and a handler that never asks still has
+	// the requests pipelined behind it answered in order.
+	{
+		Server s;
+		s.start();
+		for (const std::string ask : {"poll", "cb"}) {
+			Conn c(s.port);
+			const std::string id = "q-" + ask;
+			auto o = s.app.get_obs(id);
+			c.send(get("/lazy?id=" + id + "&ask=" + ask));
+			until([&] { return o->started.load(); });
+			c.shut_wr();
+			std::this_thread::sleep_for(30ms);
+			o->release = true;
+			until([&] { return o->finished.load(); });
+			check(o->reason == static_cast<int>(http::CancelReason::Disconnect), "[Q] " + ask + ": a half-close before the first question is a disconnect at that question");
+			if (ask == "cb") { check(o->at_once.load(), "[Q] cb: and the callback ran inside on_cancel()"); }
+			check(c.read_response().body == "lazy" && c.ends_silently(), "[Q] " + ask + ": the response is still written, then the connection closes");
+		}
+		{
+			Conn c(s.port);
+			auto o = s.app.get_obs("q-pipe");
+			c.send(get("/lazy?id=q-pipe&ask=poll"));
+			until([&] { return o->started.load(); });
+			c.send(get("/fast"));
+			c.shut_wr();
+			std::this_thread::sleep_for(30ms);
+			o->release = true;
+			until([&] { return o->finished.load(); });
+			check(o->reason == 0, "[Q] input pipelined before the first question ends the watch: the half-close after it is not this request's");
+			auto r1 = c.read_response(), r2 = c.read_response();
+			check(r1.body == "lazy" && r2.body == "fast" && c.ends_silently(), "[Q] both are answered in order, then the connection closes");
+		}
+		{
+			Conn c(s.port);
+			auto o = s.app.get_obs("q-none");
+			c.send(get("/lazy?id=q-none&ask=none") + get("/echo") + post("/echo", "abc"));
+			until([&] { return o->started.load(); });
+			std::this_thread::sleep_for(20ms);
+			o->release = true;
+			auto r1 = c.read_response(), r2 = c.read_response(), r3 = c.read_response();
+			check(r1.body == "lazy" && r2.status == 200 && r2.body.empty() && r3.body == "abc", "[Q] a handler that never asks: the requests pipelined behind it are answered in order");
+		}
+	}
+
+	// [N] A buffered reply leaves at once as far as the socket takes it, and the rest is written
+	// after: with no timeouts, replies far larger than the send buffer reach a client that reads
+	// late byte for byte, on one keep-alive connection.
+	{
+		Server s;
+		s.start();
+		Conn c(s.port);
+		int ok = 0, n = 0;
+		for (std::size_t size : {1u, 1000u, 65536u, 300000u, 1u << 20, 4u << 20, 1000u}) {
+			c.send(get("/body?n=" + std::to_string(size)));
+			std::this_thread::sleep_for(30ms);   // the send buffer fills before the client reads
+			auto r = c.read_response();
+			++n;
+			if (r.complete && r.body == pattern(size, 5)) { ++ok; }
+			else { check(false, "[N] reply of " + std::to_string(size) + " bytes arrived as " + std::to_string(r.body.size())); }
+		}
+		check(ok == n, "[N] " + std::to_string(ok) + " of " + std::to_string(n) + " replies from 1 byte to 4 MiB arrive byte for byte to a client that reads late");
 	}
 
 	// [W] The reply goes out in 64 KiB slices of head and body together; every byte arrives.

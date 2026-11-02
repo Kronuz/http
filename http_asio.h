@@ -51,6 +51,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstddef>
 #include <cstring>
 #include <exception>
@@ -230,11 +231,22 @@ public:
 	// Builds only the status line + headers; the body is written separately (scatter
 	// -gather) so it is never copied into this string. See has_body()/body().
 	std::string serialize_head(bool keep_alive) {
+		std::string out;
+		serialize_head(out, keep_alive);
+		return out;
+	}
+	// The same, appended to `out` (a connection reuses one string for every reply's head).
+	void serialize_head(std::string& out, bool keep_alive) {
 		if (!deferred_) { maybe_conditional(); if (status_ != 304) { maybe_range(); } maybe_compress(); }
-		std::string out = "HTTP/1.1 ";
+		const char* reason = reason_phrase(status_);
+		// The status line, the fields, Content-Length (at most 20 digits), Connection, the blank line.
+		std::size_t size = 80 + std::strlen(reason);
+		for (const auto& [k, v] : headers_) { size += k.size() + 2 + v.size() + 2; }
+		out.reserve(out.size() + size);
+		out += "HTTP/1.1 ";
 		out += std::to_string(status_);
 		out += ' ';
-		out += reason_phrase(status_);
+		out += reason;
 		out += "\r\n";
 		for (const auto& [k, v] : headers_) {
 			out += k; out += ": "; out += v; out += "\r\n";
@@ -246,7 +258,6 @@ public:
 		}
 		out += (keep_alive && !close_) ? "Connection: keep-alive\r\n" : "Connection: close\r\n";
 		out += "\r\n";
-		return out;
 	}
 
 	// The finalised body, valid after serialize_head(). Written as its own buffer.
@@ -396,11 +407,24 @@ inline asio::awaitable<ReplySettlement> write_with_progress(Stream& socket, std:
 //     disconnect, because a client that closed has nobody to read what a search computes.
 //     Pipelined input (the client sent the next request early) ends the watch for the
 //     rest of that request: a later disconnect is not seen until the next read.
+// On a plain TCP socket a request's watch is lazy: it reads nothing until the handler first
+// asks about cancellation (engage(), through Request's CancelWatch hook), and then a peek at
+// the socket decides what happened meanwhile by the same rules. A handler that never asks
+// costs no read, so its request's next read is the socket's own, after the reply.
 template<class Stream>
-class ConnectionInput : public std::enable_shared_from_this<ConnectionInput<Stream>> {
+class ConnectionInput : public std::enable_shared_from_this<ConnectionInput<Stream>>, public CancelWatch {
 public:
 	// The most the watch reads ahead of the parser.
 	static constexpr std::size_t kReadAhead = 4096;
+	// Whether watch(..., lazy) can wait for engage(): a plain TCP socket can be asked, at once
+	// and without reading it, what the peer did while nobody watched (recv with MSG_PEEK and
+	// MSG_DONTWAIT). A TLS stream cannot (its records must be decrypted to tell a close_notify
+	// from data), so its watch reads from the start.
+#if defined(MSG_PEEK) && defined(MSG_DONTWAIT)
+	static constexpr bool kLazyWatch = std::is_same_v<Stream, asio::ip::tcp::socket>;
+#else
+	static constexpr bool kLazyWatch = false;
+#endif
 	explicit ConnectionInput(Stream& stream) : stream_(stream), done_(stream.get_executor(), 1) {}
 	template<class Control>
 	void monitor(const std::shared_ptr<Control>& control) {
@@ -412,17 +436,56 @@ public:
 		arm();
 	}
 	// Calls `on_disconnect` once, on the loop, when the peer closes while the watch is set.
-	void watch(std::function<void()> on_disconnect) {
+	// A lazy watch (kLazyWatch streams) reads nothing until engage(): until the handler asks
+	// about cancellation, the request costs no read and no wake-up.
+	void watch(std::function<void()> on_disconnect, bool lazy = false) {
 		on_disconnect_ = std::move(on_disconnect);
 		if (ready_) {
 			if (error_ && error_ != asio::error::operation_aborted) { fire(); }
 			else if (size_) { on_disconnect_ = nullptr; }
 			return;
 		}
+		if (lazy && kLazyWatch) { return; }
 		arm();
 	}
 	void unwatch() noexcept { on_disconnect_ = nullptr; }
+	// CancelWatch: the handler asked about cancellation; starts a lazy watch. What the peer did
+	// while nobody watched decides as the read would have: data waiting (a pipelined request)
+	// ends the watch, EOF or a socket error is a disconnect, and nothing yet arms the read.
+	void engage() noexcept override {
+		if (!on_disconnect_ || pending_ || ready_) { return; }
+#if defined(MSG_PEEK) && defined(MSG_DONTWAIT)
+		if constexpr (kLazyWatch) {
+			char byte;
+			const auto n = ::recv(stream_.native_handle(), &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+			if (n > 0) { on_disconnect_ = nullptr; return; }
+			if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) { fire(); return; }
+		}
+#endif
+		try { arm(); } catch (...) {}   // no memory for the read: the request goes unwatched
+	}
+	// The next bytes: what the watch read ahead first, else a read of the socket. Not a
+	// coroutine itself, so a read with nothing held is the socket's own operation.
 	asio::awaitable<std::size_t> read(asio::mutable_buffer output) {
+		if (!pending_ && !ready_) { return stream_.async_read_some(output, asio::use_awaitable); }
+		return read_held(output);
+	}
+	asio::awaitable<std::size_t> read(asio::mutable_buffer output, std::chrono::steady_clock::time_point deadline) {
+		if (deadline == std::chrono::steady_clock::time_point::max()) { return read(output); }
+		return read_before(output, deadline);
+	}
+	// Waits for the pending read. A cancelled waiter ends the wait: the next co_await of a
+	// cancelled coroutine throws operation_aborted, and the socket close that follows reaps
+	// the read. The channel holds one completion token that nobody may be waiting for; a
+	// stale token only makes a later wait return once more, and the loop asks pending_ again.
+	asio::awaitable<void> drain() {
+		while (pending_) {
+			asio::error_code error; co_await done_.async_receive(asio::redirect_error(asio::use_awaitable, error));
+		}
+	}
+private:
+	struct ReadCompletion { std::size_t bytes; std::exception_ptr failure; };
+	asio::awaitable<std::size_t> read_held(asio::mutable_buffer output) {
 		if (pending_) { co_await drain(); }
 		if (ready_) {
 			if (size_) {
@@ -439,8 +502,7 @@ public:
 		}
 		co_return co_await stream_.async_read_some(output, asio::use_awaitable);
 	}
-	asio::awaitable<std::size_t> read(asio::mutable_buffer output, std::chrono::steady_clock::time_point deadline) {
-		if (deadline == std::chrono::steady_clock::time_point::max()) { co_return co_await read(output); }
+	asio::awaitable<std::size_t> read_before(asio::mutable_buffer output, std::chrono::steady_clock::time_point deadline) {
 		using namespace asio::experimental::awaitable_operators;
 		auto winner = co_await (read_completed(output) || expire_read(deadline));
 		if (winner.index() == 0) {
@@ -451,17 +513,6 @@ public:
 		auto error = std::get<1>(winner);
 		throw asio::system_error(error ? error : asio::error::timed_out);
 	}
-	// Waits for the pending read. A cancelled waiter ends the wait: the next co_await of a
-	// cancelled coroutine throws operation_aborted, and the socket close that follows reaps
-	// the read. The channel holds one completion token that nobody may be waiting for; a
-	// stale token only makes a later wait return once more, and the loop asks pending_ again.
-	asio::awaitable<void> drain() {
-		while (pending_) {
-			asio::error_code error; co_await done_.async_receive(asio::redirect_error(asio::use_awaitable, error));
-		}
-	}
-private:
-	struct ReadCompletion { std::size_t bytes; std::exception_ptr failure; };
 	void arm() {
 		if (pending_ || ready_) { return; }
 		pending_ = true;
@@ -641,13 +692,37 @@ struct RequestAbort final : reactor::Abortable {
 };
 
 // Clears the connection's disconnect watch on every exit, so a late read cannot reach a
-// request that is gone.
+// request that is gone, and the request's handle on it.
 template<class Stream>
 struct WatchGuard {
-	explicit WatchGuard(ConnectionInput<Stream>& in) : input(in) {}
-	~WatchGuard() { input.unwatch(); }
+	explicit WatchGuard(ConnectionInput<Stream>& in, Request* req = nullptr) : input(in), request(req) {}
+	~WatchGuard() { input.unwatch(); if (request) { request->set_cancel_watch(nullptr); } }
 	ConnectionInput<Stream>& input;
+	Request* request;
 };
+
+// Sends what the socket takes at once, without waiting, and advances `buffers` past it: a
+// reply that fits the send buffer leaves with no asynchronous write, whose completion costs a
+// trip through the loop's queue. False when the connection failed. A plain TCP socket in
+// non-blocking mode only.
+template<std::size_t N>
+inline bool send_now(asio::ip::tcp::socket& socket, std::array<asio::const_buffer, N>& buffers) {
+	asio::error_code error;
+	std::size_t sent = socket.write_some(buffers, error);
+	if (error && error != asio::error::would_block && error != asio::error::try_again) { return false; }
+	for (auto& buffer : buffers) {
+		const std::size_t n = (std::min)(sent, buffer.size());
+		buffer += n;
+		sent -= n;
+	}
+	return true;
+}
+template<std::size_t N>
+inline std::size_t bytes_left(const std::array<asio::const_buffer, N>& buffers) {
+	std::size_t n = 0;
+	for (const auto& buffer : buffers) { n += buffer.size(); }
+	return n;
+}
 
 // Serve one connection: a keep-alive loop of parse -> handler -> write, all coroutines on
 // the connection's loop. handle() is awaited, so a handler that waits suspends and the loop
@@ -688,6 +763,16 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 		});
 		std::string buffered;
 		char tmp[64 * 1024];
+		std::string head;                          // a buffered reply's head; the storage is reused
+		std::array<asio::const_buffer, 2> reply;   // what of the reply is still to be written
+		// A plain TCP socket sends a buffered reply at once (send_now), so it is put in
+		// non-blocking mode: a full send buffer then returns instead of waiting.
+		bool send_first = false;
+		if constexpr (std::is_same_v<Stream, asio::ip::tcp::socket>) {
+			asio::error_code mode_ec;
+			socket.non_blocking(true, mode_ec);
+			send_first = !mode_ec;
+		}
 
 		using clock = std::chrono::steady_clock;
 		const auto ms = [](std::chrono::milliseconds t) { return t.count() > 0; };
@@ -702,12 +787,27 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 		const auto parse_failed = [&] {
 			if (parser.body_limit_exceeded()) { throw RequestRejected(413, "Payload Too Large\n"); }
 		};
-		// Writes the response; false when the connection cannot carry on.
+		// Writes the response; false when the connection cannot carry on. A buffered reply has
+		// been framed by send_reply(), and this writes what it left.
 		const auto respond = [&](AsioResponseWriter& writer, bool keep_alive, clock::time_point request_deadline) -> asio::awaitable<bool> {
 			if (writer.is_deferred()) { co_return co_await write_response(socket, writer, keep_alive, input); }
-			std::string head = writer.serialize_head(keep_alive);
-			std::array<asio::const_buffer, 2> buffers{asio::buffer(head), writer.has_body() ? asio::buffer(writer.body()) : asio::const_buffer{}};
-			co_return co_await write_with_progress(socket, buffers, inactivity, request_deadline) == ReplySettlement::Written;
+			co_return co_await write_with_progress(socket, reply, inactivity, request_deadline) == ReplySettlement::Written;
+		};
+		// Frames a buffered reply into `reply` and, on plain TCP, sends what the socket takes at
+		// once (send_now). 1: all of it left; 0: the connection failed; -1: respond() writes
+		// the rest, or the reply is deferred.
+		const auto send_reply = [&](AsioResponseWriter& writer, bool keep_alive) -> int {
+			if (writer.is_deferred()) { return -1; }
+			head.clear();
+			writer.serialize_head(head, keep_alive);
+			reply = {asio::buffer(head), writer.has_body() ? asio::buffer(writer.body()) : asio::const_buffer{}};
+			if constexpr (std::is_same_v<Stream, asio::ip::tcp::socket>) {
+				if (send_first) {
+					if (!send_now(socket, reply)) { return 0; }
+					if (bytes_left(reply) == 0) { return 1; }
+				}
+			}
+			return -1;
 		};
 		for (;;) {
 			// A shutdown that arrived while the last request ran found cancellation disabled.
@@ -815,7 +915,9 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 					writer.write("Internal Server Error\n");
 					writer.end();
 				}
-				if (!co_await respond(writer, keep_alive, request_deadline)) { co_return; }
+				const int sent = send_reply(writer, keep_alive);
+				if (sent == 0) { co_return; }
+				if (sent < 0 && !co_await respond(writer, keep_alive, request_deadline)) { co_return; }
 				admitted.reset();
 				co_await asio::this_coro::reset_cancellation_state(asio::enable_terminal_cancellation());
 				if (!keep_alive || writer.wants_close()) { break; }
@@ -834,7 +936,7 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 				if (parser.errored()) { parse_failed(); co_return; }
 			}
 
-			if (std::chrono::steady_clock::now() >= request_deadline) { co_return; }
+			if (request_deadline != clock::time_point::max() && clock::now() >= request_deadline) { co_return; }
 			Request request = parser.take();
 			request.remote = remote;
 			reactor->lag().note_activity();
@@ -846,17 +948,21 @@ inline asio::awaitable<void> serve_connection_body(Stream& socket, const std::sh
 			AsioResponseWriter writer(request, options, &ex, reactor);
 			RequestAbort<Stream> tracked(*reactor, request, socket);
 			{
-				WatchGuard<Stream> watching(*input);
+				WatchGuard<Stream> watching(*input, &request);
 				// The handler's frame ends only by completing; see the streamed path.
 				co_await asio::this_coro::reset_cancellation_state(asio::disable_cancellation());
-				input->watch([&request] { request.cancel(CancelReason::Disconnect); });
+				// The watch starts when the handler first asks about cancellation (CancelWatch).
+				input->watch([&request] { request.cancel(CancelReason::Disconnect); }, /*lazy=*/true);
+				request.set_cancel_watch(input.get());
 				try {
 					co_await handler->handle(request, writer);
 				} catch (...) {
 					map_handler_error(handler, request, writer, std::current_exception());
 				}
 			}
-			if (!co_await respond(writer, keep_alive, request_deadline)) { co_return; }
+			const int sent = send_reply(writer, keep_alive);
+			if (sent == 0) { co_return; }
+			if (sent < 0 && !co_await respond(writer, keep_alive, request_deadline)) { co_return; }
 			admitted.reset();
 			co_await asio::this_coro::reset_cancellation_state(asio::enable_terminal_cancellation());
 			if (!keep_alive || writer.wants_close()) { break; }
