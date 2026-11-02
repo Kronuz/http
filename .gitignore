@@ -3,3 +3,4 @@ build-*/
 _deps/
 *.o
 *.a
+.scratch/

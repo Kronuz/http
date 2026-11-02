@@ -54,6 +54,11 @@ if(ASIO_INCLUDE_DIR STREQUAL "")
 	set(ASIO_INCLUDE_DIR "${asio_SOURCE_DIR}/asio/include")
 endif()
 
+# --- task: the coroutine task type (no source uses it yet) ---
+# Header-only; its asio binding finds the ASIO_INCLUDE_DIR set above and fetches no second Asio.
+FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG 8cad661e0dd3bd1c74b964cdc0ee42066f568838)
+FetchContent_MakeAvailable(task)
+
 # --- reactor: the generic Asio server runtime (shared reactor pool + accept + shutdown) ---
 # The reactor pool, the two accept/bind strategies, the admission gate, the abortable
 # list, and the abort->grace->force->stop->join shutdown were extracted from http_asio.h into
@@ -72,7 +77,7 @@ add_library(http INTERFACE)
 target_include_directories(http INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}" "${ASIO_INCLUDE_DIR}" "${REACTOR_INCLUDE_DIR}")
 target_compile_features(http INTERFACE cxx_std_20)
 target_compile_definitions(http INTERFACE ASIO_STANDALONE)
-target_link_libraries(http INTERFACE http_parser::http_parser radix_router::radix_router compressors::compressors Threads::Threads)
+target_link_libraries(http INTERFACE http_parser::http_parser radix_router::radix_router compressors::compressors task::asio Threads::Threads)
 add_library(http::http ALIAS http)
 
 # --- demo + benchmarks + tests (built only when this repo is top-level) ---
