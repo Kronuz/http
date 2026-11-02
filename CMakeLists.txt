@@ -31,14 +31,14 @@ FetchContent_MakeAvailable(radix_router)
 # The Joyent http_parser fork: its fixed method table holds Xapiand's REST verbs
 # (COUNT, INFO, DUMP, RESTORE, ...), which stock llhttp rejects. The seam stays
 # parser-agnostic, so this is contained inside the connection.
-FetchContent_Declare(http_parser GIT_REPOSITORY https://github.com/Kronuz/http-parser.git GIT_TAG 5c8b8f48033209b77dd2da774c1e708096ba9975)
+FetchContent_Declare(http_parser GIT_REPOSITORY https://github.com/Kronuz/http-parser.git GIT_TAG c27615d24d40a2becfb42d40c5060a9803d6a75c)
 FetchContent_MakeAvailable(http_parser)
 
 # --- compressors (the deflate/gzip + zstd codecs) ---
 # Response compression (http_compression.h) negotiates Accept-Encoding and applies a
 # coding. The codecs are Kronuz/compressors (has compiled units + lz4/zstd/zlib
 # wiring). Previously reached transitively via Kronuz/server; now a direct dependency.
-FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 94a37588ba84ec6409e19d9e7352e36ca2ae7210)
+FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 5c5412871af96294ea617aebee2d1f99820d74c8)
 FetchContent_MakeAvailable(compressors)
 
 # --- standalone Asio (the runtime + transport substrate) ---
@@ -62,7 +62,7 @@ endif()
 # REACTOR_INCLUDE_DIR to use a local checkout instead of fetching (dev iteration).
 set(REACTOR_INCLUDE_DIR "" CACHE PATH "use an existing Kronuz/reactor dir instead of fetching")
 if(REACTOR_INCLUDE_DIR STREQUAL "")
-	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG c6b2c3e5743d59a71bae4ad25010f8f66e8c093e)
+	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG ade618dd5d24bd7580c71d4a977430f367815334)
 	FetchContent_MakeAvailable(reactor)
 	set(REACTOR_INCLUDE_DIR "${reactor_SOURCE_DIR}")
 endif()
