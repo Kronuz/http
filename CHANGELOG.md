@@ -2,6 +2,8 @@
 
 Newest first. Dates are 2026.
 
+Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://github.com/Kronuz/cpp-libraries/blob/main/docs/UPGRADING-2026-10.md#http) lists what changes for callers, how to find affected inputs, the commits not to pin, and the speedup.
+
 ## 2026-11-01: the disconnect watch waits for the handler to ask
 
 `bench_http` under `wrk` (a 14-byte reply through `HttpAsioService`, 2 reactors, keep-alive,
