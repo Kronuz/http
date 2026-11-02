@@ -24,7 +24,7 @@ endif()
 find_package(Threads REQUIRED)
 
 # --- the radix-tree path router (transport-agnostic) ---
-FetchContent_Declare(radix_router GIT_REPOSITORY https://github.com/Kronuz/radix-router.git GIT_TAG 206c5305e17c9f681154eda64fa59e1cf4295776)
+FetchContent_Declare(radix_router GIT_REPOSITORY https://github.com/Kronuz/radix-router.git GIT_TAG 74ab7ce7cc06d447369733c4b5faa1eecfbdd822)
 FetchContent_MakeAvailable(radix_router)
 
 # --- http-parser (the HTTP parser) ---
@@ -38,7 +38,7 @@ FetchContent_MakeAvailable(http_parser)
 # Response compression (http_compression.h) negotiates Accept-Encoding and applies a
 # coding. The codecs are Kronuz/compressors (has compiled units + lz4/zstd/zlib
 # wiring). Previously reached transitively via Kronuz/server; now a direct dependency.
-FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 6bc4b4e9da579bfcf433e69181cdf9663fda0b0e)
+FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 94a37588ba84ec6409e19d9e7352e36ca2ae7210)
 FetchContent_MakeAvailable(compressors)
 
 # --- standalone Asio (the runtime + transport substrate) ---
@@ -62,7 +62,7 @@ endif()
 # REACTOR_INCLUDE_DIR to use a local checkout instead of fetching (dev iteration).
 set(REACTOR_INCLUDE_DIR "" CACHE PATH "use an existing Kronuz/reactor dir instead of fetching")
 if(REACTOR_INCLUDE_DIR STREQUAL "")
-	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG 4083bdb770fe7a364c5f86d63ce672a7a4ad3729)
+	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG c6b2c3e5743d59a71bae4ad25010f8f66e8c093e)
 	FetchContent_MakeAvailable(reactor)
 	set(REACTOR_INCLUDE_DIR "${reactor_SOURCE_DIR}")
 endif()
