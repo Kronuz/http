@@ -29,13 +29,6 @@ static void check(bool ok, const std::string& what) {
 
 static const std::string kReply = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok";
 
-static unsigned short free_port() {
-	int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-	sockaddr_in a{}; a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	::bind(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a));
-	socklen_t len = sizeof(a); ::getsockname(fd, reinterpret_cast<sockaddr*>(&a), &len);
-	unsigned short p = ntohs(a.sin_port); ::close(fd); return p;
-}
 static int dial(unsigned short port) {
 	for (int i = 0; i < 300; ++i) {
 		int fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -116,16 +109,16 @@ int main() {
 	constexpr int warm = 200, n = 1000;
 	double raw = 0;
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		reactor::TcpServer server(1, 0, raw_session);
-		server.start(port);
+		server.start(0); port = server.port();
 		raw = handlers_per_request(port, get("/"), warm, n);
 		server.stop();
 	}
 	App app;
-	unsigned short port = free_port();
+	unsigned short port = 0;
 	http::HttpAsioService service(app, 1, 0);
-	service.start(port);
+	service.start(0); port = service.port();
 	const double flat = handlers_per_request(port, get("/flat"), warm, n);
 	const double deep = handlers_per_request(port, get("/deep"), warm, n);
 	const double asks = handlers_per_request(port, get("/asks"), warm, n);

@@ -83,36 +83,14 @@ struct App : HttpHandler {
 		return result;
 	}
 };
-unsigned short available_port() {
-	int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-	sockaddr_in address{};
-	address.sin_family = AF_INET;
-	address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	if (::bind(fd, reinterpret_cast<sockaddr *>(&address), sizeof(address))) {
-		::close(fd);
-		throw std::runtime_error("probe bind failed");
-	}
-	socklen_t size = sizeof(address);
-	::getsockname(fd, reinterpret_cast<sockaddr *>(&address), &size);
-	::close(fd);
-	return ntohs(address.sin_port);
-}
 struct Server {
 	std::shared_ptr<App> app;
 	std::unique_ptr<HttpAsioService> service;
 	unsigned short port;
-	// A probed port can be taken by a parallel test before the bind; probe again then.
 	explicit Server(std::shared_ptr<App> application = std::make_shared<App>()) : app(std::move(application)) {
-		for (int attempt = 0;; ++attempt) {
-			service = std::make_unique<HttpAsioService>(*app, 1, 64);
-			port = available_port();
-			try {
-				service->start(port);
-				return;
-			} catch (const std::system_error &error) {
-				if (error.code() != std::errc::address_in_use || attempt == 9) { throw; }
-			}
-		}
+		service = std::make_unique<HttpAsioService>(*app, 1, 64);
+		service->start(0);
+		port = service->port();
 	}
 	~Server() {
 		service->stop();

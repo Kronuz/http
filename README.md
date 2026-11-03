@@ -59,7 +59,7 @@ struct App : http::HttpHandler {
 int main() {
 	App app;
 	http::HttpAsioService service(app, /*reactors=*/4, /*in_flight_limit=*/256);
-	service.start(8080);  // curl localhost:8080/hello/world prints "hello, world"
+	service.start(8080);  // curl localhost:8080/hello/world prints "hello, world"; start(0) + service.port() picks a free port
 	std::this_thread::sleep_for(std::chrono::minutes(1));
 	service.stop();
 }

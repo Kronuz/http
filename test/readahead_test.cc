@@ -59,13 +59,6 @@ static void check(bool ok, const std::string& m) {
 }
 
 // ---- helpers ----
-static unsigned short free_port() {
-	int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-	sockaddr_in a{}; a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	::bind(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a));
-	socklen_t len = sizeof(a); ::getsockname(fd, reinterpret_cast<sockaddr*>(&a), &len);
-	unsigned short p = ntohs(a.sin_port); ::close(fd); return p;
-}
 template <class F> static bool until(F&& f, int ms = 3000) {
 	for (int i = 0; i < ms / 2; ++i) { if (f()) { return true; } std::this_thread::sleep_for(2ms); }
 	return f();
@@ -576,10 +569,10 @@ static void input_tests() {
 // ---- the server for the integration sections ----
 struct Server {
 	App app;
-	unsigned short port = free_port();
+	unsigned short port = 0;
 	http::HttpAsioService svc;
 	explicit Server(std::size_t in_flight = 64) : svc(app, 1, in_flight) { app.service = &svc; }
-	void start() { svc.start(port); Conn probe(port, 1); }
+	void start() { svc.start(0); port = svc.port(); Conn probe(port, 1); }
 	std::size_t inflight() { return static_cast<std::size_t>(svc.reactor(0).gate().inflight.load()); }
 };
 

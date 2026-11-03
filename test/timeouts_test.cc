@@ -50,14 +50,6 @@ struct Echo : http::HttpHandler {
 	}
 };
 
-static unsigned short free_port() {
-	int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-	sockaddr_in a{}; a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	::bind(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a));
-	socklen_t len = sizeof(a); ::getsockname(fd, reinterpret_cast<sockaddr*>(&a), &len);
-	unsigned short p = ntohs(a.sin_port); ::close(fd); return p;
-}
-
 static int dial(unsigned short port) {
 	for (int i = 0; i < 300; ++i) {
 		int fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -92,12 +84,12 @@ static std::pair<std::string, double> until_closed(int fd) {
 int main() {
 	std::signal(SIGPIPE, SIG_IGN);  // a send to a closed connection fails instead
 	Echo echo;
-	const unsigned short port = free_port();
+	unsigned short port = 0;
 	http::HttpAsioService svc(echo, 1, 64);
 	svc.set_idle_timeout(300ms);
 	svc.set_header_timeout(400ms);
 	svc.set_inactivity_timeout(300ms);
-	svc.start(port);
+	svc.start(0); port = svc.port();
 
 	{  // a connection that never sends: closed at the idle timeout
 		int fd = dial(port);
@@ -206,10 +198,10 @@ int main() {
 	svc.stop();
 
 	{  // a slow reader that keeps moving: every 64 KiB slice completes in time, though the whole reply takes longer than the bound
-		const unsigned short p4 = free_port();
+		unsigned short p4 = 0;
 		http::HttpAsioService mover(echo, 1, 64);
 		mover.set_inactivity_timeout(1000ms);
-		mover.start(p4);
+		mover.start(0); p4 = mover.port();
 		int fd = dial(p4);
 		constexpr std::size_t size = 4u << 20;
 		put(fd, "GET /big?n=" + std::to_string(size) + " HTTP/1.1\r\nConnection: close\r\nHost: x\r\n\r\n");
@@ -230,12 +222,12 @@ int main() {
 	}
 
 	{  // under the header timeout a slow client is served: a request trickled a byte every 10 ms
-		const unsigned short p3 = free_port();
+		unsigned short p3 = 0;
 		http::HttpAsioService slow(echo, 1, 64);
 		slow.set_idle_timeout(10s);
 		slow.set_header_timeout(10s);
 		slow.set_inactivity_timeout(10s);
-		slow.start(p3);
+		slow.start(0); p3 = slow.port();
 		const std::string req = "GET / HTTP/1.1\r\nHost: x\r\n\r\n";
 		const auto trickle = [&](int fd) {
 			for (char c : req) {
@@ -254,9 +246,9 @@ int main() {
 	}
 
 	{  // unset: a silent connection stays open past every bound above
-		const unsigned short p2 = free_port();
+		unsigned short p2 = 0;
 		http::HttpAsioService plain(echo, 1, 64);
-		plain.start(p2);
+		plain.start(0); p2 = plain.port();
 		int fd = dial(p2);
 		timeval tv{.tv_sec = 1, .tv_usec = 200000};
 		::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));

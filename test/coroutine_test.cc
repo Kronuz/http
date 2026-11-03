@@ -116,13 +116,6 @@ static Resp one(unsigned short port, const std::string& request) {
 	c.send(request);
 	return c.read_response();
 }
-static unsigned short free_port() {
-	int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-	sockaddr_in a{}; a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_LOOPBACK); a.sin_port = 0;
-	::bind(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a));
-	socklen_t len = sizeof(a); ::getsockname(fd, reinterpret_cast<sockaddr*>(&a), &len);
-	unsigned short p = ntohs(a.sin_port); ::close(fd); return p;
-}
 static void wait_listen(unsigned short port) {
 	for (int i = 0; i < 300; ++i) {
 		Conn c(port, 1);
@@ -593,10 +586,10 @@ static bool affinity_death_test(const std::string& request) {
 		task::asio_scheduler other(other_io.get_executor());
 		std::thread other_thread([&] { other_io.run(); });
 		app.away = &other;
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		auto r = one(port, request);
 		std::fflush(stdout);
 		::_exit(r.status == 200 ? 0 : 3);   // NDEBUG: the assertion is compiled out and the reply arrives
@@ -619,10 +612,10 @@ int main() {
 
 	// [A] A coroutine handler that waits suspends; the loop serves others. One reactor.
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 256);
 		app.service = &svc;
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		Resp slow;
 		std::thread st([&] { slow = one(port, get("/slow", "Connection: close\r\n")); });
 		std::this_thread::sleep_for(60ms);
@@ -646,10 +639,10 @@ int main() {
 
 	// [C] Disconnect cancels reads, not writes.
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 256);
 		app.service = &svc;
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 
 		{   // a full close: the read is cancelled early; nobody is left to answer
 			auto o = app.get_obs("close");
@@ -717,10 +710,10 @@ int main() {
 
 	// [D] The in-flight gate: a request over the cap is refused with 503 + Retry-After: 1.
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 2);
 		app.service = &svc;
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		std::vector<Resp> out(5);
 		std::vector<std::thread> ts;
 		for (int i = 0; i < 5; ++i) { ts.emplace_back([&, i] { out[static_cast<std::size_t>(i)] = one(port, get("/hold", "Connection: close\r\n")); }); }
@@ -744,10 +737,10 @@ int main() {
 
 	// [S] The streamed join (design D6): the feed and the handler, children of the connection.
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		// A complete body, then a FIN while the handler still runs: the watch cancels the request and
 		// the answer still comes, whether the handler asks for its token after the body (the watch
 		// waits for it, as for a buffered body) or asked during it (the watch starts with the body's end).
@@ -777,11 +770,11 @@ int main() {
 
 	// [E] The buffered-body cap.
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
 		svc.set_max_body(1024);
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		auto post = [&](const std::string& path, std::size_t advertised, const std::string& sent) {
 			Conn c(port);
 			c.send("POST " + path + " HTTP/1.1\r\nHost: x\r\nContent-Length: " + std::to_string(advertised) + "\r\nConnection: close\r\n\r\n" + sent);
@@ -813,10 +806,10 @@ int main() {
 		check(r.status == 200 && r.body == "sunk", "[E] a body pushed to a sink is not capped");
 	}
 	{   // the default cap is 16 MiB; 0 turns it off
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		Conn c(port);
 		c.send("POST /echo HTTP/1.1\r\nHost: x\r\nContent-Length: " + std::to_string((16u << 20) + 1) + "\r\nConnection: close\r\n\r\n");
 		check(c.read_response().status == 413, "[E] the default cap is 16 MiB");
@@ -824,10 +817,10 @@ int main() {
 
 	// [F] Shutdown.
 	{   // a running request is cancelled (Shutdown), its frame outlives the cancel, and its response is written
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		auto svc = std::make_unique<http::HttpAsioService>(app, 1, 64);
 		app.service = svc.get();
-		svc->start(port); wait_listen(port);
+		svc->start(0); port = svc->port(); wait_listen(port);
 		auto o = app.get_obs("stop");
 		Conn c(port);
 		c.send(get("/read?id=stop&ms=5000"));
@@ -843,10 +836,10 @@ int main() {
 		check(ms < 2000.0, "[F] stop() returns promptly once the request completes");
 	}
 	{   // an idle keep-alive connection that already served a request does not hold stop()
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		auto svc = std::make_unique<http::HttpAsioService>(app, 2, 64);
 		app.service = svc.get();
-		svc->start(port); wait_listen(port);
+		svc->start(0); port = svc->port(); wait_listen(port);
 		std::vector<std::unique_ptr<Conn>> idle;
 		for (int i = 0; i < 8; ++i) {
 			idle.push_back(std::make_unique<Conn>(port));
@@ -860,11 +853,11 @@ int main() {
 		check(ms < 1000.0, "[F] idle keep-alive connections (a pending watch read) are cancelled at once");
 	}
 	{   // a stalled writer is bounded by the grace
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		auto svc = std::make_unique<http::HttpAsioService>(app, 1, 64);
 		app.service = svc.get();
 		svc->set_shutdown_grace(300ms);
-		svc->start(port); wait_listen(port);
+		svc->start(0); port = svc->port(); wait_listen(port);
 		Conn c(port);
 		int rcv = 4096; ::setsockopt(c.fd, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof(rcv));
 		c.send(get("/huge"));
@@ -879,10 +872,10 @@ int main() {
 
 	// [G] The per-request watch does not disturb pipelining or keep-alive.
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		Conn c(port);
 		c.send(get("/fast") + get("/echo") + get("/fast", "Connection: close\r\n"));
 		auto a = c.read_response(), b = c.read_response(), d = c.read_response();
@@ -899,10 +892,10 @@ int main() {
 	// [H] A body cut short never reads as a clean end: the reader gets an error other than eof,
 	// and the request is already cancelled when its read returns.
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		const auto head = [](const std::string& id) {
 			return "POST /tbody?id=" + id + " HTTP/1.1\r\nHost: x\r\nContent-Length: 100000\r\n\r\n" + std::string(1000, 'a');
 		};
@@ -932,10 +925,10 @@ int main() {
 
 	// [I] A cancel callback that throws is dropped; the handler's frames end by completing.
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		{   // streamed: the connection frame must not unwind under the running handler
 			auto o = app.get_obs("sx");
 			Conn c(port);
@@ -975,10 +968,10 @@ int main() {
 
 	// [T] The task loop (design T4 (b)-(h); (a) and the never-asking watch are handler_count_test).
 	{   // (b) a budget loop is demoted between slices, the loop serves others meanwhile, and nothing stays queued after stop()
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		auto svc = std::make_unique<http::HttpAsioService>(app, 1, 64);
 		app.service = svc.get();
-		svc->start(port); wait_listen(port);
+		svc->start(0); port = svc->port(); wait_listen(port);
 		app.demoted_seen = 0;
 		Resp budget;
 		std::thread long_one([&] { budget = one(port, get("/budget?ms=300", "Connection: close\r\n")); });
@@ -998,20 +991,20 @@ int main() {
 		check(svc->reactor(0).scheduler().demoted() == 0, "[T] (b) nothing is left in the demoted queue after stop()");
 	}
 	{   // (c) a handler resumed by a std::thread finishes on the loop thread
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		auto r = one(port, get("/thread?id=thread", "Connection: close\r\n"));
 		check(r.status == 200 && r.body == "loop" && app.get_obs("thread")->on_loop, "[T] (c) a handler resumed from a std::thread finishes on the loop thread");
 	}
 	{   // (d) stop() with handlers suspended in a read, an event, a checkpoint and a body read: every task frame is gone
 		const auto baseline = task::detail::live_frames();
 		{
-			unsigned short port = free_port();
+			unsigned short port = 0;
 			auto svc = std::make_unique<http::HttpAsioService>(app, 2, 64);
 			app.service = svc.get();
-			svc->start(port); wait_listen(port);
+			svc->start(0); port = svc->port(); wait_listen(port);
 			Conn a(port), b(port), k(port), s(port);
 			a.send(get("/suspend-read?id=d-read"));
 			b.send(get("/suspend-event?id=d-event"));
@@ -1040,10 +1033,10 @@ int main() {
 		check(task::detail::live_frames() == baseline, "[T] (d) no task frame outlives the service (" + std::to_string(task::detail::live_frames() - baseline) + " left)");
 	}
 	{   // Request::scheduler(): a handler starts a timer and a task::deadline on the connection's scheduler
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		auto r = one(port, get("/scheduler", "Connection: close\r\n"));
 		check(r.status == 200 && r.body == "same,timer,deadline", "[T] Request::scheduler() is the reactor's scheduler and serves a timer and a deadline (" + r.body + ")");
 		http::Request detached;
@@ -1052,10 +1045,10 @@ int main() {
 		check(threw, "[T] a request no transport serves has no scheduler");
 	}
 	{   // (h) a cancel callback on the loop thread, outside any task, touches the writer: the affinity check passes
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		auto svc = std::make_unique<http::HttpAsioService>(app, 1, 64);
 		app.service = svc.get();
-		svc->start(port); wait_listen(port);
+		svc->start(0); port = svc->port(); wait_listen(port);
 		{   // the client hangs up: the watch's read completion runs the callback
 			auto o = app.get_obs("h-hangup");
 			Conn c(port);
@@ -1082,11 +1075,11 @@ int main() {
 	{   // (d) a handler that ignores cancellation: stop() returns within the grace, the phases leave no frame
 		const auto baseline = task::detail::live_frames();
 		{
-			unsigned short port = free_port();
+			unsigned short port = 0;
 			auto svc = std::make_unique<http::HttpAsioService>(app, 1, 64);
 			app.service = svc.get();
 			svc->set_shutdown_grace(200ms);
-			svc->start(port); wait_listen(port);
+			svc->start(0); port = svc->port(); wait_listen(port);
 			Conn c(port);
 			c.send(get("/ignore?id=d-ignore"));
 			check(until([&] { return app.get_obs("d-ignore")->started.load(); }), "[T] (d) the handler that ignores cancellation is suspended");
@@ -1102,10 +1095,10 @@ int main() {
 		check(task::detail::live_frames() == baseline, "[T] (d) no task frame outlives the service after an ignored cancellation (" + std::to_string(task::detail::live_frames() - baseline) + " left)");
 	}
 	{   // (e) task::cancelled after the request's cancellation is 503 + close; from the handler's own source, 500
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		{
 			auto o = app.get_obs("e");
 			Conn c(port);
@@ -1121,10 +1114,10 @@ int main() {
 		check(r.status == 500, "[T] (e) task::cancelled from the handler's own source is a 500 (" + std::to_string(r.status) + ")");
 	}
 	{   // (f) a hang-up during a budget loop: no checkpoint passes once the request is cancelled
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		auto o = app.get_obs("f");
 		Conn c(port);
 		c.send(get("/hangup?id=f"));
@@ -1137,10 +1130,10 @@ int main() {
 		check(r.status == 503 && o->checkpoints_after == 0, "[T] (f) the first checkpoint after the hang-up throws task::cancelled");
 	}
 	{   // (g) an owned stream started, then task::cancelled escapes: no terminal chunk, the request released
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		Conn c(port);
 		c.send(get("/owned-cancel"));
 		while (c.fill()) {}
@@ -1154,10 +1147,10 @@ int main() {
 		std::thread other_thread([&] { other_io.run(); });
 		app.away = &other;
 		{
-			unsigned short port = free_port();
+			unsigned short port = 0;
 			http::HttpAsioService svc(app, 1, 64);
 			app.service = &svc;
-			svc.start(port); wait_listen(port);
+			svc.start(0); port = svc.port(); wait_listen(port);
 			auto r = one(port, get("/affine-child", "Connection: close\r\n"));
 			check(r.status == 200 && r.body == "home", "[T] (h) a child that schedule_on()s away comes home: the writer passes its check");
 			auto rr = one(port, post("/affine-read-child", "abc", "Connection: close\r\n"));
@@ -1182,10 +1175,10 @@ int main() {
 			task::asio_scheduler app_scheduler(app_io.get_executor());
 			std::thread app_thread([&] { app_io.run(); });
 			{
-				unsigned short port = free_port();
+				unsigned short port = 0;
 				http::HttpAsioService svc(app, 1, 64);
 				app.service = &svc;
-				svc.start(port); wait_listen(port);
+				svc.start(0); port = svc.port(); wait_listen(port);
 				// A root of the application's scheduler suspended on a timer of the service's loop, and a
 				// root of the service's loop suspended on an event nobody sets.
 				asio::steady_timer far(svc.reactor(0).io(), 1h);
@@ -1214,10 +1207,10 @@ int main() {
 			}                                                   // phase 4: the service's timer dies before its io_context
 		}
 		{   // any order is safe: destroy_roots() alone runs stop() and close() first
-			unsigned short port = free_port();
+			unsigned short port = 0;
 			http::HttpAsioService svc(app, 1, 64);
 			app.service = &svc;
-			svc.start(port); wait_listen(port);
+			svc.start(0); port = svc.port(); wait_listen(port);
 			task::event never;
 			auto parked = [&]() -> task::task<void> { co_await never; };
 			task::spawn(task::scheduler_ref::of(svc.reactor(0).scheduler()), parked(), [](std::exception_ptr) {});

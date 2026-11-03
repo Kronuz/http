@@ -259,13 +259,6 @@ static Resp do_get_h(unsigned short port, const std::string& path, const std::st
 	return r;
 }
 
-static unsigned short free_port() {
-	int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-	sockaddr_in a{}; a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_LOOPBACK); a.sin_port = 0;
-	::bind(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a));
-	socklen_t len = sizeof(a); ::getsockname(fd, reinterpret_cast<sockaddr*>(&a), &len);
-	unsigned short p = ntohs(a.sin_port); ::close(fd); return p;
-}
 static void wait_listen(unsigned short port) {
 	for (int i = 0; i < 300; ++i) {
 		int fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -305,10 +298,10 @@ int main() {
 
 	// [A] Handlers that wait suspend: fast stays low-latency under slow load, on ONE loop.
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 256);
 		app.service = &svc;
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		std::vector<Resp> slow;
 		std::thread st([&] { slow = fire(port, "/slow", 4); });
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -320,12 +313,22 @@ int main() {
 		check(offload_fast_max < SLOW_MS / 2.0, "fast stays under the slow duration");
 		check(count_status(slow, 200) == 4, "slow requests complete");
 	}
+	// [P] start(0): port() reports the OS-assigned port, and it serves.
+	{
+		http::HttpAsioService svc(app, 2, 256);
+		app.service = &svc;
+		check(svc.port() == 0, "[P] port() is 0 before start");
+		svc.start(0);
+		const auto port = svc.port();
+		check(port != 0, "[P] start(0) reports a port");
+		check(count_status(fire(port, "/fast", 8), 200) == 8, "[P] requests to port() are served");
+	}
 	// [C] Backpressure: in-flight cap 4 -> excess sheds 503.
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 4);
 		app.service = &svc;
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		auto res = fire(port, "/slow", 16);
 		int n200 = count_status(res, 200), n503 = count_status(res, 503);
 		std::printf("  [C] backpressure: 16 slow @ cap 4 -> %d x 200, %d x 503\n", n200, n503);
@@ -335,11 +338,11 @@ int main() {
 	}
 	// [D] N reactors on one port (SO_REUSEPORT).
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 3, 64);
 		app.service = &svc;
 		http::AsioBindOptions b; b.reuse_port = true; svc.set_bind_options(b);
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		auto res = fire(port, "/fast", 60);
 		std::printf("  [D] 3 reactors on one port -> %d/60 served\n", count_status(res, 200));
 		check(count_status(res, 200) == 60, "all served across shared-nothing reactors");
@@ -348,21 +351,21 @@ int main() {
 	// macOS/BSD default, where a second same-port bind is rejected). One acceptor binds
 	// and fans connections out round-robin to all reactors.
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 4, 64);
 		app.service = &svc;
 		http::AsioBindOptions b; b.reuse_port = false; svc.set_bind_options(b);
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		auto res = fire(port, "/fast", 60);
 		std::printf("  [D2] 4 reactors, shared acceptor (no reuse_port) -> %d/60 served\n", count_status(res, 200));
 		check(count_status(res, 200) == 60, "all served via the shared acceptor");
 	}
 	// [E] Keep-alive: three sequential requests on one connection.
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		int fd = ::socket(AF_INET, SOCK_STREAM, 0);
 		sockaddr_in a{}; a.sin_family = AF_INET; a.sin_port = htons(port);
 		::inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
@@ -381,11 +384,11 @@ int main() {
 	}
 	// [F] Compression: enable_compression + Accept-Encoding: gzip -> gzip round-trips.
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
 		svc.enable_compression();
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		auto gz = do_request(port, "/big", "gzip");
 		std::printf("  [F] compression: /big -> %zuB, Content-Encoding present=%d\n", gz.body.size(), has_header(gz.headers, "content-encoding", "gzip"));
 		check(gz.status == 200 && has_header(gz.headers, "content-encoding", "gzip"), "gzip negotiated");
@@ -395,10 +398,10 @@ int main() {
 	}
 	// [G] Error hook.
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		auto r = do_request(port, "/throw");
 		std::printf("  [G] error hook: /throw -> %d\n", r.status);
 		check(r.status == 500 && r.body == "mapped: boom\n", "on_error mapped the exception to 500");
@@ -412,10 +415,10 @@ int main() {
 	// larger than one read buffer, so it must span many reads; the app reports the line
 	// count and that Request::body stayed empty (proof it was not accumulated).
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		StreamApp sapp;
 		http::HttpAsioService svc(sapp, 1, 64);
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		const int N = 200000;
 		std::string body;
 		body.reserve(N * 12);
@@ -433,11 +436,11 @@ int main() {
 	// [I] Conditional GET: enable_conditional -> a first GET gets a weak ETag; a repeat
 	// with If-None-Match is answered 304 (bodyless).
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
 		svc.enable_conditional();
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		auto first = do_request(port, "/big");
 		std::string etag = header_value(first.headers, "ETag");
 		std::printf("  [I] conditional: /big -> %d, ETag=%s\n", first.status, etag.c_str());
@@ -450,11 +453,11 @@ int main() {
 	// [J] Range: enable_ranges -> a byte Range is served 206 with Content-Range; an
 	// unsatisfiable range is 416.
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
 		svc.enable_ranges();
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 		auto full = do_request(port, "/big");
 		size_t total = full.body.size();
 		auto part = do_get_h(port, "/big", "Range: bytes=0-9");
@@ -470,11 +473,11 @@ int main() {
 	// Asserts no data loss under back-pressure (count + checksum) AND that the reactor
 	// stays free (a fast request on another connection is served mid-stream).
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		ConcurrentStreamApp capp;
 		http::HttpAsioService svc(capp, 1, 64);
 		capp.service = &svc;
-		svc.start(port); wait_listen(port);
+		svc.start(0); port = svc.port(); wait_listen(port);
 
 		const std::size_t N = 2u * 1024 * 1024;   // 2 MB, >> the 8x64KB channel window
 		std::string body;
@@ -519,11 +522,11 @@ int main() {
 	// a partial body (less than Content-Length) and holds; stop() cancels the body read,
 	// so the handler waiting in read() sees an error and completes.
 	{
-		unsigned short port = free_port();
+		unsigned short port = 0;
 		ConcurrentStreamApp capp;
 		auto* svc = new http::HttpAsioService(capp, 1, 64);
 		capp.service = svc;
-		svc->start(port); wait_listen(port);
+		svc->start(0); port = svc->port(); wait_listen(port);
 		int fd = ::socket(AF_INET, SOCK_STREAM, 0);
 		sockaddr_in a{}; a.sin_family = AF_INET; a.sin_port = htons(port);
 		::inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);

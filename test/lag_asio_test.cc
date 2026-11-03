@@ -52,25 +52,13 @@ struct Client {
 	}
 };
 
-static unsigned short free_port() {
-	int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-	sockaddr_in addr{};
-	addr.sin_family = AF_INET;
-	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-	socklen_t len = sizeof(addr);
-	::getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len);
-	::close(fd);
-	return ntohs(addr.sin_port);
-}
-
 int main() {
 	std::printf("== http reactor lag probe test ==\n");
 	App app;
 	{
 		http::HttpAsioService off(app, 2, 16);
-		const auto port = free_port();
-		off.start(port);
+		unsigned short port = 0;
+		off.start(0); port = off.port();
 		Client c(port);
 		for (int i = 0; i < 4; ++i) { check(c.get(), "a request is served"); }
 		std::this_thread::sleep_for(250ms);
@@ -81,8 +69,8 @@ int main() {
 	{
 		http::HttpAsioService on(app, 2, 16);
 		on.enable_lag_probe();
-		const auto port = free_port();
-		on.start(port);
+		unsigned short port = 0;
+		on.start(0); port = on.port();
 		std::this_thread::sleep_for(450ms);
 		const auto idle0 = on.reactor(0).lag().snapshot().wakes + on.reactor(1).lag().snapshot().wakes;
 		check(idle0 >= 4 && idle0 <= 14, "idle, the two probes wake about 10 times a second each");

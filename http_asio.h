@@ -1119,6 +1119,9 @@ public:
 	// Bind + run all reactors (each on its own thread). Returns once the threads are
 	// listening; the caller keeps its thread and stops with stop().
 	void start(unsigned short port) { started_ = true; server_.start(port); }
+	// The port the listeners are bound to, as the OS reports it (the answer for start(0)); see
+	// reactor::TcpServer::port(). Valid after start() returns, until stop(); 0 before start().
+	unsigned short port() const noexcept { return server_.port(); }
 
 	// Teardown is task's four phases, each a call forwarded to reactor::TcpServer, so an
 	// application with its own schedulers runs each phase on all of them before the next:

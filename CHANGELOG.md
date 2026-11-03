@@ -4,6 +4,13 @@ Newest first. Dates are 2026.
 
 Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://github.com/Kronuz/cpp-libraries/blob/main/docs/UPGRADING-2026-10.md#http) lists what changes for callers, how to find affected inputs, the commits not to pin, and the speedup.
 
+## 2026-11-03: `HttpAsioService::port()`
+
+`HttpAsioService::port()` returns the port the listeners are bound to, so `start(0)` can report
+the port the OS chose; valid after `start()` returns, until `stop()`. It forwards
+`reactor::TcpServer::port()`, and the reactor pin moves to reactor:a59e9f8, which also makes
+`start(0)` with `reuse_port` and several reactors bind one port instead of one per reactor.
+
 ## 2026-11-03: affinity checks follow the thread
 
 The Debug affinity asserts of `AsioResponseWriter` and `BodyStream::read` check the reactor's

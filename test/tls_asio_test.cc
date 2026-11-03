@@ -66,14 +66,6 @@ static void self_signed(const std::string& cert_path, const std::string& key_pat
 	EVP_PKEY_free(key);
 }
 
-static unsigned short free_port() {
-	int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-	sockaddr_in a{}; a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	::bind(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a));
-	socklen_t len = sizeof(a); ::getsockname(fd, reinterpret_cast<sockaddr*>(&a), &len);
-	unsigned short p = ntohs(a.sin_port); ::close(fd); return p;
-}
-
 static int dial(unsigned short port) {
 	for (int i = 0; i < 300; ++i) {
 		int fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -130,9 +122,9 @@ int main() {
 	auto server = std::make_shared<asio::ssl::context>(asio::ssl::context::tls);
 	reactor::tls::configure(*server, reactor::tls::Options{cert, key, ""}, reactor::tls::Role::Server);
 	Hello hello;
-	const unsigned short port = free_port();
+	unsigned short port = 0;
 	http::HttpAsioService svc(hello, 1, 64, http::tls_connection_factory(server, 300ms, 64, 1024, count), 1024);
-	svc.start(port);
+	svc.start(0); port = svc.port();
 
 	asio::ssl::context trusting(asio::ssl::context::tls), refusing(asio::ssl::context::tls);
 	reactor::tls::configure(trusting, reactor::tls::Options{"", "", cert}, reactor::tls::Role::Client);
