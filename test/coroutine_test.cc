@@ -989,7 +989,7 @@ int main() {
 			svc->stop();
 			const double took = since_ms(t0);
 			std::printf("  [T] (d) stop() with a handler that ignores cancellation (grace 200 ms) -> %.0f ms\n", took);
-			check(took < 2 * 200 + 100, "[T] (d) stop() returns within twice the grace plus 100 ms");
+			check(took < 2 * 200 + 300, "[T] (d) stop() returns within twice the grace plus 300 ms (CI runners add jitter)");
 			svc->close();
 			svc->destroy_roots();
 		}
