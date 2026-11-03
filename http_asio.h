@@ -274,10 +274,9 @@ public:
 
 private:
 	void synchronous() const { affine(); if (is_deferred()) { throw std::logic_error("response authority was deferred"); } }
-	// Debug: a connection's writer is used on its loop, by a task running there (a handler body
-	// that moved to another scheduler must come back first) or by a raw handler on that loop
-	// (a cancel callback that Request::cancel runs, with no current task).
-	void affine() const noexcept { assert(!reactor_ || task::current() == task::scheduler_ref::of(reactor_->scheduler()) || (!task::current() && reactor_->on_loop())); }
+	// Debug: the writer is used on its connection's loop thread, whatever scheduler wraps the task
+	// running there (a handler body on another thread must come back first).
+	void affine() const noexcept { assert(!reactor_ || reactor_->on_loop()); }
 	const asio::any_io_executor* executor_ = nullptr;
 	reactor::Reactor* reactor_ = nullptr;
 	std::shared_ptr<detail::AsioDeferredControl> deferred_;

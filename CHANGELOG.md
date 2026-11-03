@@ -4,6 +4,12 @@ Newest first. Dates are 2026.
 
 Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://github.com/Kronuz/cpp-libraries/blob/main/docs/UPGRADING-2026-10.md#http) lists what changes for callers, how to find affected inputs, the commits not to pin, and the speedup.
 
+## 2026-11-03: affinity checks follow the thread
+
+The Debug affinity asserts of `AsioResponseWriter` and `BodyStream::read` check the reactor's
+loop thread, not the scheduler's identity: a handler running under a per-request wrapper
+scheduler whose resumes run on the loop passes; a body on another thread still aborts.
+
 ## 2026-11-03: handlers, bodies and the connection on `task::task`
 
 `task::task` ([Kronuz/task](https://github.com/Kronuz/task)) is the one coroutine type of
@@ -60,7 +66,7 @@ Asio operations are awaited with `task::await_asio`, with an optional token.
   with `Connection: close` when `on_error` leaves it unanswered; an owned stream whose head is
   on the wire closes without its terminal chunk.
 - **Affinity.** The writer and `BodyStream::read` assert in Debug builds that they run on the
-  connection's scheduler, or in a raw handler on its loop.
+  connection's loop thread, whatever scheduler wraps the task there.
 
 ### Added
 

@@ -21,8 +21,8 @@ operations are awaited with `task::await_asio`, which takes an optional `task::c
 Work that finishes on another thread resumes the handler by posting to its scheduler. A
 handler may move a child to another scheduler with `task::schedule_on`; the child comes home
 at its final suspend. The writer and `BodyStream::read` assert in Debug builds that they run
-on the connection's scheduler, or in a raw Asio handler on its loop (a cancel callback the
-transport runs).
+on the connection's loop thread, whatever scheduler wraps the task there (a cancel callback
+the transport runs in a raw Asio handler passes too).
 
 ## A request's life
 

@@ -166,8 +166,9 @@ no worker pool and no thread handoff. Invariants -- do not break these when touc
   arrived while a request ran ends the connection before its next read, and the next
   request's reads take the token, so `stop()` never waits on an idle connection.
 - **Debug builds check affinity.** The writer and `BodyStream::read` assert they run on the
-  connection's scheduler (or in a raw handler on its loop): a handler body that moved to
-  another scheduler must come back first.
+  connection's loop thread, whatever scheduler wraps the task there (a per-request wrapper
+  scheduler on the loop passes): a handler body that moved to another thread must come back
+  first.
 - **Handlers are single-threaded per reactor but run on every reactor.** State shared
   across reactors still needs its own synchronization.
 

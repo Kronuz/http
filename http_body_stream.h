@@ -106,11 +106,8 @@ private:
 		closed_ = true;
 		channel_.close();
 	}
-	// Debug: read on the stream's loop, by a task running there or a raw handler on it
-	// (the rule AsioResponseWriter follows).
-	void affine() const noexcept {
-		assert(task::current() == task::scheduler_ref::of(scheduler_) || (!task::current() && scheduler_.runs_here()));
-	}
+	// Debug: read on the stream's loop thread, whatever scheduler wraps the task running there.
+	void affine() const noexcept { assert(scheduler_.runs_here()); }
 
 	task::asio_scheduler& scheduler_;
 	Channel channel_;

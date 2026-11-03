@@ -151,6 +151,18 @@ struct Obs {
 };
 // Busy work of about `d`, between checkpoints.
 static void spin(std::chrono::microseconds d) { for (auto end = clk::now() + d; clk::now() < end;) {} }
+// A per-request wrapper scheduler: its resumes run on the reactor's loop thread under its own identity.
+struct wrapper_scheduler {
+	task::asio_scheduler& loop;
+	void post(std::coroutine_handle<> h) {
+		asio::post(loop.executor(), [this, h] {
+			task::running_on scope(task::scheduler_ref::of(*this));
+			h.resume();
+		});
+	}
+	std::uint64_t now() const noexcept { return loop.now(); }
+	bool runs_here() const noexcept { return loop.runs_here(); }
+};
 struct App : http::HttpHandler {
 	std::mutex mutex;
 	std::map<std::string, std::shared_ptr<Obs>> obs;
@@ -171,7 +183,7 @@ struct App : http::HttpHandler {
 		return query.substr(p, query.find('&', p) - p);
 	}
 	static task::task<bool> sleep_for(const http::Request& req, std::chrono::milliseconds d) { return ::sleep_for(req.scheduler().executor(), d); }
-	bool wants_body_stream(const http::Request& r) override { return r.path == "/stream" || r.path == "/tbody" || r.path == "/throwcb-stream" || r.path.rfind("/affine-read", 0) == 0
+	bool wants_body_stream(const http::Request& r) override { return r.path == "/stream" || r.path == "/tbody" || r.path == "/throwcb-stream" || r.path.rfind("/affine-read", 0) == 0 || r.path == "/affine-wrapped"
 		|| r.path == "/body-wait" || r.path == "/body-skip"; }
 	std::unique_ptr<http::BodySink> on_request_body(http::Request& r) override {
 		struct Null : http::BodySink { std::size_t n = 0; void write(std::string_view c) override { n += c.size(); } void end() override {} };
@@ -393,6 +405,16 @@ struct App : http::HttpHandler {
 		if (req.path == "/affine-child") {   // T4 (h): a child that moves away comes home at its end
 			co_await [](task::asio_scheduler& other) -> task::task<void> { co_await task::schedule_on{task::scheduler_ref::of(other)}; }(*away);
 			w.send(200, "home");
+			co_return;
+		}
+		if (req.path == "/affine-wrapped") {   // T4 (h): under a wrapper scheduler on the loop thread, the body read and the write pass
+			wrapper_scheduler wrapper{req.scheduler()};
+			co_await task::schedule_on{task::scheduler_ref::of(wrapper)};
+			std::string chunk;
+			const asio::error_code ec = co_await req.body_stream->read(chunk);
+			w.set_header("X-Wrapped", task::current() == task::scheduler_ref::of(wrapper) ? "1" : "0");
+			w.send(200, ec ? "failed" : chunk);
+			co_await task::schedule_on{task::scheduler_ref::of(req.scheduler())};
 			co_return;
 		}
 		if (req.path == "/affine-body") {   // T4 (h): the handler's own body moves away, then writes: Debug asserts
@@ -1140,6 +1162,8 @@ int main() {
 			check(r.status == 200 && r.body == "home", "[T] (h) a child that schedule_on()s away comes home: the writer passes its check");
 			auto rr = one(port, post("/affine-read-child", "abc", "Connection: close\r\n"));
 			check(rr.status == 200 && rr.body == "abc", "[T] (h) a child that schedule_on()s away comes home: the body read passes its check");
+			auto rw = one(port, post("/affine-wrapped", "abc", "Connection: close\r\n"));
+			check(rw.status == 200 && rw.body == "abc" && header_value(rw.head, "X-Wrapped") == "1", "[T] (h) a wrapper scheduler on the loop thread reads the body and writes: the affinity checks pass");
 		}
 		guard.reset();
 		other_io.stop();
