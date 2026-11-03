@@ -142,16 +142,29 @@ int main() {
 			"a stalled streamed body fails its reader with timed_out at the inactivity timeout");
 		::close(fd);
 	}
-	{  // a slow body that keeps moving, every 150 ms for 1.5 s: completes
-		int fd = dial(port);
-		put(fd, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\nConnection: close\r\n\r\n");
-		for (int i = 0; i < 10; ++i) {
-			std::this_thread::sleep_for(150ms);
-			put(fd, "x");
+	{  // a slow body that keeps moving, a byte every 100 ms for 1 s: completes. The timeout bounds the
+	   // time between two arrivals; an attempt whose client the host stalled that long proves nothing
+	   // (closing it is right), so it is retried, and only an attempt that kept under it is checked.
+		bool checked = false;
+		for (int attempt = 0; attempt < 3 && !checked; ++attempt) {
+			int fd = dial(port);
+			auto before_last = clk::now();   // a send's arrival lies between the clock reads around it
+			put(fd, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\nConnection: close\r\n\r\n");
+			double gap = 0;   // the most two arrivals can be apart
+			for (int i = 0; i < 10; ++i) {
+				std::this_thread::sleep_for(100ms);
+				const auto before = clk::now();
+				put(fd, "x");
+				gap = std::max(gap, std::chrono::duration<double>(clk::now() - before_last).count());
+				before_last = before;
+			}
+			auto [got, s] = until_closed(fd);
+			::close(fd);
+			if (gap >= 0.3) { std::printf("  (attempt %d void: the client was %.0f ms between two bytes)\n", attempt + 1, gap * 1000); continue; }
+			check(got.rfind("HTTP/1.1 200", 0) == 0 && got.find("\r\n\r\n10") != std::string::npos, "a slow but moving body completes");
+			checked = true;
 		}
-		auto [got, s] = until_closed(fd);
-		check(got.rfind("HTTP/1.1 200", 0) == 0 && got.find("\r\n\r\n10") != std::string::npos, "a slow but moving body completes");
-		::close(fd);
+		if (!checked) { check(false, "a slow but moving body: the host stalled the client past the timeout in all 3 attempts"); }
 	}
 	{  // headers trickled after a reply on a keep-alive connection (the first byte arrives through the
 	   // watch's read-ahead): the header timeout still counts from that byte and closes it
@@ -183,6 +196,8 @@ int main() {
 		::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 		constexpr std::size_t big = 48u << 20;
 		put(fd, "GET /big?n=" + std::to_string(big) + " HTTP/1.1\r\nHost: x\r\n\r\n");
+		char first;
+		::recv(fd, &first, 1, MSG_PEEK);   // the reply is being written (building 48 MiB takes a while)
 		std::this_thread::sleep_for(1200ms);   // not reading: the server's slice stalls and times out
 		auto [got, s] = until_closed(fd);
 		check(got.size() < big && s < 3.0, "a reply the client stops reading is cut at the inactivity timeout");
