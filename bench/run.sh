@@ -48,7 +48,7 @@ L50=$(echo "$OUT" | awk '$1=="50%" {print $2}')
 L99=$(echo "$OUT" | awk '$1=="99%" {print $2}')
 AVG=$(echo "$OUT" | awk '$1=="Latency" && $2 ~ /[0-9]/ {print $2; exit}')
 ERR=$(echo "$OUT" | grep -E "Socket errors|Non-2xx" | tr '\n' ' ')
-CPU=$(awk '/^RUSAGE/ { u[n]=$2; s[n]=$3; n++ } END { if (n >= 2) printf "%.2f us/req (user %.2f sys %.2f)", ((u[n-1]-u[0]) + (s[n-1]-s[0])) / REQ, (u[n-1]-u[0]) / REQ, (s[n-1]-s[0]) / REQ }' REQ="$REQS" $LOG.err)
+CPU=$(awk 'BEGIN { n = 0 } /^RUSAGE/ { u[n]=$2; s[n]=$3; n++ } END { if (n >= 2) printf "%.2f us/req (user %.2f sys %.2f)", ((u[n-1]-u[0]) + (s[n-1]-s[0])) / REQ, (u[n-1]-u[0]) / REQ, (s[n-1]-s[0]) / REQ }' REQ="$REQS" $LOG.err)
 PROC=""; [ -n "$P0" ] && [ -n "$P1" ] && PROC=$(awk -v a="$P0" -v b="$P1" -v hz="$(getconf CLK_TCK)" -v n="$REQS" 'BEGIN { if (n > 0) printf "%.2f", (b - a) * 1e6 / hz / n }')
 COUNTS=$(awk '/^ALLOCS/ { a[na++]=$2 } /^HANDLERS/ { h[nh++]=$2 } END { if (na >= 2 && nh >= 2) printf "%.2f %.2f", (a[na-1]-a[0]) / REQ, (h[nh-1]-h[0]) / REQ }' REQ="$REQS" $LOG.err)
 printf "%-6s %-24s R=%s C=%-3s %-9s req/s %9s  avg %8s  p50 %8s  p99 %8s  reqs %7s  server CPU %s%s%s %s\n" "$KIND" "$LABEL" "$R" "$C" "${CLOSE:-keepalive}" "$RPS" "$AVG" "$L50" "$L99" "$REQS" "$CPU" "${PROC:+  proc CPU $PROC us/req}" "${COUNTS:+  allocs/req ${COUNTS% *}  handlers/req ${COUNTS#* }}" "$ERR"

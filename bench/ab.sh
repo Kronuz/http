@@ -30,7 +30,7 @@ JOBS=${JOBS:-4}
 BUILD_DIR=${BUILD_DIR:-build-ab}
 COUNT_DIR=${COUNT_DIR:-build-ab-count}
 
-series() { echo "a aa $(for e in $EXTRA; do echo "${e%%=*}"; done)"; }
+series() { echo "a aa $(for e in $EXTRA; do printf '%s ' "${e%%=*}"; done)"; }
 binary() {
 	case $1 in
 		a|aa) echo "$OUT/bin/$1" ;;
