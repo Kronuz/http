@@ -9,6 +9,7 @@
 //   [G] pipelined and keep-alive requests are unaffected by the per-request watch
 //   [H] a body cut short (FIN, half-close, RST, chunked) fails the reader, never eof, with the request cancelled
 //   [I] a throwing cancel callback is dropped: the handler's frames outlive it, streamed and buffered
+//   [S] the streamed join: a hang-up after the body cancels the handler; a handler that answers early stops the feed
 //   [T] the task loop (design T4): (b) budget demotion, (c) affinity after a std::thread resume,
 //       (d) stop() with suspended handlers leaves no task frame, (e) task::cancelled after a
 //       cancellation is 503 + close, (f) no checkpoint passes after a hang-up, (g) an owned
@@ -29,6 +30,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -169,7 +171,8 @@ struct App : http::HttpHandler {
 		return query.substr(p, query.find('&', p) - p);
 	}
 	static task::task<bool> sleep_for(const http::Request& req, std::chrono::milliseconds d) { return ::sleep_for(req.scheduler().executor(), d); }
-	bool wants_body_stream(const http::Request& r) override { return r.path == "/stream" || r.path == "/tbody" || r.path == "/throwcb-stream" || r.path.rfind("/affine-read", 0) == 0; }
+	bool wants_body_stream(const http::Request& r) override { return r.path == "/stream" || r.path == "/tbody" || r.path == "/throwcb-stream" || r.path.rfind("/affine-read", 0) == 0
+		|| r.path == "/body-wait" || r.path == "/body-skip"; }
 	std::unique_ptr<http::BodySink> on_request_body(http::Request& r) override {
 		struct Null : http::BodySink { std::size_t n = 0; void write(std::string_view c) override { n += c.size(); } void end() override {} };
 		return r.path == "/sink" ? std::make_unique<Null>() : nullptr;
@@ -209,6 +212,7 @@ struct App : http::HttpHandler {
 		}
 		if (req.path == "/tbody") {   // reads a streamed body to its end and records how it ended
 			auto o = get_obs(id);
+			o->started = true;
 			std::string chunk;
 			for (;;) {
 				asio::error_code ec = co_await req.body_stream->read(chunk);
@@ -401,7 +405,24 @@ struct App : http::HttpHandler {
 			else { co_await [](task::asio_scheduler& other) -> task::task<void> { co_await task::schedule_on{task::scheduler_ref::of(other)}; }(*away); }
 			std::string chunk;
 			const asio::error_code ec = co_await req.body_stream->read(chunk);
+			co_await task::schedule_on{task::scheduler_ref::of(req.scheduler())};   // home, so only the read is checked
 			w.send(200, ec ? "failed" : chunk);
+			co_return;
+		}
+		if (req.path == "/body-wait") {   // [S]: reads the whole body, then waits for the request's cancellation (2 s at most)
+			std::optional<task::cancel_token> early;   // ?early=1: asks for the token before the body completes
+			if (param(req.query, "early") == "1") { early = req.cancel_token(); }
+			std::string chunk;
+			std::size_t total = 0;
+			while (!co_await req.body_stream->read(chunk)) { total += chunk.size(); }
+			const task::cancel_token token = early ? *early : req.cancel_token();
+			for (auto end = clk::now() + 2s; !token.requested() && clk::now() < end;) { co_await sleep_for(req, 5ms); }
+			w.send(200, std::to_string(total) + (token.requested() ? ":cancelled" : ":done"));
+			co_return;
+		}
+		if (req.path == "/body-skip") {   // [S]: answers without reading the body (?read=1: after its first chunk)
+			if (param(req.query, "read") == "1") { std::string chunk; (void)co_await req.body_stream->read(chunk); }
+			w.send(200, "skipped");
 			co_return;
 		}
 		if (req.path == "/affine-thread") {   // T4 (h): a raw thread (no task, not the loop) touches the writer: Debug asserts
@@ -699,6 +720,39 @@ int main() {
 		check(until([&] { return svc.reactor(0).gate().inflight.load() == 0; }), "[D] a keep-alive connection holds no lease between requests");
 	}
 
+	// [S] The streamed join (design D6): the feed and the handler, children of the connection.
+	{
+		unsigned short port = free_port();
+		http::HttpAsioService svc(app, 1, 64);
+		app.service = &svc;
+		svc.start(port); wait_listen(port);
+		// A complete body, then a FIN while the handler still runs: the watch cancels the request and
+		// the answer still comes, whether the handler asks for its token after the body (the watch
+		// waits for it, as for a buffered body) or asked during it (the watch starts with the body's end).
+		for (const char* when : {"", "?early=1"}) {
+			Conn c(port);
+			c.send(post(std::string("/body-wait") + when, std::string(5000, 'a')));
+			std::this_thread::sleep_for(100ms);
+			c.shut_wr();
+			auto r = c.read_response();
+			check(r.status == 200 && r.body == "5000:cancelled", std::string("[S] after a complete body, a hang-up cancels the running handler ") + (*when ? "that asked during the body" : "that asks after it") + " (" + r.body + ")");
+		}
+		// A handler that answers without reading the body, or after its first chunk: the feed stops
+		// (its push, or its read of the rest the client holds) and the connection closes.
+		for (const char* when : {"", "?read=1"}) {
+			Conn c(port, 3);
+			c.send(std::string("POST /body-skip") + when + " HTTP/1.1\r\nHost: x\r\nContent-Length: 100000\r\n\r\n" + std::string(1000, 'a'));
+			const auto t0 = clk::now();
+			auto r = c.read_response();
+			const double ms = since_ms(t0);
+			const std::string how = *when ? "after the body's first chunk" : "without reading the body";
+			check(r.status == 200 && r.body == "skipped" && ms < 1000,
+				"[S] a handler that answers " + how + " is answered at once (" + std::to_string(static_cast<int>(ms)) + " ms): its end stops the feed");
+			check(c.closed_by_peer(), "[S] and the connection closes after the response (" + how + ")");
+		}
+		check(until([&] { return svc.reactor(0).gate().inflight.load() == 0; }), "[S] every request is released");
+	}
+
 	// [E] The buffered-body cap.
 	{
 		unsigned short port = free_port();
@@ -929,27 +983,35 @@ int main() {
 		auto r = one(port, get("/thread?id=thread", "Connection: close\r\n"));
 		check(r.status == 200 && r.body == "loop" && app.get_obs("thread")->on_loop, "[T] (c) a handler resumed from a std::thread finishes on the loop thread");
 	}
-	{   // (d) stop() with handlers suspended in a read, an event and a checkpoint: every task frame is gone
+	{   // (d) stop() with handlers suspended in a read, an event, a checkpoint and a body read: every task frame is gone
 		const auto baseline = task::detail::live_frames();
 		{
 			unsigned short port = free_port();
 			auto svc = std::make_unique<http::HttpAsioService>(app, 2, 64);
 			app.service = svc.get();
 			svc->start(port); wait_listen(port);
-			Conn a(port), b(port), k(port);
+			Conn a(port), b(port), k(port), s(port);
 			a.send(get("/suspend-read?id=d-read"));
 			b.send(get("/suspend-event?id=d-event"));
 			k.send(get("/checkpoint?id=d-check"));
-			check(until([&] { return app.get_obs("d-read")->started && app.get_obs("d-event")->started && app.get_obs("d-check")->started; }),
-				"[T] (d) the three handlers are suspended");
+			s.send("POST /tbody?id=d-body HTTP/1.1\r\nHost: x\r\nContent-Length: 100000\r\n\r\n" + std::string(1000, 'b'));
+			check(until([&] { return app.get_obs("d-read")->started && app.get_obs("d-event")->started && app.get_obs("d-check")->started
+					&& app.get_obs("d-body")->started; }),
+				"[T] (d) the four handlers are suspended");
 			std::this_thread::sleep_for(20ms);
 			check(task::detail::live_frames() > baseline, "[T] (d) live frames are counted while handlers run");
 			const auto t0 = clk::now();
 			svc->stop();
-			std::printf("  [T] (d) stop() with three suspended handlers -> %.0f ms\n", since_ms(t0));
+			const double stop_ms = since_ms(t0);
+			std::printf("  [T] (d) stop() with four suspended handlers -> %.0f ms\n", stop_ms);
+			check(stop_ms < 1000, "[T] (d) stop() ends a body read without waiting for the grace (5 s): the feed takes the session's token");
 			auto ra = a.read_response(), rb = b.read_response(), rk = k.read_response();
 			check(ra.body == "read ended" && rb.body == "event ended" && rk.status == 503,
 				"[T] (d) each ended by the request's cancellation and answered (" + ra.body + ", " + rb.body + ", " + std::to_string(rk.status) + ")");
+			auto rs = s.read_response();
+			const auto body = app.get_obs("d-body");
+			check(rs.body == "ended" && body->end_kind == 2 && body->cancelled_at_end,
+				"[T] (d) a body read ends with operation_aborted at shutdown, the request cancelled, and is answered");
 			svc->close();
 			svc->destroy_roots();
 		}

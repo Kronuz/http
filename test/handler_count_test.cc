@@ -4,7 +4,8 @@
 // session's token, then the reply sent at once. A request served through HttpAsioService by a
 // handler that never suspends costs exactly what one round trip of that session costs, so the
 // handler (and a chain of child tasks it awaits) adds no handler; a handler that asks for its
-// cancel token pays for the disconnect watch's read, and one that never asks does not.
+// cancel token pays for the disconnect watch's read, and one that never asks does not; a
+// streamed body's handler likewise (design D6).
 #define ASIO_CUSTOM_HANDLER_TRACKING "counting_tracking.h"
 #include <asio.hpp>
 
@@ -46,11 +47,12 @@ static int dial(unsigned short port) {
 	}
 	return -1;
 }
-// Sends `path` `n` times on one keep-alive connection, one at a time, each answered with a
+static std::string get(const std::string& path) { return "GET " + path + " HTTP/1.1\r\nHost: x\r\n\r\n"; }
+static std::string post(const std::string& path) { return "POST " + path + " HTTP/1.1\r\nHost: x\r\nContent-Length: 16\r\n\r\n0123456789abcdef"; }
+// Sends `request` `n` times on one keep-alive connection, one at a time, each answered with a
 // 2-byte body; returns the server's handler invocations per request over those requests.
-static double handlers_per_request(unsigned short port, const std::string& path, int warm, int n) {
+static double handlers_per_request(unsigned short port, const std::string& request, int warm, int n) {
 	const int fd = dial(port);
-	const std::string request = "GET " + path + " HTTP/1.1\r\nHost: x\r\n\r\n";
 	auto round = [&] {
 		::send(fd, request.data(), request.size(), 0);
 		std::string got;
@@ -96,9 +98,14 @@ static task::task<int> depth(int n) {
 }
 
 struct App : http::HttpHandler {
+	bool wants_body_stream(const http::Request& r) override { return r.path.starts_with("/stream"); }
 	task::task<void> handle(http::Request& req, http::ResponseWriter& w) override {
 		if (req.path == "/deep") { co_await depth(3); }                  // three child tasks that never suspend
-		if (req.path == "/asks") { (void)req.cancel_token(); }          // engages the disconnect watch
+		if (req.path == "/asks" || req.path == "/stream-asks") { (void)req.cancel_token(); }   // engages the disconnect watch
+		if (req.body_stream) {   // reads the whole body
+			std::string chunk;
+			while (!co_await req.body_stream->read(chunk)) {}
+		}
 		w.send(200, "ok", "");
 		co_return;
 	}
@@ -112,22 +119,26 @@ int main() {
 		unsigned short port = free_port();
 		reactor::TcpServer server(1, 0, raw_session);
 		server.start(port);
-		raw = handlers_per_request(port, "/", warm, n);
+		raw = handlers_per_request(port, get("/"), warm, n);
 		server.stop();
 	}
 	App app;
 	unsigned short port = free_port();
 	http::HttpAsioService service(app, 1, 0);
 	service.start(port);
-	const double flat = handlers_per_request(port, "/flat", warm, n);
-	const double deep = handlers_per_request(port, "/deep", warm, n);
-	const double asks = handlers_per_request(port, "/asks", warm, n);
+	const double flat = handlers_per_request(port, get("/flat"), warm, n);
+	const double deep = handlers_per_request(port, get("/deep"), warm, n);
+	const double asks = handlers_per_request(port, get("/asks"), warm, n);
+	const double stream = handlers_per_request(port, post("/stream"), warm, n);
+	const double stream_asks = handlers_per_request(port, post("/stream-asks"), warm, n);
 	service.stop();
-	std::printf("  raw session %.3f, http /flat %.3f, /deep %.3f, /asks %.3f handlers per request\n", raw, flat, deep, asks);
+	std::printf("  raw session %.3f, http /flat %.3f, /deep %.3f, /asks %.3f, streamed %.3f, streamed /stream-asks %.3f handlers per request\n",
+		raw, flat, deep, asks, stream, stream_asks);
 	check(raw > 0, "the reference session served");
 	check(flat == raw, "(a) a handler that never suspends adds no io_context handler to the session's");
 	check(deep == raw, "(a) nor does a chain of child tasks it awaits that never suspend");
 	check(asks > raw, "(f) a handler that asks for its cancel token pays for the watch's read; one that never asks pays none");
+	check(stream > 0 && stream_asks > stream, "(f) so does a streamed body's handler: the watch after the body reads only for one that asks");
 	std::printf("\n%s (%d failures)\n", failures == 0 ? "PASS" : "FAIL", failures);
 	return failures == 0 ? 0 : 1;
 }

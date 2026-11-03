@@ -671,6 +671,8 @@ inline task::task<bool> write_response(Stream &socket, AsioResponseWriter &write
 // The transport's reads of a request's cancellation, which engage no watch and make no source.
 struct RequestAccess {
 	static bool cancelled(const Request& request) noexcept { return request.cancel_ && request.cancel_->requested(); }
+	// Whether the request has its source: the handler asked for its token, or it was cancelled.
+	static bool asked(const Request& request) noexcept { return request.cancel_.has_value(); }
 };
 
 // Maps an exception that escaped handle() to the response: a deferred or owned-stream reply
@@ -878,7 +880,7 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 				request.body_stream = stream;
 				AsioResponseWriter writer(request, options, &ex, reactor);
 				RequestAbort<Stream> tracked(*reactor, request, socket);
-				WatchGuard<Stream> watching(*input);
+				WatchGuard<Stream> watching(*input, &request);
 				// Stops the feed when the handler completes; linked, so shutdown stops it too.
 				task::cancel_source feed_stop{stop};
 				bool handler_done = false;
@@ -905,8 +907,13 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 						}
 						if (parser.complete()) {
 							stream->finish();
-							// The handler still runs: a hang-up from here cancels the request.
-							if (!handler_done) { input->watch([&request] { request.cancel(disconnected); }); }
+							// The handler still runs: a hang-up from here cancels the request. As for a
+							// buffered body, the watch waits for the handler to ask, unless it already did.
+							if (!handler_done) {
+								const bool lazy = !RequestAccess::asked(request);
+								input->watch([&request] { request.cancel(disconnected); }, lazy);
+								if (lazy) { request.set_cancel_watch(input.get()); }
+							}
 							co_return Fed::Complete;
 						}
 						if (buffered.empty()) {
@@ -949,6 +956,7 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 				auto [fed, ignored] = co_await task::when_all(feed(feed_stop.token()), run_handler());
 				(void)ignored;
 				input->unwatch();
+				request.set_cancel_watch(nullptr);
 				if (fed != Fed::Complete) { keep_alive = false; }
 
 				if (!writer.is_deferred() && !writer.ended()) {
