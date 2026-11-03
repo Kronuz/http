@@ -328,7 +328,10 @@ int main() {
 		while (shutdown.socket.available() < 512 && std::chrono::steady_clock::now() < until)
 			std::this_thread::sleep_for(1ms);
 		check(shutdown.socket.available() >= 512 && !held_body.expired());
+		const auto stopping = std::chrono::steady_clock::now();
 		server.stop();
+		// The closing exchange cancels the write in flight; the 5 s grace is not waited out.
+		check(std::chrono::steady_clock::now() - stopping < 2s);
 		settled(closing.record, ReplySettlement::Shutdown);
 		payload_retired(held_body);
 		std::cout << "multi-chunk transfer, producer backpressure, keep-alive, deadline, abandonment and "

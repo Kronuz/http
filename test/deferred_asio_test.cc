@@ -334,7 +334,10 @@ void shutdown() {
 	char observed[128];
 	check(::recv(slow.fd, observed, sizeof(observed), 0) > 0 && writing.record->settlements == 0,
 		  "shutdown fixture holds an original partial socket write");
+	const auto stopping = std::chrono::steady_clock::now();
 	server.reset();
+	check(std::chrono::steady_clock::now() - stopping < 2s,
+		  "shutdown cancels the write in flight instead of waiting out the 5 s grace");
 	wait_settlement(writing.record);
 	check(writing.record->reason == static_cast<int>(ReplySettlement::Shutdown) &&
 			  writing.record->reply.expired(),

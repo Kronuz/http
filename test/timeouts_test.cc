@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
@@ -18,6 +19,7 @@
 #include <thread>
 
 #include "http_asio.h"
+#include "test_loop.h"
 
 using namespace std::chrono_literals;
 using clk = std::chrono::steady_clock;
@@ -28,8 +30,20 @@ static void check(bool ok, const char* what) {
 	if (!ok) { ++failures; }
 }
 
+// How the last streamed body ended for the handler reading it.
+static std::atomic<int> stream_end{0};
+
 struct Echo : http::HttpHandler {
+	bool wants_body_stream(const http::Request& r) override { return r.path == "/stream"; }
 	task::task<void> handle(http::Request& req, http::ResponseWriter& w) override {
+		if (req.path == "/stream") {
+			std::string chunk;
+			asio::error_code ec;
+			while (!(ec = co_await read_chunk(*req.body_stream, chunk))) {}
+			stream_end = ec.value();
+			w.send(200, "streamed");
+			co_return;
+		}
 		if (req.path == "/big") { w.send(200, std::string(std::stoul(req.query.substr(2)), 'x')); co_return; }   // query "n=<bytes>"
 		w.send(200, std::to_string(req.body.size()));
 		co_return;
@@ -118,6 +132,14 @@ int main() {
 		put(fd, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n0123456789");
 		auto [got, s] = until_closed(fd);
 		check(got.empty() && s > 0.2 && s < 2.0, "a stalled body closes at the inactivity timeout");
+		::close(fd);
+	}
+	{  // a streamed body that stops: its reader sees timed_out at the inactivity timeout
+		int fd = dial(port);
+		put(fd, "POST /stream HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n0123456789");
+		auto [got, s] = until_closed(fd);
+		check(s > 0.2 && s < 2.0 && stream_end == asio::error_code(asio::error::timed_out).value(),
+			"a stalled streamed body fails its reader with timed_out at the inactivity timeout");
 		::close(fd);
 	}
 	{  // a slow body that keeps moving, every 150 ms for 1.5 s: completes
