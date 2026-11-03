@@ -4,7 +4,7 @@
 
 - Design: `docs/design/task-handlers.md` revision 2 (branch `design/task-handlers`, http:694fb47): D1's `BodyStream` (`read`, `push`), D6, D9 for `read`, gate rows T1, T2, T3 (all 13 probes), T5, T7's streamed kind, step 5 and the docs list; H1's ledger `docs/status/task-h1.md` and review `docs/reviews/task-h1-code.md`.
 - Branch / worktree: `phase/task-h2` at `~/code/Kronuz/http-wt/task-h2`, from `origin/main` http:2bede1b (H1 landed; pins task:6558c2e, reactor:2fd30c8, unchanged).
-- State: built and proved; docs written; pushed for CI (see Log); ready for code review.
+- State: built, proved and documented; CI green on every job; ready for code review.
 
 ## Done criteria (from the design's H2 row and K1-K10 as they apply; tick only with evidence)
 
@@ -18,7 +18,7 @@
 - [x] K5 / T5 sanitizers, separate builds, 0 reports: suite plus T3 plus T4 under ASan+UBSan and TSan on macOS (Homebrew LLVM) and Linux (lease: g++ 13 ASan+UBSan, clang 18 TSan).
 - [x] K7 / T7 streamed POST kind (`httpb`, `bench/server_compare.cc`, `bench/post_body.lua`): allocations and io handlers per request at most A (S1): table below.
 - [x] K9 docs: README, ARCHITECTURE, AGENTS, `docs/TRANSPORT.md`, `docs/mechanisms/coroutine-handlers.md` and the CHANGELOG upgrade note (old and new signatures; the removed `cancelled()`, `cancel_reason()`, `on_cancel()`, `CancelReason`, `async_read`; the merged factories and constructors; the four teardown phases).
-- [ ] K10 CI green on every job: see Log.
+- [x] K10 CI green on every job: run 41603112360 at http:45ddd7a (linux gcc, clang, arm64, asan-ubsan, tsan; macOS arm64, x86_64; FreeBSD; the headers matrix skipped as on main)
 - [x] The `timeouts` flake (run 41589992099): explained with numbers (below), test fixed.
 
 ## Mutants (`.scratch/mutants/`; Linux lease, Debug, each built and run, the source restored after)
@@ -98,3 +98,4 @@ The case sends a byte every 100 ms against a 300 ms inactivity timeout, so it fa
 - 2026-11-03: worktree and branch from http:2bede1b; `BodyStream::read` on task with D9 (http:30ac15c).
 - 2026-11-03: the flake's test fix (http:0fc20b7) and the `httpb` kind (http:1ad87d8). T3 on the old watch: Linux g++ ASan+UBSan and clang TSan, macOS ASan+UBSan and TSan, suite 13/13 each, every probe as the table, 0 reports. Mutants round 1 left D9-read, D6-stop, D6-link, D6-watch alive; tests added; round 2 killed all but D6-stop. Counts showed `httpb` B at 9 handlers against A's 8; handler tracking found the eager watch.
 - 2026-11-03: the lazy streamed watch, [S] cases and the streamed `handler_count` pair (http:d7e928f); docs (http:65f3359). Rounds 3 and 4 killed D6-stop, D6-watch, D6-lazy-always, D6-lazy-never; `none` passes. After the change: Linux g++ Debug 13/13; Linux ASan+UBSan (g++ 13) and TSan (clang 18) suite 13/13 and every T3 probe as the table (stalled reply 411 / 476 ms, 300 idle 4 / 7 ms), 0 reports; macOS Debug 13/13; `httpb` counts 7 handlers, 19 allocs. Round 4's `none` run of `handler_count` timed out once: a stale binary (round 3's last rebuild postdated the rsync'd fix's mtime, so the fixed test was not recompiled until a mutant touched `http_asio.h`); 190 later runs on the lease, 160 of them 4 at once, never hung.
+- 2026-11-03: pushed `phase/task-h2`; CI run 41603112360 at http:45ddd7a green on every job. Build dirs deleted (local and lease).
