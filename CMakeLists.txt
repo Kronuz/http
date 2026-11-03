@@ -112,10 +112,12 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 		# benchmark binary only, never the library, and never the timed binary.
 		option(HTTP_BENCH_COUNT_ALLOCS "Count allocations and Asio handlers in http_server_compare (not for timing)" OFF)
 		if(HTTP_BENCH_COUNT_ALLOCS)
-			# TASK_FRAME_POOL=0: task frames reach operator new too, as Asio's frames do with recycling off.
-			target_compile_definitions(http_server_compare PRIVATE HTTP_BENCH_COUNT_ALLOCS=1 TASK_FRAME_POOL=0)
+			# Task frames come from task's frame pool, as asio::awaitable frames come from Asio's frame recycling,
+			# which ASIO_DISABLE_SMALL_BLOCK_RECYCLING leaves on: the same frame treatment as the S1 baseline.
+			target_compile_definitions(http_server_compare PRIVATE HTTP_BENCH_COUNT_ALLOCS=1)
 			target_include_directories(http_server_compare PRIVATE bench)
 			add_executable(bench_counting_test test/bench_counting_test.cc)
+			# The counter's own test: every spawned task frame reaches operator new.
 			target_compile_definitions(bench_counting_test PRIVATE HTTP_BENCH_COUNT_ALLOCS=1 TASK_FRAME_POOL=0)
 			target_include_directories(bench_counting_test PRIVATE bench)
 			target_link_libraries(bench_counting_test PRIVATE http)
