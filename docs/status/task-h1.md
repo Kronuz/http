@@ -87,3 +87,7 @@ Each consumer breaks when it moves its http pin to this branch; none moves in H1
 ## Log
 - 2026-11-02: worktree and branch from http:03467b1; pins moved (task:d3d94f3, reactor:4f5a0b5); headers, tests, examples and the bench ported to task.
 - 2026-11-02: Debug suite 13/13 on C2; mutants run, D4 and D7 survived and gained tests; pin moved to C3 (task:6558c2e) on the lead's word, suite 13/13; macOS ASan+UBSan and TSan 13/13, 0 reports; Linux g++ ASan+UBSan and clang TSan on the lease 13/13, 0 reports (`remote.sh` failed: `lease list` shows two detent-build leases, so its IP lookup yields two lines; ran against the provisioned one by hand); counts A vs B1 recorded; CI run 41585840133 green on every job at f0f293b.
+
+## Lead rulings (2026-11-03)
+- `examples/bench_asio.cc` (raw-Asio comparator) moves under `bench/` with the other measurement code, so K1 holds with no new exception.
+- A handler reaches its loop through the request: `Request` exposes the connection's reactor scheduler as `task::asio_scheduler& scheduler()` (its `executor()` gives the loop's executor for timers, sockets and `task::deadline`), replacing `co_await asio::this_coro::executor`. One way, explicit, and it is the scheduler D9's affinity rule already names. Lands in the H1 fix round, with a test.
