@@ -49,7 +49,9 @@ struct TlsAdmission {
 	TlsAdmission(std::size_t bound, std::size_t connection_bound)
 		: maximum(bound), connections(connection_bound) {}
 };
-inline asio::awaitable<void>
+// A TLS connection: admission, then the handshake under a deadline linked to the session's
+// token (shutdown ends it too), then the HTTP connection over the stream.
+inline task::task<void>
 serve_tls_connection(asio::ip::tcp::socket socket, HttpHandler *handler, reactor::Reactor *reactor,
 					 const AsioResponseOptions *options, std::shared_ptr<asio::ssl::context> context,
 					 std::chrono::milliseconds deadline, std::shared_ptr<TlsAdmission> admission,
@@ -87,42 +89,28 @@ serve_tls_connection(asio::ip::tcp::socket socket, HttpHandler *handler, reactor
 	lease.handshake = true;
 	// Keep the context and stream alive through every original operation.
 	asio::ssl::stream<asio::ip::tcp::socket> stream(std::move(socket), *context);
-	asio::steady_timer timer(stream.get_executor());
 	// Subtract elapsed time instead of adding an unbounded duration to a clock.
 	auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - accepted.accepted_at);
 	if (elapsed >= deadline) { fail(TlsFailure::deadline); co_return; }
-	timer.expires_after(deadline - std::max(elapsed, std::chrono::milliseconds::zero()));
-	asio::error_code handshake_error, timer_error;
-	using namespace asio::experimental::awaitable_operators;
-	auto winner =
-		co_await (stream.async_handshake(asio::ssl::stream_base::server,
-										 asio::redirect_error(asio::use_awaitable, handshake_error)) ||
-				  timer.async_wait(asio::redirect_error(asio::use_awaitable, timer_error)));
-	if (winner.index() != 0) { fail(TlsFailure::deadline); co_return; }
+	asio::error_code handshake_error;
+	{
+		task::deadline<task::asio_scheduler> handshake(reactor->scheduler(),
+			std::chrono::steady_clock::now() + (deadline - std::max(elapsed, std::chrono::milliseconds::zero())), accepted.stop);
+		handshake_error = co_await task::await_asio<void(asio::error_code)>(
+			[&](auto handler) { stream.async_handshake(asio::ssl::stream_base::server, std::move(handler)); }, handshake.token());
+		if (handshake_error && handshake.expired()) { fail(TlsFailure::deadline); co_return; }
+	}
 	if (handshake_error) { fail(classify(handshake_error)); co_return; }
 	lease.release();
-	co_await serve_connection(std::move(stream), handler, reactor, options);
+	co_await serve_connection(std::move(stream), handler, reactor, options, std::move(accepted));
 }
 } // namespace detail
+// Serves each connection over TLS with `context`: at most `maximum_handshakes` handshakes and
+// `maximum_connections` TLS connections at once, each handshake within `handshake_deadline` of
+// its accept (queue time included). `failed`, when set, hears every connection that ends
+// before serving, and why.
 inline HttpAsioService::ConnectionFactory
 tls_connection_factory(std::shared_ptr<asio::ssl::context> context,
-					   std::chrono::milliseconds handshake_deadline = std::chrono::seconds(5),
-					   std::size_t maximum_handshakes = 64, std::size_t maximum_connections = 1024) {
-	if (!context || handshake_deadline <= std::chrono::milliseconds::zero() || !maximum_handshakes ||
-		!maximum_connections) {
-		throw std::invalid_argument("TLS connection configuration");
-	}
-	auto admission = std::make_shared<detail::TlsAdmission>(maximum_handshakes, maximum_connections);
-	return [context = std::move(context), handshake_deadline,
-			admission](asio::ip::tcp::socket socket, HttpHandler *handler, reactor::Reactor *reactor,
-					   const AsioResponseOptions *options) {
-		return detail::serve_tls_connection(std::move(socket), handler, reactor, options, context,
-											handshake_deadline, admission, reactor::SessionContext{std::chrono::steady_clock::now()});
-	};
-}
-// `failed`, when set, hears every connection that ends before serving, and why.
-inline HttpAsioService::TimedConnectionFactory
-tls_connection_factory_timed(std::shared_ptr<asio::ssl::context> context,
 	std::chrono::milliseconds handshake_deadline = std::chrono::seconds(5),
 	std::size_t maximum_handshakes = 64, std::size_t maximum_connections = 1024, TlsFailureHook failed = {}) {
 	if (!context || handshake_deadline <= std::chrono::milliseconds::zero() || !maximum_handshakes || !maximum_connections) {
@@ -131,7 +119,7 @@ tls_connection_factory_timed(std::shared_ptr<asio::ssl::context> context,
 	auto admission = std::make_shared<detail::TlsAdmission>(maximum_handshakes, maximum_connections);
 	return [context = std::move(context), handshake_deadline, admission, failed = std::move(failed)](asio::ip::tcp::socket socket,
 		HttpHandler* handler, reactor::Reactor* reactor, const AsioResponseOptions* options, reactor::SessionContext accepted) {
-		return detail::serve_tls_connection(std::move(socket), handler, reactor, options, context, handshake_deadline, admission, accepted, failed);
+		return detail::serve_tls_connection(std::move(socket), handler, reactor, options, context, handshake_deadline, admission, std::move(accepted), failed);
 	};
 }
 

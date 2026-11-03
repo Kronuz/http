@@ -4,6 +4,7 @@
 #include <asio.hpp>
 #include <limits>
 #include <reactor.h>
+#include "task_asio.hh"
 namespace http::detail {
 class AsioOwnedStreamControl : public reactor::Abortable,
 							   public std::enable_shared_from_this<AsioOwnedStreamControl> {
@@ -22,33 +23,28 @@ class AsioOwnedStreamControl : public reactor::Abortable,
 		return control;
 	}
 	explicit AsioOwnedStreamControl(asio::any_io_executor executor)
-		: executor_(executor), timer_(std::make_unique<asio::steady_timer>(executor)),
-		  cancellation_(std::make_unique<asio::cancellation_signal>()) {}
+		: executor_(executor), timer_(std::make_unique<asio::steady_timer>(executor)) {}
 	void abort() override { exchange->close(ReplySettlement::Shutdown); }
 	void disable() noexcept {
 		std::lock_guard lock(gate_);
 		active_ = false;
 		executor_.reset();
 		timer_.reset();
-		cancellation_.reset();
 	}
-	asio::awaitable<void> wait() {
+	// Until a write is ready or the exchange closes: notify() cancels the timer to wake it.
+	task::task<void> wait() {
 		while (!exchange->next_ready()) {
 			timer_->expires_at(exchange->deadline());
-			asio::error_code error;
-			co_await timer_->async_wait(asio::redirect_error(asio::use_awaitable, error));
+			const asio::error_code error = co_await task::await_asio<void(asio::error_code)>(
+				[this](auto handler) { timer_->async_wait(std::move(handler)); });
 			if (!error)
 				exchange->close(ReplySettlement::TimedOut);
 			else if (error != asio::error::operation_aborted)
 				exchange->close(ReplySettlement::Failed);
-			else {
-				auto state = co_await asio::this_coro::cancellation_state;
-				if (state.cancelled() != asio::cancellation_type::none)
-					co_return;
-			}
 		}
 	}
-	asio::cancellation_slot write_cancellation() { return cancellation_->slot(); }
+	// Requested, on the loop, once the exchange is closing: a write in flight is cancelled.
+	task::cancel_token write_token() const { return writes_.token(); }
 	std::shared_ptr<OwnedStreamExchange> exchange;
 
   private:
@@ -66,7 +62,7 @@ class AsioOwnedStreamControl : public reactor::Abortable,
 				}
 				control->timer_->cancel();
 				if (control->exchange->phase() == OwnedStreamExchange::Phase::Closing)
-					control->cancellation_->emit(asio::cancellation_type::all);
+					control->writes_.request();
 			}
 		});
 	}
@@ -74,6 +70,6 @@ class AsioOwnedStreamControl : public reactor::Abortable,
 	bool active_ = true;
 	std::optional<asio::any_io_executor> executor_;
 	std::unique_ptr<asio::steady_timer> timer_;
-	std::unique_ptr<asio::cancellation_signal> cancellation_;
+	task::cancel_source writes_;
 };
 } // namespace http::detail

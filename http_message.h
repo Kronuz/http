@@ -24,7 +24,8 @@
 // plain data: an application sees a request and fills in a response, and nothing
 // here knows how the bytes were parsed (http-parser today), how they arrived (the
 // Asio transport today), or which loop the handler runs on. That is what keeps the
-// parser / transport choices swappable behind the handler.
+// parser / transport choices swappable behind the handler. A request's cancellation is
+// a task::cancel_token, the one mechanism the libraries share.
 
 #pragma once
 
@@ -32,10 +33,13 @@
 #include <cctype>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include "task.hh"
 
 namespace http {
 
@@ -43,22 +47,22 @@ using Headers = std::vector<std::pair<std::string, std::string>>;
 
 class BodyStream;   // http_body_stream.h -- the streamed request body (Request::body_stream)
 
-// Why a request was cancelled while its handler ran (Request::on_cancel).
-//   Disconnect: the client closed its side (EOF) or the socket failed on a read.
-//   Shutdown:   the service is stopping.
-// Cancellation stops reads at their next checkpoint; the response is still written.
-enum class CancelReason : unsigned char { None, Disconnect, Shutdown };
+// The reason a request is cancelled when its client hangs up (closes its side, or the socket
+// fails on a read). The service stopping cancels with task::cancel_reason::shutdown.
+inline constexpr task::cancel_reason disconnected = task::cancel_reason::user;
 
-// A transport's watch for a client hang-up that starts when the handler first asks about
-// cancellation (Request::on_cancel, cancelled() or cancel_reason()), so a handler that never
-// asks never pays for it. engage() runs on the connection's loop, at most once per request,
-// and calls Request::cancel(Disconnect) before it returns when the client has already gone.
+// A transport's watch for a client hang-up that starts when the handler first asks for the
+// request's cancel token (Request::cancel_token), so a handler that never asks never pays for
+// it. engage() runs on the connection's loop, at most once per request, and calls
+// Request::cancel(disconnected) before it returns when the client has already gone.
 class CancelWatch {
 public:
 	virtual void engage() noexcept = 0;
 protected:
 	~CancelWatch() = default;
 };
+
+namespace detail { struct RequestAccess; }
 
 // The base for an application's typed per-request state. The library owns the
 // Request; an application attaches its own working state (a decoded body, resolved
@@ -130,27 +134,19 @@ struct Request {
 	// BodyStream) while the connection feeds them flow-controlled. Null otherwise.
 	std::shared_ptr<BodyStream> body_stream;
 
-	// Cancellation, delivered on the connection's loop while the handler runs: the
-	// transport calls cancel() when the client closes its side (Disconnect) or the
-	// service stops (Shutdown), and the handler registers what to do with on_cancel() --
-	// typically requesting a task::cancel_source. Only the first cancel() counts, and the
-	// callback runs once. A callback registered after cancel() runs at once. Neither call
-	// is thread-safe: both run on the connection's loop. The first of these calls while the
-	// handler runs engages the transport's disconnect watch (CancelWatch), which reports a
-	// hang-up that happened before it at once.
-	bool cancelled() const noexcept { engage_watch(); return cancel_reason_ != CancelReason::None; }
-	CancelReason cancel_reason() const noexcept { engage_watch(); return cancel_reason_; }
-	// A callback that throws is dropped: the transport's frames must end by completing.
-	void on_cancel(std::function<void(CancelReason)> callback) {
-		cancel_callback_ = std::move(callback);
-		if (cancel_reason_ != CancelReason::None) { run_cancel_callback(); return; }
-		engage_watch();   // a hang-up it finds cancels here, which runs the callback
+	// Cancellation, delivered on the connection's loop while the handler runs: the transport
+	// calls cancel() when the client closes its side (http::disconnected) or the service stops
+	// (task::cancel_reason::shutdown); the first call wins. A handler observes it through
+	// cancel_token(): polled (requested()), woken (a task::cancel_callback on it), or passed to
+	// what it awaits (a budget, a linked task::cancel_source, a deadline's parent). The first
+	// cancel_token() call engages the transport's disconnect watch (CancelWatch), which reports
+	// a hang-up that happened before it at once. On the connection's loop only.
+	task::cancel_token cancel_token() const {
+		task::cancel_token token = source().token();
+		if (cancel_watch_ && !token.requested()) { std::exchange(cancel_watch_, nullptr)->engage(); }
+		return token;
 	}
-	void cancel(CancelReason reason) {
-		if (cancel_reason_ != CancelReason::None) { return; }
-		cancel_reason_ = reason;
-		run_cancel_callback();
-	}
+	void cancel(task::cancel_reason reason) { source().request(reason); }
 	// For a transport: the watch the handler's first interest in cancellation engages, or
 	// null. The transport clears it before the watch goes away.
 	void set_cancel_watch(CancelWatch* watch) noexcept { cancel_watch_ = watch; }
@@ -184,21 +180,18 @@ struct Request {
 		user_data.reset();
 		body_stream.reset();
 		extension.reset();
-		cancel_reason_ = CancelReason::None;
-		cancel_callback_ = nullptr;
+		cancel_.reset();
 		cancel_watch_ = nullptr;
 	}
 
 private:
-	void run_cancel_callback() noexcept {
-		if (!cancel_callback_) { return; }
-		try { cancel_callback_(cancel_reason_); } catch (...) {}
+	friend struct detail::RequestAccess;
+	// Made on first use, so a request nobody cancels or asks about allocates no source.
+	task::cancel_source& source() const {
+		if (!cancel_) { cancel_.emplace(); }
+		return *cancel_;
 	}
-	void engage_watch() const noexcept {
-		if (cancel_watch_ && cancel_reason_ == CancelReason::None) { std::exchange(cancel_watch_, nullptr)->engage(); }
-	}
-	CancelReason cancel_reason_ = CancelReason::None;
-	std::function<void(CancelReason)> cancel_callback_;
+	mutable std::optional<task::cancel_source> cancel_;
 	mutable CancelWatch* cancel_watch_ = nullptr;   // engaged once, then cleared
 };
 

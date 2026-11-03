@@ -26,16 +26,17 @@
 // RESTORE or bulk load runs in O(capacity * chunk) memory and back-pressure reaches the
 // socket: when the channel is full the connection stops reading.
 //
-// async_read() is an ordinary Asio operation, so it works with any completion token:
+// async_read() is an ordinary Asio operation; a task::task handler awaits it with
 //     std::string chunk;
-//     auto ec = co_await body.async_read(chunk, asio::redirect_error(asio::use_awaitable, ec));
-// or from a task::task through task::await_asio<void(asio::error_code)>. Everything runs
-// on the connection's loop; a BodyStream is not thread-safe.
+//     auto ec = co_await task::await_asio<void(asio::error_code)>([&](auto h) { body.async_read(chunk, std::move(h)); });
+// Everything runs on the connection's loop; a BodyStream is not thread-safe.
 
 #pragma once
 
 #include <asio.hpp>
 #include <asio/experimental/channel.hpp>
+
+#include "task_asio.hh"
 
 #include <cstddef>
 #include <string>
@@ -66,11 +67,11 @@ public:
 	// ---- the transport's side ----
 
 	// Hands the next chunk to the reader, waiting while the channel is full. false when the
-	// reader is gone (finish, fail or abandon was called, or the wait was cancelled).
-	asio::awaitable<bool> push(std::string chunk) {
+	// reader is gone (finish, fail or abandon was called) or `token` was requested.
+	task::task<bool> push(std::string chunk, task::cancel_token token) {
 		if (closed_) { co_return false; }
-		asio::error_code error;
-		co_await channel_.async_send(asio::error_code{}, std::move(chunk), asio::redirect_error(asio::use_awaitable, error));
+		const asio::error_code error = co_await task::await_asio<void(asio::error_code)>(
+			[&](auto handler) { channel_.async_send(asio::error_code{}, std::move(chunk), std::move(handler)); }, std::move(token));
 		co_return !error && !closed_;   // a send that a close completed counts as refused
 	}
 	// The body is complete: reads end with eof after the buffered chunks.

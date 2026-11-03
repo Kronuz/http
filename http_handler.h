@@ -31,12 +31,14 @@
 // framing -- it picks Content-Length for a buffered body and chunked transfer
 // encoding once a response streams.
 //
-// handle() is a coroutine awaited on the connection's loop. It may suspend (a timer, a
-// task, a body read); while it does, the loop serves other connections. The request and
-// the writer stay valid until the coroutine completes, and a request's frame is never
-// destroyed early: a handler that sees Request::cancelled() returns, and the transport
-// still writes its response. The scoped writer and request must not escape handle(). For
-// delayed replies, transfer response authority with defer() and retain only the owned
+// handle() is a task::task awaited on the connection's loop as a child of the connection: one
+// that never suspends costs no trip through the loop. It may suspend (a timer, a task, a body
+// read); while it does, the loop serves other connections. The request and the writer stay
+// valid until the task completes, and a request's frame is never destroyed early: a handler
+// whose Request::cancel_token() is requested returns, and the transport still writes its
+// response. The scoped writer and request must not escape handle(), and are used on the
+// connection's loop only (a child that moves to another scheduler comes back when it ends).
+// For delayed replies, transfer response authority with defer() and retain only the owned
 // capability. A handler calls end() before it completes.
 //
 // A ready-made HttpHandler that dispatches by method + path -- the application's
@@ -51,7 +53,7 @@
 #include <string>
 #include <utility>
 
-#include <asio/awaitable.hpp>
+#include "task.hh"
 
 #include "http_body_stream.h"
 #include "http_message.h"
@@ -178,9 +180,10 @@ public:
 	// Handles one request on the connection's loop. Write the response through `response`
 	// and call end() before completing. Suspending (co_await) is the way to wait; never
 	// block the thread. A request cancelled by a client hang-up or by shutdown (see
-	// Request::on_cancel) is still answered: reads stop at their next checkpoint, writes
-	// run to completion, and the response is attempted.
-	virtual asio::awaitable<void> handle(Request& request, ResponseWriter& response) = 0;
+	// Request::cancel_token) is still answered: reads stop at their next checkpoint, writes
+	// run to completion, and the response is attempted. A task::cancelled that escapes while
+	// the request is cancelled, unanswered, is answered 503 and closes the connection.
+	virtual task::task<void> handle(Request& request, ResponseWriter& response) = 0;
 
 	// Opt in to streaming the request body: return a sink to receive it
 	// incrementally, or nullptr (default) to have it buffered into Request::body.
