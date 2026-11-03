@@ -3,7 +3,7 @@
 # affine-thread (http)
 
 - Branch / worktree: `phase/affine-thread` at `~/code/Kronuz/http-wt/affine`, from http:93dc7bb.
-- State: done; CI in the Log.
+- State: done; CI green (run 41639438922, 8 jobs success, headers skipped).
 
 ## Done
 
