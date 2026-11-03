@@ -54,9 +54,10 @@ if(ASIO_INCLUDE_DIR STREQUAL "")
 	set(ASIO_INCLUDE_DIR "${asio_SOURCE_DIR}/asio/include")
 endif()
 
-# --- task: the coroutine task type (no source uses it yet) ---
-# Header-only; its asio binding finds the ASIO_INCLUDE_DIR set above and fetches no second Asio.
-FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG 8cad661e0dd3bd1c74b964cdc0ee42066f568838)
+# --- task: the coroutine type of handlers, connections and sessions, and their cancellation ---
+# Header-only; its asio binding finds the ASIO_INCLUDE_DIR set above and fetches no second Asio. Declared before
+# reactor, so this pin is the one reactor builds against too. Set FETCHCONTENT_SOURCE_DIR_TASK for a local checkout.
+FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG d3d94f31e62688bcdd51f8110ee08ed74f53fc81)
 FetchContent_MakeAvailable(task)
 
 # --- reactor: the generic Asio server runtime (shared reactor pool + accept + shutdown) ---
@@ -64,10 +65,11 @@ FetchContent_MakeAvailable(task)
 # list, and the abort->grace->force->stop->join shutdown were extracted from http_asio.h into
 # Kronuz/reactor so other Kronuz network services share one runtime. Header-only; rides
 # on the same standalone Asio (so no second Asio fetch -- just its include dir). Set
-# REACTOR_INCLUDE_DIR to use a local checkout instead of fetching (dev iteration).
+# REACTOR_INCLUDE_DIR to use a local checkout instead of fetching (dev iteration). The pin is
+# step R's task sessions (reactor branch phase/task-sessions).
 set(REACTOR_INCLUDE_DIR "" CACHE PATH "use an existing Kronuz/reactor dir instead of fetching")
 if(REACTOR_INCLUDE_DIR STREQUAL "")
-	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG ade618dd5d24bd7580c71d4a977430f367815334)
+	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG 4f5a0b59269252149d32c5b1ed69f27cc270db8f)
 	FetchContent_MakeAvailable(reactor)
 	set(REACTOR_INCLUDE_DIR "${reactor_SOURCE_DIR}")
 endif()
@@ -110,10 +112,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 		# benchmark binary only, never the library, and never the timed binary.
 		option(HTTP_BENCH_COUNT_ALLOCS "Count allocations and Asio handlers in http_server_compare (not for timing)" OFF)
 		if(HTTP_BENCH_COUNT_ALLOCS)
-			target_compile_definitions(http_server_compare PRIVATE HTTP_BENCH_COUNT_ALLOCS=1)
+			# TASK_FRAME_POOL=0: task frames reach operator new too, as Asio's frames do with recycling off.
+			target_compile_definitions(http_server_compare PRIVATE HTTP_BENCH_COUNT_ALLOCS=1 TASK_FRAME_POOL=0)
 			target_include_directories(http_server_compare PRIVATE bench)
 			add_executable(bench_counting_test test/bench_counting_test.cc)
-			target_compile_definitions(bench_counting_test PRIVATE HTTP_BENCH_COUNT_ALLOCS=1)
+			target_compile_definitions(bench_counting_test PRIVATE HTTP_BENCH_COUNT_ALLOCS=1 TASK_FRAME_POOL=0)
 			target_include_directories(bench_counting_test PRIVATE bench)
 			target_link_libraries(bench_counting_test PRIVATE http)
 			add_test(NAME bench_counting COMMAND bench_counting_test)
@@ -139,7 +142,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	enable_testing()
 	add_executable(http_owned_stream_test test/owned_stream_test.cc)
 	target_include_directories(http_owned_stream_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-	target_link_libraries(http_owned_stream_test PRIVATE Threads::Threads)
+	target_link_libraries(http_owned_stream_test PRIVATE task::task Threads::Threads)
 	add_test(NAME owned_stream COMMAND http_owned_stream_test)
 	set_tests_properties(owned_stream PROPERTIES TIMEOUT 30)
 	add_executable(http_owned_stream_asio_test test/owned_stream_asio_test.cc)
@@ -148,8 +151,15 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	set_tests_properties(owned_stream_asio PROPERTIES TIMEOUT 30)
 	add_executable(coroutine_test test/coroutine_test.cc)
 	target_link_libraries(coroutine_test PRIVATE http)
+	target_compile_definitions(coroutine_test PRIVATE TASK_COUNT_FRAMES=1)   # task::detail::live_frames() counts
 	add_test(NAME coroutine COMMAND coroutine_test)
 	set_tests_properties(coroutine PROPERTIES TIMEOUT 120)
+	# io_context handlers per request, counted by Asio's handler tracking (bench/counting_tracking.h).
+	add_executable(handler_count_test test/handler_count_test.cc)
+	target_include_directories(handler_count_test PRIVATE bench)
+	target_link_libraries(handler_count_test PRIVATE http)
+	add_test(NAME handler_count COMMAND handler_count_test)
+	set_tests_properties(handler_count PROPERTIES TIMEOUT 60)
 	# The request parser's checked-in corpus replays as a test; with HTTP_FUZZ (Clang) the
 	# libFuzzer binary builds too.
 	add_executable(request_parser_fuzz_replay fuzz/request_parser_fuzz.cc fuzz/replay.cc)
@@ -164,7 +174,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	endif()
 	add_executable(http_deferred_test test/deferred_test.cc)
 	target_include_directories(http_deferred_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-	target_link_libraries(http_deferred_test PRIVATE Threads::Threads)
+	target_link_libraries(http_deferred_test PRIVATE task::task Threads::Threads)
 	add_test(NAME deferred COMMAND http_deferred_test)
 	set_tests_properties(deferred PROPERTIES TIMEOUT 60)
 
