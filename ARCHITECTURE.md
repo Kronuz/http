@@ -22,7 +22,7 @@ loop, or a thread — so it is testable in isolation and portable to any runtime
                    http_range        byte range -> 206 / 416
                    http_request_parser  bytes -> Request (buffered or streamed body)
        ---------------------------------------------------------------
-  transport        http_asio      Asio C++20 coroutine connection (the reactor::Session)
+  transport        http_asio      the connection, a task::task on its reactor (the reactor::Session)
                                   + the buffered ResponseWriter (compression / conditional
                                   / range), riding on the Kronuz/reactor runtime below
   runtime          reactor        N shared-nothing reactors on N threads, one port,
@@ -30,8 +30,10 @@ loop, or a thread — so it is testable in isolation and portable to any runtime
 ```
 
 The files that name Asio are `http_asio.h` (and the generic `reactor` runtime it
-rides on) and the coroutine seam itself (`handle` returns `asio::awaitable<void>`;
-`BodyStream` is an Asio operation). The only file that knows the parser is `http_request_parser.h`. Everything
+rides on) and `http_body_stream.h` (a channel on the loop). The coroutine seam is
+`task::task` ([Kronuz/task](https://github.com/Kronuz/task)): `handle` returns
+`task::task<void>`, `BodyStream::read` returns `task::task<asio::error_code>`, and a
+handler awaits Asio operations with `task::await_asio`. The only file that knows the parser is `http_request_parser.h`. Everything
 else is plain C++ over the `Request` / `ResponseWriter` values.
 
 ## Why the seam has this shape
@@ -86,7 +88,7 @@ request lifecycle that runs on top of it.
 
 ## The request lifecycle
 
-One connection is one coroutine (`serve_connection`). Its keep-alive loop:
+One connection is one task (`serve_connection`) on its reactor's scheduler. Its keep-alive loop:
 
 ```
   read bytes  ->  RequestParser.feed
@@ -103,22 +105,22 @@ One connection is one coroutine (`serve_connection`). Its keep-alive loop:
   Request ready (or, for a BodyStream, as soon as the headers are)
      |
      | track the request for shutdown, watch the socket for a hang-up
-     | co_await handler->handle(request, writer)       (the loop serves others while it waits)
-     |    a hang-up or shutdown -> Request::cancel(...)  (the handler's callback; frame stays)
+     | co_await handler->handle(request, writer)       (a child task; the loop serves others while it waits)
+     |    a hang-up or shutdown -> Request::cancel(...)  (requests the request's token; frame stays)
      | handler throws -> on_error(...) maps it (default 500)
      v
   ResponseWriter.serialize:  content negotiation + compression, HTTP/1.1 framing
      |
      v
-  async_write (finishes even when cancelled) -> release the gate -> keep-alive? loop : close
+  write (finishes even when cancelled) -> release the gate -> keep-alive? loop : close
 ```
 
 ### The un-stallable property
 
-A handler is a coroutine, so waiting is `co_await`: the coroutine suspends, the loop is
-free to serve other connections, and it resumes on the connection's own `io_context`.
-Nothing runs off the loop. There is **one in-flight handler per connection** (the
-connection coroutine is the single owner of its `Request` and `ResponseWriter`), so
+A handler is a task, so waiting is `co_await`: the task suspends, the loop is free to
+serve other connections, and it resumes on the connection's own scheduler. Nothing runs
+off the loop. There is **one in-flight handler per connection** (the connection task is
+the single owner of its `Request` and `ResponseWriter`), so
 there is no pause/resume bookkeeping and no cross-thread completion handoff -- the race
 class that a callback-FSM version hides cannot arise. A saturated reactor sheds load as
 `503` instead of growing an unbounded queue. `docs/mechanisms/coroutine-handlers.md`
@@ -137,7 +139,7 @@ Request-body intake has three modes, chosen at headers-complete:
   For light per-chunk work (hashing, line-counting). Not capped.
 - **Streamed** (`wants_body_stream` returns true): `handle()` starts as soon as the
   headers are in and reads the body from `Request::body_stream` (a `BodyStream`) with
-  `co_await ... async_read(chunk, token)`. The connection coroutine feeds chunks
+  `co_await ... read(chunk)`. The connection task feeds chunks
   through a bounded channel and **suspends when it is full** (the loop stays free, and
   back-pressure reaches the socket). A multi-gigabyte `RESTORE`/bulk load is indexed as
   it arrives, in O(buffer) memory. The app parses the chunks in its own format; the
@@ -153,11 +155,11 @@ editing it:
 
 | Hook | Purpose |
 |---|---|
-| `handle(request, writer)` | the request handler, a coroutine (route + respond). |
+| `handle(request, writer)` | the request handler, a `task::task<void>` (route + respond). |
 | `create_extension(request)` | attach typed per-request state, built at headers-complete. |
 | `on_request_body(request)` | opt into push streaming: return a `BodySink` (light per-chunk work on the reactor), or nullptr to buffer. |
 | `wants_body_stream(request)` | opt into a streamed body: `handle()` runs while the body arrives and reads raw chunks from `Request::body_stream` with `co_await`, flow-controlled (O(buffer) memory). |
-| `Request::on_cancel(cb)` | run `cb(reason)` on the loop when the client closes or the service stops; reads stop, writes finish. |
+| `Request::cancel_token()` | the request's `task::cancel_token`, requested on the loop when the client closes or the service stops: poll it, register a `task::cancel_callback`, or pass it to a budget or a deadline; reads stop, writes finish. |
 | `on_error(exc, request, writer)` | map an exception to a response (default 500). |
 | `CompressionOptions::add_coding` | register a content-coding (the app owns the codec). |
 | `Accept` / `negotiate` | pick a media type from what the app can serialize. |

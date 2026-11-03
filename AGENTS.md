@@ -4,10 +4,10 @@ Orientation for anyone (human or agent) working on this library.
 
 ## What this is
 
-A generic, extensible HTTP/1.1 application framework on **standalone Asio** (C++20
-coroutines). It puts the application *above* the server, behind one seam: the
-application implements one interface,
-`HttpHandler::handle(const Request&, ResponseWriter&)`, and the framework parses,
+A generic, extensible HTTP/1.1 application framework on **standalone Asio** with
+`task::task` coroutines (Kronuz/task). It puts the application *above* the server, behind
+one seam: the application implements one interface,
+`task::task<void> HttpHandler::handle(Request&, ResponseWriter&)`, and the framework parses,
 routes, negotiates, frames, and writes. Header-only. Read `README.md` for the shape,
 `ARCHITECTURE.md` for the request lifecycle; this is the working notes.
 
@@ -15,10 +15,10 @@ routes, negotiates, frames, and writes. Header-only. Read `README.md` for the sh
 
 ```
 http_message.h        Request + the buffered Response value + reason_phrase().
-http_handler.h        HttpHandler (the seam; handle() is a coroutine) + ResponseWriter
+http_handler.h        HttpHandler (the seam; handle() returns task::task<void>) + ResponseWriter
                       (buffered/streamed output) + BodySink (push streaming).
 http_body_stream.h    BodyStream: a request body read with co_await (a bounded channel the
-                      connection feeds); the handler-facing async_read and the feed side.
+                      connection feeds); the handler-facing read() and the feed's push().
 http_router.h         Router — method/path dispatch; a thin binding over Kronuz/radix-router.
 http_accept.h         Accept — content negotiation (Accept / Accept-Encoding / …), RFC 7231.
 http_compression.h    Transparent response compression (Accept-Encoding → zstd/gzip).
@@ -26,7 +26,7 @@ http_conditional.h    Conditional requests — a weak ETag from the body + If-No
 http_range.h          Range requests — parse a single byte range (bytes=N-M / N- / -M).
 http_request_parser.h RequestParser — transport-agnostic http-parser wrapper: bytes → Request,
                       with buffered-or-streamed body intake (the headers-complete hook).
-http_asio.h           The Asio transport: the connection as a C++20 coroutine (the
+http_asio.h           The Asio transport: the connection as a task::task (the
                       reactor::Session), the buffered ResponseWriter with compression,
                       keep-alive, the per-request watch (ConnectionInput), the per-request
                       abort hook (RequestAbort, a reactor::Abortable), the streamed-body
@@ -80,6 +80,8 @@ test/asio_test.cc     ctest "asio": the transport end-to-end over real TCP — s
 - **http-parser** — the Joyent `http_parser` fork (accepts custom methods).
 - **radix-router** — the radix-tree path router behind `Router`.
 - **compressors** — the deflate/gzip + zstd codecs behind response compression.
+- **task** — [Kronuz/task](https://github.com/Kronuz/task): `task::task`, the one coroutine type of the handler API and the connection; tokens, deadlines, budgets and `await_asio` (`task::asio` linked). Declared before reactor, which builds against the same pin.
+- **reactor** — [Kronuz/reactor](https://github.com/Kronuz/reactor): the server runtime (`reactor::TcpServer`, the per-reactor `task::asio_scheduler`).
 
 There is **no dependency on Kronuz/server** — the Asio transport replaced the libev
 one. Xapiand still uses Kronuz/server for its other (non-HTTP) services, but this
@@ -108,56 +110,64 @@ headers-complete are the trailer section and go to `Request::trailers`, never to
 headers. A `CONNECT` request is answered and the connection closes: no tunnel is opened,
 and what follows its header section is not a request.
 
-## The un-stallable model (Asio coroutine)
+## The un-stallable model (tasks on the loop)
 
-One connection is one coroutine (`detail::serve_connection` in `http_asio.h`, run as a
-`reactor::Session`), and a handler is a coroutine awaited from it on the same loop:
+One connection is one task (`detail::serve_connection` in `http_asio.h`, run as a
+`reactor::Session` on the reactor's scheduler), and a handler is a child task awaited from
+it on the same loop:
 
 ```cpp
 co_await handler->handle(request, writer);   // suspends on whatever it waits for
 ```
 
-A handler that waits `co_await`s, the loop serves other connections, and the coroutine
-resumes on the connection's own `io_context`. There is no worker pool and no thread
-handoff. Invariants -- do not break these when touching `serve_connection`:
+A handler that waits `co_await`s, the loop serves other connections, and the task
+resumes on the connection's own scheduler (`Request::scheduler()`, the reactor's). There is
+no worker pool and no thread handoff. Invariants -- do not break these when touching `serve_connection`:
 
-- **One in-flight handler per connection.** The coroutine is the single owner of its
+- **One in-flight handler per connection.** The connection task is the single owner of its
   `Request` and `ResponseWriter`; it does not read the next request until this one's
   response is written. So there is no pause/resume bookkeeping and no cross-thread
   handoff of the connection state -- the race class a callback FSM hides cannot arise.
-- **A request's frame is never destroyed early.** Cancellation is disabled on the
-  connection coroutine from just before the handler runs until its response is written
-  (`reset_cancellation_state(disable_cancellation())`, re-enabled at the top of the next
-  request). Shutdown and hang-ups arrive as `Request::cancel`, never as a destroyed
-  frame.
+- **A request's frame is never destroyed early.** The handler is a child task the
+  connection awaits; the request, the writer and the `BodyStream` are declared before it,
+  so a teardown that destroys the connection's frame destroys the handler's first, and
+  otherwise every frame ends by completing. The session token (`SessionContext::stop`)
+  reaches only the next request's reads and the TLS handshake, never the handler, its body
+  reads or the reply's writes. Shutdown and hang-ups arrive as `Request::cancel`, never as a
+  destroyed frame.
 - **Admitted at headers-complete, released when the response is settled.**
   `reactor->gate().enter()` in the headers hook; empty means `RequestRejected(503, ...,
   retry_after 1)`. The lease is a connection-scope local, reset after the write.
 - **Tracked for the whole run, watched once the handler asks.** `RequestAbort` (a stack
   `reactor::Abortable`) is on the reactor's intrusive list from before the handler to after
-  the write: `abort()` is `Request::cancel(Shutdown)`, `force()` closes the socket after the
+  the write: `abort()` is `Request::cancel(task::cancel_reason::shutdown)`, `force()` closes the socket after the
   grace. `ConnectionInput::watch` keeps one read pending, up to 4096 bytes ahead of the
-  parser: EOF or a read error (not our own cancellation) calls `Request::cancel(Disconnect)`.
+  parser: EOF or a read error (not our own cancellation) calls `Request::cancel(http::disconnected)`.
   That is the per-request rule and it differs from the deferred-reply monitor's (EOF is a
   half-close there). Pipelined input the watch reads ends the watch for the rest of the
   request; `read()` hands those bytes to the parser first, in order, in whatever pieces its
   caller asks for, and nothing more is read ahead until they are all consumed, so at most 4096
-  bytes are held outside the kernel. On plain TCP a buffered request's watch is lazy: the
-  request holds a `CancelWatch` hook, and the handler's first `on_cancel()`, `cancelled()` or
-  `cancel_reason()` engages it, which peeks at the socket (`MSG_PEEK | MSG_DONTWAIT`) to apply
-  the same rules to what happened meanwhile and then arms the read. A handler that never asks
-  costs no read, no wake-up and no syscall for the watch. TLS and the streamed path watch from
-  the start. `WatchGuard` unwatches and clears the hook on every exit.
+  bytes are held outside the kernel. On plain TCP a request's watch is lazy: the request
+  holds a `CancelWatch` hook, and the handler's first `cancel_token()` engages it, which peeks
+  at the socket (`MSG_PEEK | MSG_DONTWAIT`) to apply the same rules to what happened meanwhile
+  and then arms the read. A handler that never asks costs no read, no wake-up and no syscall
+  for the watch. A streamed body's watch starts at the body's end, lazy the same way unless the
+  handler already asked (`RequestAccess::asked`), then armed at once. TLS watches from the
+  start. `WatchGuard` unwatches and clears the hook on every exit.
 - **A buffered reply is sent at once.** On plain TCP the connection socket is non-blocking,
   and the reply's head and body go out in one `write_some` before any asynchronous write: what
   the send buffer takes leaves without a trip through the loop's queue, and only the rest is
   written by `write_with_progress` (its deadlines included).
-- **Cancel reads, never writes.** A handler stops reading at its next checkpoint when
-  `Request::cancelled()`; the transport still writes the response (a half-closed client
-  gets its answer). Nothing in the transport aborts a write for a disconnect.
-- **`reactor->stopping()` is checked at the top of the keep-alive loop.** A session
-  cancellation that arrived while cancellation was disabled is dropped, and an idle
-  connection is not tracked, so without the check `stop()` would wait on it forever.
+- **Cancel reads, never writes.** A handler stops reading at its next checkpoint once
+  `Request::cancel_token()` is requested; the transport still writes the response (a
+  half-closed client gets its answer). Nothing in the transport aborts a write for a
+  disconnect.
+- **The session token is checked at the top of the keep-alive loop.** A shutdown that
+  arrived while a request ran ends the connection before its next read, and the next
+  request's reads take the token, so `stop()` never waits on an idle connection.
+- **Debug builds check affinity.** The writer and `BodyStream::read` assert they run on the
+  connection's scheduler (or in a raw handler on its loop): a handler body that moved to
+  another scheduler must come back first.
 - **Handlers are single-threaded per reactor but run on every reactor.** State shared
   across reactors still needs its own synchronization.
 
@@ -188,16 +198,17 @@ Chosen at headers-complete:
 - **Push-streamed** (`on_request_body` returns a `BodySink`): body chunks go to the
   sink as parsed, on the reactor, nothing accumulated. For light per-chunk work.
   `asio_test [H]` streams a 2.4 MB NDJSON body and asserts `Request::body` stays empty.
-- **Streamed** (`wants_body_stream` returns true): `handle()` is spawned on the
-  connection's loop as soon as the headers are in and reads `Request::body_stream` (a
-  `BodyStream`) with `co_await`. The connection coroutine feeds a bounded
+- **Streamed** (`wants_body_stream` returns true): `handle()` starts as soon as the
+  headers are in and reads `Request::body_stream` (a `BodyStream`) with
+  `co_await body_stream->read(chunk)`. The connection feeds a bounded
   `asio::experimental::channel` (capacity 8 chunks) and suspends in `push()` when it is
   full, so back-pressure reaches the socket. `finish()` ends the stream (`eof`, sticky),
   `fail(ec)` ends it with an error after the buffered chunks, `abandon()` (the handler
-  completed) releases a push that is waiting. The feed runs in `feed() || handler_done`:
-  if the handler answers without reading it all, the feed is cancelled and the
-  connection closes after the response. The join on the handler is uncancellable
-  (`HandlerDone::wait` with cancellation disabled), so the request and writer outlive it.
+  completed) releases a push that is waiting. The feed and the handler are children of
+  the connection task joined by `task::when_all`: when the handler returns it requests the
+  feed's source (linked to the session token), so a handler that answers without reading
+  it all stops the feed and the connection closes after the response; `when_all` returns
+  only when both completed, so the request and writer outlive the handler.
   The body is not capped. `asio_test [K]` (2 MB through a slow consumer, all reads on the
   one loop thread, a fast request served mid-stream, an over-read returns eof, a tiny
   body arriving with the headers) and `[L]` (stop() while a stream is mid-flight).
@@ -249,6 +260,6 @@ ctest --test-dir build              # http (unit) + asio (transport, ~2s)
 ./build/bench_http 8080 4 &  ./build/bench_asio 8081 4 &             # framework vs raw ceiling
 ```
 
-`HttpAsioService` preserves the existing ConnectionFactory and constructor APIs. An additive TimedConnectionFactory receives reactor's acceptance timestamp and an explicit sixth constructor argument sets a global connection cap before destination dispatch. `set_connection_limit()` and `connection_stats()` expose the same gate for existing factories. The timed path requires the matching reactor connection-admission API; upgrade the sibling reactor headers together when adopting it.
+`HttpAsioService(handler, reactors, in_flight_limit, connection = {}, maximum_connections = 0)` takes one `ConnectionFactory`, a `task::task<void>` over the socket, the handler, the reactor, the response options and reactor's `SessionContext` (the accept timestamp and the session's stop token); the default is the plain-TCP connection. `maximum_connections` caps the sockets before destination dispatch; `set_connection_limit()` and `connection_stats()` expose the same gate. A factory honors `SessionContext::stop` in its waits, or a shutdown waits for it until `force()` closes its socket after the grace.
 
-For TLS, `tls_connection_factory_timed()` uses the original accept timestamp so destination queue wait consumes the handshake deadline. Pass it with an explicit service connection bound. The original `tls_connection_factory()` remains source-compatible and keeps its destination-side handshake/idle-connection limits; without a service-level gate it does not bound sockets queued before the factory starts. TLS allocation follows capacity and elapsed-deadline checks. Transport leases survive original serving IO and refund on retirement.
+For TLS, `tls_connection_factory(context, handshake_deadline = 5s, maximum_handshakes = 64, maximum_connections = 1024, failed = {})` uses the accept timestamp so destination queue wait consumes the handshake deadline, and the session token ends a pending handshake at shutdown. Pass it with an explicit service connection bound: without one it does not bound sockets queued before the factory starts. TLS allocation follows capacity and elapsed-deadline checks. Transport leases survive original serving IO and refund on retirement.

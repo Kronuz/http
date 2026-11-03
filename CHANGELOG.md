@@ -4,6 +4,77 @@ Newest first. Dates are 2026.
 
 Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://github.com/Kronuz/cpp-libraries/blob/main/docs/UPGRADING-2026-10.md#http) lists what changes for callers, how to find affected inputs, the commits not to pin, and the speedup.
 
+## 2026-11-03: handlers, bodies and the connection on `task::task`
+
+`task::task` ([Kronuz/task](https://github.com/Kronuz/task)) is the one coroutine type of
+the API and of the connection: handlers, routes and `BodyStream` reads are tasks, the
+connection is a task on its reactor's `task::asio_scheduler`, and a handler is awaited as a
+child task, so one that finishes in its first run costs no post. Cancellation is one token
+per request. Design `docs/design/task-handlers.md` revision 2; ledgers
+`docs/status/task-h1.md` and `docs/status/task-h2.md`. Not timed yet: the throughput and
+CPU rows are the lead's (the design's T6).
+
+### Upgrade note
+
+Every consumer changes in the same wave; no alias or second API remains.
+
+| Before (http:679c0f8) | Now |
+| --- | --- |
+| `asio::awaitable<void> HttpHandler::handle(Request&, ResponseWriter&)` | `task::task<void> handle(Request&, ResponseWriter&)` |
+| `Router::Route = std::function<asio::awaitable<void>(Request&, ResponseWriter&, const Params&)>`, `asio::awaitable<void> Router::handle(...)` | `std::function<task::task<void>(Request&, ResponseWriter&, const Params&)>`, `task::task<void> Router::handle(...)` |
+| `co_await body.async_read(chunk, asio::redirect_error(asio::use_awaitable, ec))` | `ec = co_await body.read(chunk)`; `read(std::string&, task::cancel_token = {})` returns `task::task<asio::error_code>` with the same values, plus `operation_aborted` for its own requested token |
+| `BodyStream(asio::any_io_executor, capacity)`, `asio::awaitable<bool> push(std::string)` | `BodyStream(task::asio_scheduler&, capacity)`, `task::task<bool> push(std::string, task::cancel_token)` |
+| `Request::cancelled()`, `cancel_reason()`, `on_cancel(std::function<void(CancelReason)>)`, `enum class CancelReason { None, Disconnect, Shutdown }` | removed: `task::cancel_token Request::cancel_token()` (`requested()`, `reason()`), a `task::cancel_callback` on it, `http::disconnected` (`task::cancel_reason::user`) and `task::cancel_reason::shutdown` |
+| `Request::cancel(CancelReason)` | `Request::cancel(task::cancel_reason)`, first call wins |
+| `co_await asio::this_coro::executor` in a handler | `request.scheduler().executor()`; `request.scheduler()` is the reactor's `task::asio_scheduler` |
+| `ConnectionFactory` (4 arguments) and `TimedConnectionFactory` (plus `reactor::SessionContext`), both `asio::awaitable<void>` | one `ConnectionFactory = std::function<task::task<void>(asio::ip::tcp::socket, HttpHandler*, reactor::Reactor*, const AsioResponseOptions*, reactor::SessionContext)>`; `SessionContext::stop` is the session's shutdown token, which a factory honors in its waits |
+| `HttpAsioService(handler, reactors, in_flight_limit, ConnectionFactory = {})` and `HttpAsioService(handler, reactors, in_flight_limit, TimedConnectionFactory, maximum_connections)` | `HttpAsioService(handler, reactors, in_flight_limit, ConnectionFactory = {}, maximum_connections = 0)` |
+| `tls_connection_factory(context, deadline, handshakes, connections)` and `tls_connection_factory_timed(..., TlsFailureHook)` | `tls_connection_factory(context, deadline = 5s, handshakes = 64, connections = 1024, TlsFailureHook = {})`, timed from the accept |
+| `stop()`, then destruction | `stop()`, `close()`, `destroy_roots()`, then destruction (task's teardown phases; each runs the earlier ones it needs) |
+
+Find what changes in a consumer with
+`git grep -nE 'asio::awaitable|use_awaitable|co_spawn|this_coro|async_read\(|cancelled\(\)|cancel_reason\(\)|on_cancel\(|CancelReason|TimedConnectionFactory|tls_connection_factory_timed'`.
+A handler that polled `cancelled()` polls `cancel_token().requested()`; one that registered
+`on_cancel(cb)` keeps a `task::cancel_callback cb(request.cancel_token(), ...)` alive for as
+long as it wants to be told (a throwing callback is dropped). A computation in slices writes
+`task::budget slice(200us, request.cancel_token())` and calls `co_await slice.checkpoint()`.
+Asio operations are awaited with `task::await_asio`, with an optional token.
+`task::sync_wait` on a reactor thread deadlocks the loop.
+
+### Changed
+
+- **Pins.** task at task:6558c2e (new; `task::asio` is linked into `http`) and reactor at
+  reactor:2fd30c8, whose `Session` is a task with its stop token and whose `stop()` is
+  bounded by about twice the grace.
+- **The handler is a child task.** No driver, post or shared block; the request, writer and
+  `BodyStream` are locals of the connection declared before the handler.
+- **Timeouts are `task::deadline`s** on the reactor's scheduler, linked to the session token
+  for the next request's reads and the TLS handshake. A timed-out streamed body read returns
+  `timed_out`.
+- **The streamed body joins with `task::when_all`.** The feed and the handler are children of
+  the connection; the handler's completion stops the feed, and shutdown stops it through the
+  linked token. A truncated body still reads `connection_reset`, never `eof`. The disconnect
+  watch after the body waits for the handler to ask for its token, as a buffered request's
+  does, unless it asked during the body.
+- **An escaped `task::cancelled`** while the request's token is requested is answered `503`
+  with `Connection: close` when `on_error` leaves it unanswered; an owned stream whose head is
+  on the wire closes without its terminal chunk.
+- **Affinity.** The writer and `BodyStream::read` assert in Debug builds that they run on the
+  connection's scheduler, or in a raw handler on its loop.
+
+### Added
+
+- `coroutine_test` [T] (the design's T4 (a)-(h): no handler post, demotion, a cross-thread
+  resume, teardown with suspended handlers and zero live frames, the 503, a hang-up within one
+  slice, an owned stream cancelled after its head, affinity including a body read) and [X]
+  (the teardown phases); [S] (the streamed join: a hang-up after the body, a handler that
+  answers without reading it); T4 (d) includes a body read at shutdown; `handler_count_test`
+  (io handlers per request, buffered and streamed); [B] covers `read()` with a token and a
+  deadline.
+- `bench/server_compare` kind `httpb`: a 1 KiB streamed POST (`bench/post_body.lua`).
+- `timeouts_test`'s slow-body case measures its own client: an attempt whose host stalled the
+  client past the inactivity timeout is void and retried, not failed.
+
 ## 2026-11-01: the disconnect watch waits for the handler to ask
 
 `bench_http` under `wrk` (a 14-byte reply through `HttpAsioService`, 2 reactors, keep-alive,

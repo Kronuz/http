@@ -1,18 +1,28 @@
-> Status: CURRENT (2026-10-30) the mechanism as built in Phase 7c L3 (`docs/status/phase7c-l3.md`); workstream phase7c/l3-http.
+> Status: CURRENT (2026-11-03) the mechanism on `task::task` (design `docs/design/task-handlers.md` revision 2, steps H1 and H2; ledgers `docs/status/task-h1.md`, `docs/status/task-h2.md`). Supersedes the Phase 7c L3 note (`asio::awaitable` handlers, http:679c0f8).
 
 # Coroutine handlers
 
 How a request runs, is cancelled, is admitted and stops at shutdown. `http_asio.h`
 (`serve_connection_body`) is the code; `test/coroutine_test.cc` proves each statement.
 
-## Everything runs on the connection's loop
+## Everything runs on the connection's loop, as tasks
 
-`HttpHandler::handle(Request&, ResponseWriter&)` returns `asio::awaitable<void>` and the
-connection coroutine awaits it. A handler that must wait suspends; the loop serves other
-connections; the coroutine resumes on the same `io_context`. There is no worker pool, no
-`should_offload`, and no thread handoff. Anything that finishes on another thread (a
-chore, a device read) resumes the handler by posting to the loop, which is what
-`task::await_asio` and `task::as_awaitable` do.
+`HttpHandler::handle(Request&, ResponseWriter&)` returns `task::task<void>`. Each reactor
+owns one `task::asio_scheduler` over its `io_context` (`reactor(i).scheduler()`); the
+connection is a task on it (a `reactor::Session`), and it awaits the handler as a child
+task. task starts the child by symmetric transfer and the child's final suspend transfers
+back, so a handler that finishes in its first run costs no post and no Asio operation. A
+handler that waits suspends; the loop serves other connections; the handler resumes on the
+same scheduler. There is no worker pool and no thread handoff.
+
+A handler reaches its loop through the request: `request.scheduler()` is the connection's
+scheduler, and its `executor()` builds timers, sockets and `task::deadline`s there. Asio
+operations are awaited with `task::await_asio`, which takes an optional `task::cancel_token`.
+Work that finishes on another thread resumes the handler by posting to its scheduler. A
+handler may move a child to another scheduler with `task::schedule_on`; the child comes home
+at its final suspend. The writer and `BodyStream::read` assert in Debug builds that they run
+on the connection's scheduler, or in a raw Asio handler on its loop (a cancel callback the
+transport runs).
 
 ## A request's life
 
@@ -20,96 +30,107 @@ chore, a device read) resumes the handler by posting to the loop, which is what
 headers complete   gate.enter() -- empty: 503 + Retry-After: 1, close      (admit)
                    create_extension, then BodyStream | BodySink | buffer (cap: 413)
 handler start      RequestAbort on the reactor's list; ConnectionInput::watch set (on plain
-                   TCP it reads once the handler first asks); connection coroutine's
-                   cancellation disabled
-handler runs       co_await handle(request, writer)
-                     client EOF / read error   -> Request::cancel(Disconnect)
-                     abort_all() at shutdown   -> Request::cancel(Shutdown)
-handler returns    unwatch; the response is written (a cancelled request still gets it)
-settled            gate lease released; RequestAbort leaves the list;
-                   cancellation re-enabled; keep-alive loop continues
+                   TCP it reads once the handler first asks for its token)
+handler runs       co_await handler->handle(request, writer)          (a child task)
+                     client EOF / read error   -> request.cancel(http::disconnected)
+                     abort_all() at shutdown   -> request.cancel(task::cancel_reason::shutdown)
+handler returns    unwatch; an escaped exception is mapped; the response is written
+settled            gate lease released; RequestAbort leaves the list; keep-alive continues
 ```
 
-The request and the writer belong to the connection coroutine and live until the handler
-returns. Nothing calls `destroy()` on a suspended handler: the connection coroutine's
-cancellation is disabled from just before the handler starts until the response is
-written, so an Asio cancellation aimed at the session cannot unwind the frame under the
-handler. It is dropped, not queued, so the keep-alive loop checks `reactor->stopping()`
-before reading the next request.
+The request, the writer and the `BodyStream` are locals of the connection task, declared
+before the awaited handler: a frame ends only by completing, and a teardown that destroys the
+connection's frame destroys the handler's first. The session's token (`SessionContext::stop`,
+requested at shutdown) reaches only the reads of the next request and the TLS handshake; the
+handler, its body reads and the reply's writes never see it, so a shutdown reaches a running
+request only through the request's own token.
 
 ## Cancel reads, not writes
 
-`Request::cancel(reason)` runs the callback registered with `Request::on_cancel` (once, on
-the loop) and sets `cancelled()`. A handler stops reading at its next checkpoint, for
-example by requesting a `task::cancel_source` from the callback. Writes take no token:
-once the request is admitted its work completes and the transport attempts its response,
-so a client that half-closes after a `PUT` still receives the answer. A task that is
-queued on a lock, an event or a chore is not woken by the callback; it checks the flag
-when it resumes. A callback that throws is dropped: the transport's frames end only by
-completing, and a throw would unwind them under a running handler.
+A request has one cancellation: `request.cancel_token()`. The first call creates the
+request's `task::cancel_source` (pooled) and engages the disconnect watch; `request.cancel(reason)`
+requests it, first call wins, on the loop. The reason is `http::disconnected` (task's `user`)
+for a hang-up and `task::cancel_reason::shutdown` for `stop()`. A handler polls
+`token.requested()`, registers a `task::cancel_callback` to be woken, passes the token to
+`task::await_asio` or a `task::deadline`, or bounds a computation with
+`task::budget slice(200us, request.cancel_token())`, whose checkpoints throw `task::cancelled`
+once it is requested and otherwise requeue the handler on the reactor's demoted queue when its
+slice is spent. Writes take no token: once the request is admitted the transport attempts its
+response, so a client that half-closes after a `PUT` still receives the answer. A callback that
+throws is dropped by task; the next callback still runs.
 
 Two rules read the socket watch, and they differ on purpose:
 
 1. **A request in flight (`ConnectionInput::watch`).** EOF and any read error other than
-   our own cancellation call `cancel(Disconnect)`. A client that closed has nobody to
-   read what a search computes. This is wider than the deferred-reply monitor's rule
-   below, and it matches Go's `net/http`.
+   our own cancellation call `cancel(http::disconnected)`. A client that closed has nobody
+   to read what a search computes. This matches Go's `net/http`.
 2. **A deferred or owned-stream reply (`ConnectionInput::monitor`).** Only a read error
    other than EOF is a disconnect: the client may half-close after sending and still
-   expect the reply. This rule is unchanged.
+   expect the reply.
 
 The watch reads ahead: one pending read of up to 4096 bytes into the connection's input
 buffer (`ConnectionInput::kReadAhead`). If the client pipelines the next request while a
 handler runs, the read takes it, or its first 4096 bytes, and that data ends the watch for
 the rest of that request: a disconnect after it is not seen until the connection reads
-again. The bytes go back to the parser. `read()` returns them first and in order, in
-whatever pieces the caller asks for, and nothing more is read ahead until they are all
-consumed, so a connection holds at most 4096 bytes of input outside the kernel however much
-the client sends. The pending read is also the read for the next request: it serves the first
-read after the reply. A request whose bytes arrived in the same read as the previous one has
-nothing pending and is watched normally. A watch armed after EOF was already seen cancels the
-request at once.
+again. `read()` returns the bytes first and in order, and nothing more is read ahead until
+they are all consumed, so a connection holds at most 4096 bytes of input outside the kernel.
+The pending read is also the read for the next request. A watch armed after EOF was already
+seen cancels the request at once.
 
 On plain TCP a buffered request's watch waits for the handler to ask. The request holds a
-`CancelWatch` hook, and the handler's first `on_cancel()`, `cancelled()` or `cancel_reason()`
-engages it: a peek at the socket (`recv` with `MSG_PEEK | MSG_DONTWAIT`) applies the rules
-above to what the client did meanwhile (data waiting ends the watch and stays in the kernel;
-EOF or a socket error cancels the request before the call returns, so `cancelled()` is
-already true and an `on_cancel` callback has already run), and with nothing waiting the read
-is armed. A handler that never asks cannot observe a hang-up, so its request pays for no
-read: the next request's read is the socket's own, after the reply. A TLS stream cannot be
-peeked through its records, and the streamed path watches only after the body, so both arm
-the read when the watch is set.
+`CancelWatch` hook that the first `cancel_token()` engages: a peek at the socket (`recv` with
+`MSG_PEEK | MSG_DONTWAIT`) applies the rules above to what the client did meanwhile (data
+waiting ends the watch and stays in the kernel; EOF or a socket error cancels the request
+before the call returns, so the token is already requested), and with nothing waiting the read
+is armed. A handler that never asks pays for no read. A streamed body's watch starts when the
+body is complete, the same way: lazy, or armed at once when the handler already asked during the
+body. A TLS stream cannot be peeked through its records, so its watch arms the read when set.
+
+## Exceptions
+
+An exception that escapes `handle()` is mapped at the connection: a deferred reply is
+abandoned; an owned stream whose head is on the wire closes the connection without its
+terminal chunk, so the client reads a truncated body; otherwise the application's `on_error`
+answers, and what it leaves unanswered is a `500`, or a `503` with `Connection: close` when
+the exception is `task::cancelled` and the request's token was requested. `task::cancelled`
+from the handler's own source is any exception.
 
 ## Streamed bodies
 
 A route that returns true from `wants_body_stream` gets `Request::body_stream`, a
-`BodyStream`: a bounded `asio::experimental::channel` (8 chunks) that the connection
-coroutine feeds while the handler, spawned on the same loop, reads it:
+`BodyStream`: a bounded channel (8 chunks) that the connection feeds while the handler reads
+it. The feed and the handler are children of the connection task, joined with
+`task::when_all`: no spawn, no post.
 
 ```cpp
-asio::error_code ec; std::string chunk;
-co_await request.body_stream->async_read(chunk, asio::redirect_error(asio::use_awaitable, ec));
-// a task: co_await task::await_asio<void(asio::error_code)>([&](auto h) { stream.async_read(chunk, std::move(h)); });
+std::string chunk;
+asio::error_code ec;
+while (!(ec = co_await request.body_stream->read(chunk))) { use(chunk); }
+// ec == asio::error::eof: the whole body arrived
 ```
 
-`ec` is clear with a non-empty chunk, `asio::error::eof` at the end (sticky), or the error
-the body failed with (`connection_reset` when the client ended before the body was
-complete -- a close, a half-close, a reset, or a chunked body cut short -- with
-`cancelled()` already true when the read returns; `operation_aborted` at shutdown, the
-read deadline's error). `eof` means only a complete body. Buffered chunks are
-delivered before the end or the error. A full channel suspends the feed, so back-pressure
-reaches the socket. If the handler answers without reading it all, the feed is cancelled
-and the connection closes after the response. The stream is not thread-safe; use it on
-the loop.
+`read(chunk, token = {})` returns no error with a non-empty chunk, `asio::error::eof` at the
+end (sticky), `operation_aborted` when its own token was requested (nothing is lost; the
+next read goes on), or the error the body failed with: `connection_reset` when the client
+ended before the body was complete (a close, a half-close, a reset, or a chunked body cut
+short), `timed_out` at the inactivity or request timeout, `operation_aborted` at shutdown.
+The request's token is already requested when a failed read returns. `eof` means only a
+complete body. Buffered chunks are delivered before the end or the error. A full channel
+suspends the feed, so back-pressure reaches the socket. When the handler returns, it
+requests the feed's source (linked to the session's token, so shutdown also stops the feed):
+a handler that answers without reading the whole body stops the feed's read and push, and
+the connection closes after the response. Once the body is complete and the handler still
+runs, the disconnect watch is set (lazily, as for a buffered body). The stream is not
+thread-safe.
 
 ## Admission and the body cap
 
 The reactor's `AdmissionGate` counts requests from headers-complete to the settled
 response (`HttpAsioService`'s `in_flight_limit`, 0 for no cap). Over the cap, the
 connection answers `503` with `Retry-After: 1` and closes without reading the body. A
-second cap of the application's own (Xapiand's demoted-handle count) is a throw of
-`RequestRejected(503, ..., retry_after)` from `create_extension`, with its own count.
+second cap of the application's own is a throw of `RequestRejected(503, ..., retry_after)`
+from `create_extension`. The lease is a local of the connection task: completion or the
+frame's destruction releases it once.
 
 A body buffered into `Request::body` is capped (`set_max_body`, 16 MiB by default): a
 `Content-Length` over the cap is a `413` at headers-complete, before any body byte is
@@ -118,22 +139,22 @@ bodies are not buffered and not capped.
 
 ## Shutdown
 
-`HttpAsioService::stop()` (reactor `TcpServer::stop()`):
+Teardown is task's four phases, each a call on `HttpAsioService` forwarded to reactor's
+`TcpServer`; each runs the earlier ones first:
 
-1. `abort_all()` on each reactor, run on that reactor's loop: every tracked
-   `Abortable` is asked to stop. A running request is `cancel(Shutdown)`; a deferred or
-   owned-stream reply closes with `Shutdown`; an idle session's cancellation is emitted.
-2. The acceptors are closed and reaped.
-3. Sessions finish: reads end at their checkpoint, writes complete, an idle keep-alive
-   connection ends at once, a streamed body read in progress fails with
-   `operation_aborted`.
-4. After the grace (`set_shutdown_grace`, 5 s by default) `force_all()` runs on what is
-   still tracked: each remaining request closes its socket, so a write to a peer that
-   stopped reading fails.
-5. Wait for every session; stop the loops; join.
+1. `stop()`: `abort_all()` on each reactor's loop requests every session's token and
+   cancels every running request (`task::cancel_reason::shutdown`); a deferred or
+   owned-stream reply closes with `Shutdown`. The acceptors close. An idle keep-alive
+   connection ends at once, a streamed body read fails with `operation_aborted`, handlers
+   stop at their next checkpoint and their responses are written. After the grace
+   (`set_shutdown_grace`, 5 s by default) `force_all()` closes the sockets still held and
+   sessions get the grace once more; then the loops stop and join. `stop()` is bounded by
+   about twice the grace.
+2. `close()`: the reactors' schedulers drop what is posted and destroy what is spawned.
+3. `destroy_roots()`: the tasks still suspended (a handler that ignored its token) are
+   destroyed with every `io_context` alive. Their responses go nowhere.
+4. Destruction runs any phase not yet run.
 
-The bound on shutdown is the grace plus the time to unwind the sessions. A handler that
-never returns, ignoring `Request::cancelled()`, holds `stop()` for as long as it runs:
-the request's frame is never destroyed early, so the runtime waits for it.
-`Reactor::track` is an intrusive list touched on the loop only: O(1) per request, no
-allocation, no lock.
+An application with its own schedulers runs each phase across http's reactors and its own
+before the next. `Reactor::track` is an intrusive list touched on the loop only: O(1) per
+request, no allocation, no lock.

@@ -7,9 +7,9 @@ Part of [Kronuz C++ Libraries](https://github.com/Kronuz/cpp-libraries), a colle
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-blue.svg)
 ![Header-only](https://img.shields.io/badge/header--only-yes-green.svg)
 
-Header-only HTTP/1.1 framework for C++20 on Asio coroutines: write one handler, get parsing, routing and streaming.
-The application implements one coroutine, `handle(Request&, ResponseWriter&)`, and never sees
-the parser, the socket or the event loop; each reactor's connection coroutine parses bytes into
+Header-only HTTP/1.1 framework for C++20 on [task](https://github.com/Kronuz/task) coroutines over Asio: write one handler, get parsing, routing and streaming.
+The application implements one coroutine, `task::task<void> handle(Request&, ResponseWriter&)`, and never sees
+the parser, the socket or the event loop; each connection is a task on its reactor's loop that parses bytes into
 a `Request` and frames what the handler writes. Reach for it when a C++ service needs an
 HTTP/1.1 front: a REST API, a search or storage server, an admin endpoint.
 
@@ -20,8 +20,9 @@ HTTP/1.1 front: a REST API, a search or storage server, an admin endpoint.
 - **Shared-nothing reactors.** One Asio `io_context` per thread, nothing off the loop: a
   handler that waits `co_await`s and the loop serves other connections. Past the
   per-reactor in-flight limit, a request gets `503` with `Retry-After`.
-- **Cancellation.** A client hang-up or a shutdown cancels the running request
-  (`Request::on_cancel`); reads stop at their next checkpoint, writes finish.
+- **Cancellation.** A client hang-up or a shutdown requests the running request's
+  `task::cancel_token` (`Request::cancel_token()`); reads stop at their next checkpoint,
+  writes finish.
 - **Bounded memory for any body.** Read a request body chunk by chunk from a `BodyStream`
   or push it to a `BodySink`; a buffered body has a cap (`413`). Responses stream with
   backpressure.
@@ -45,12 +46,12 @@ HTTP/1.1 front: a REST API, a search or storage server, an admin endpoint.
 struct App : http::HttpHandler {
 	http::Router router;
 	App() {
-		router.route("GET", "/hello/:name", [](http::Request&, http::ResponseWriter& resp, const http::Params& p) -> asio::awaitable<void> {
+		router.route("GET", "/hello/:name", [](http::Request&, http::ResponseWriter& resp, const http::Params& p) -> task::task<void> {
 			resp.send(200, "hello, " + std::string(p.get("name")) + "\n");
 			co_return;
 		});
 	}
-	asio::awaitable<void> handle(http::Request& req, http::ResponseWriter& resp) override {
+	task::task<void> handle(http::Request& req, http::ResponseWriter& resp) override {
 		co_await router.handle(req, resp);
 	}
 };
@@ -80,7 +81,8 @@ curl localhost:8080/kv/greeting
 Requires a C++20 compiler and CMake 3.16 or newer; it fetches standalone Asio 1.36.0,
 [http-parser](https://github.com/Kronuz/http-parser),
 [radix-router](https://github.com/Kronuz/radix-router),
-[compressors](https://github.com/Kronuz/compressors) and
+[compressors](https://github.com/Kronuz/compressors),
+[task](https://github.com/Kronuz/task) and
 [reactor](https://github.com/Kronuz/reactor) at pinned commits. compressors needs zlib and
 uses the system's LZ4 and zstd when it finds them, fetching them otherwise; TLS needs
 OpenSSL 3. CI builds it on Linux (x86_64, arm64), macOS (arm64, x86_64), and FreeBSD,
@@ -135,7 +137,8 @@ sends the request to every server and aborts the run unless each answers the sam
 headers included.
 
 Medians of three rounds on an Apple M4 Pro (macOS) and an Intel Core i9-9980HK (macOS 15,
-x86-64), Apple clang 17, `-O3 -DNDEBUG`:
+x86-64), Apple clang 17, `-O3 -DNDEBUG`, measured on 2026-11-01 with `asio::awaitable`
+handlers, before the move to `task::task`; this build has not been timed against them yet:
 
 | server | M4 Pro, 1 connection: latency / CPU | M4 Pro, 64 connections: req/s / CPU | i9, 1 connection: latency / CPU | i9, 64 connections: req/s / CPU |
 | --- | ---: | ---: | ---: | ---: |
