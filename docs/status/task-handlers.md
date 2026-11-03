@@ -6,7 +6,7 @@
 - Branch / worktree: design `design/task-handlers` at `~/code/Kronuz/http-wt/task-handlers`, from http
   `origin/main` 679c0f8. Build steps S1 and S2: `phase/task-handlers-s1` at
   `~/code/Kronuz/http-wt/task-handlers-s1`, from `design/task-handlers`.
-- State: S1 and S2 built, in review (S3 onward waits for design revision 2)
+- State: S1 and S2 built, in review (S3 onward waits for design revision 2); T6/T7 measured on `perf/t6-t7` (K6, K7 met; K9 awaits the owner)
 - Done criteria (set by the lead; contributors tick, never edit):
   - [ ] K1 `HttpHandler::handle`, `Router::Route`/`Router::handle` and `BodyStream::read` are
     `task::task`; no `asio::awaitable`, alias or shim in the handler API (design T1)
@@ -14,10 +14,12 @@
   - [ ] K3 the L3 probes rerun on the new API with the review's results, ASan and TSan (T3)
   - [ ] K4 the new tests T4 (a)-(f) pass, each failing with its fix reverted
   - [ ] K5 ASan+UBSan and TSan separate builds clean; g++ Debug ASan suite clean (T5)
-  - [ ] K6 req/s and p99 at 8 and 64 connections within the A/A band of head (T6, the lead)
-  - [ ] K7 coroutine frame allocations per request no worse than head, pinned as a ctest (T7)
+  - [x] K6 req/s and p99 at 8 and 64 connections within the A/A band of head (T6, the lead): measured on Linux metal, B1
+    inside the band or better on every cell, both compilers (`docs/perf/t6-t7-2026-11-03.md`)
+  - [x] K7 coroutine frame allocations per request no worse than head, pinned as a ctest (T7): measured 2.00 against 2.00
+    (`http`, `httpr`, `httpt`) and 9.00 against 10.00 (`httpb`), clang 18 and g++ 13, 1, 8 and 64 connections (same note)
   - [ ] K8 http-log and prism migrated and pinned; Detent and Xapiand build against it (T8)
-  - [ ] K9 D8 ruled from K6 and K7; docs and CHANGELOG upgrade note updated
+  - [ ] K9 D8 ruled from K6 and K7; docs and CHANGELOG upgrade note updated (recommendation drafted below; the owner rules)
 - Done: design draft and this ledger (see Log); S1 and S2 (below).
 - Doing: nothing; stopped at S1 and S2 in review. S3 onward waits for design revision 2.
 - Next:
@@ -83,3 +85,25 @@ decision from the task owner; S1 cannot make it. A's counts include the handler 
 - 2026-11-02: S2 (task pin) and S1 (counting build, `httpr`, `bench/ab.sh`) built on `phase/task-handlers-s1`
   from `design/task-handlers`; Release and ASan+UBSan suites 12/12; smoke of the A/A script under a 10 minute
   strict hold.
+
+## K6, K7 and K9: the T6/T7 measurement (`perf/t6-t7`, 2026-11-03)
+
+Evidence: `docs/perf/t6-t7-2026-11-03.md` (tables, binaries' hashes, host, commands) and its folder (reports, raw runs).
+Host `c7i.metal-24xl` (Xeon 8488C), server on CPUs 0-3 and `wrk` on CPUs 8-11, 7 rounds with the series order rotated,
+clang 18 and g++ 13. A is S1 (`http:03467b1`) plus an `httpb` kind in its API (`http:perf/t6-a`), AA its byte copy, B1 is
+`http:73cfa02` with task at `task:fb7d9bf` (`-DFETCHCONTENT_SOURCE_DIR_TASK`), B0 the same with `task:d3d94f3`.
+
+B1 against A, median of 7 paired ratios (same on both compilers within 2 points): `http` req/s -0.4..+1.6%, p99 -4.3..+1.3%,
+CPU/req -1.7..-0.2%, all inside the A/A band; `httpr` req/s +1.7..+3.5%, p99 -7.1..0%, CPU/req -3.4..-1.7%, none worse;
+`httpt` req/s +19..+28%, CPU/req -16..-22%; `httpb` req/s +38..+43%, CPU/req -28..-30%. B0 against A: `http` p99
++4.5..+13% (worse) and CPU/req +0.6..+1.8%, the rest as B1 but 2 to 10 points less. T7: allocations 2.00/2.00/2.00 and
+9.00 against 10.00 (`httpb`); handlers B1 = A (1, 2, 2) and 7 against 8 (`httpb`); B0 one more than A on every kind.
+
+Recommendation for K9 / D8 (the owner rules): keep the bridged loop (`asio::awaitable` connection loop); T6 and T7 pass,
+so the task loop is not needed and Q3 does not arise. Before closing K9, move http's task pin (`task:6558c2e`) to a
+commit at or after `task:d080786`; the numbers describe that code, and the g++ trampoline loop depends on it. Not
+measured: macOS arm64, resident memory, the pinned task itself.
+
+Harness fixes that came out of the dry run: `bench/run.sh` over-reported CPU per request by the process's start-up and
+warm-up CPU (25 to 30%, awk subscript), so every earlier `server CPU` figure from it carries that extra; `bench/ab.sh`
+dropped the first and last series with two `EXTRA` entries. Both fixed on `perf/t6-t7`.

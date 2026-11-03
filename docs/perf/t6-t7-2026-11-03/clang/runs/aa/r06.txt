@@ -1,0 +1,8 @@
+http   aa                       R=2 C=8   keepalive req/s 394020.93  avg  17.63us  p50  18.00us  p99  23.00us  reqs 1615223  server CPU 4.99 us/req (user 0.90 sys 4.09)  proc CPU 5.00 us/req 
+httpr  aa                       R=2 C=8   keepalive req/s 371765.19  avg  19.88us  p50  20.00us  p99  28.00us  reqs 1524170  server CPU 5.38 us/req (user 1.16 sys 4.21)  proc CPU 5.37 us/req 
+httpt  aa                       R=2 C=8   keepalive req/s 314641.27  avg  23.94us  p50  24.00us  p99  29.00us  reqs 1289831  server CPU 6.36 us/req (user 2.15 sys 4.20)  proc CPU 6.36 us/req 
+httpb  aa                       R=2 C=8   keepalive req/s 214722.66  avg  34.65us  p50  35.00us  p99  44.00us  reqs  880312  server CPU 9.31 us/req (user 3.80 sys 5.51)  proc CPU 9.30 us/req 
+http   aa                       R=2 C=64  keepalive req/s 425869.85  avg 140.80us  p50 142.00us  p99 153.00us  reqs 1746083  server CPU 4.64 us/req (user 0.82 sys 3.82)  proc CPU 4.64 us/req 
+httpr  aa                       R=2 C=64  keepalive req/s 391154.70  avg 157.67us  p50 158.00us  p99 171.00us  reqs 1603719  server CPU 5.06 us/req (user 1.23 sys 3.83)  proc CPU 5.06 us/req 
+httpt  aa                       R=2 C=64  keepalive req/s 316474.16  avg 196.65us  p50 198.00us  p99 212.00us  reqs 1297564  server CPU 6.27 us/req (user 2.22 sys 4.06)  proc CPU 6.28 us/req 
+httpb  aa                       R=2 C=64  keepalive req/s 218167.85  avg 289.54us  p50 291.00us  p99 300.00us  reqs  875371  server CPU 9.16 us/req (user 4.47 sys 4.69)  proc CPU 9.15 us/req 

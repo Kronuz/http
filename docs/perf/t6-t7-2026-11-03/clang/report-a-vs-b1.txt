@@ -1,0 +1,61 @@
+# clang: a against b1 (2026-11-03 22:22:58); ratio above 1 means b1 is better; control: aa
+## req/s (higher is better)
+row            A       B    B/A      range    A/A  n  verdict
+http 8    396712  397810  0.996  0.99-1.03  1.006  7    noise
+httpr 8   374896  381533  1.020  0.99-1.03  0.993  7    noise
+httpt 8   316689  380958  1.198  1.15-1.24  0.985  7   faster
+httpb 8   216171  305729  1.419  1.39-1.44  0.992  7   faster
+http 64   425275  422806  1.004  0.95-1.02  0.998  7    noise
+httpr 64  393387  407373  1.033  0.95-1.07  0.996  7   faster
+httpt 64  311887  400090  1.281  1.14-1.45  1.022  7   faster
+httpb 64  214075  305906  1.429  1.41-1.49  1.012  7   faster
+
+runs: A 7, B 7, A/A 7; a ratio above 1 means B is faster
+geomean 1.160 over 8 rows (min 0.996 http 8; max 1.429 httpb 64)
+per-run geomean: min 1.134, median 1.162, max 1.182 over 7 runs
+A/A geomean 1.000
+## p99 latency
+row             A        B    A/B      range    A/A  n  verdict
+http 8    22000.0  22000.0  1.000  0.96-1.05  1.000  7    noise
+httpr 8   28000.0  26000.0  1.077  1.00-1.17  1.000  7   faster
+httpt 8   28000.0  26000.0  1.077  1.00-1.12  1.000  7   faster
+httpb 8   43000.0  30000.0  1.433  1.39-1.47  0.977  7   faster
+http 64    150000   152000  0.987  0.89-1.01  0.993  7    noise
+httpr 64   170000   168000  1.012  0.93-1.06  0.994  7    noise
+httpt 64   215000   165000  1.299  1.14-1.52  1.014  7   faster
+httpb 64   308000   217000  1.426  1.38-1.54  1.020  7   faster
+
+runs: A 7, B 7, A/A 7; a ratio above 1 means B is faster
+geomean 1.151 over 8 rows (min 0.987 http 64; max 1.433 httpb 8)
+per-run geomean: min 1.116, median 1.142, max 1.179 over 7 runs
+A/A geomean 1.000
+## server CPU per request (us, getrusage)
+row          A     B    A/B      range    A/A  n  verdict
+http 8    5.02  5.01  1.006  0.99-1.03  1.010  7    noise
+httpr 8   5.33  5.22  1.019  0.99-1.04  0.994  7    noise
+httpt 8   6.27  5.22  1.197  1.16-1.24  0.984  7   faster
+httpb 8   9.25  6.51  1.418  1.38-1.43  0.993  7   faster
+http 64   4.65  4.68  1.004  0.95-1.01  0.998  7    noise
+httpr 64  5.03  4.90  1.027  0.95-1.08  0.996  7   faster
+httpt 64  6.36  4.95  1.285  1.14-1.45  1.014  7   faster
+httpb 64  9.31  6.48  1.437  1.41-1.49  1.014  7   faster
+
+runs: A 7, B 7, A/A 7; a ratio above 1 means B is faster
+geomean 1.161 over 8 rows (min 1.004 http 64; max 1.437 httpb 64)
+per-run geomean: min 1.136, median 1.161, max 1.187 over 7 runs
+A/A geomean 1.000
+## server CPU per request (us, /proc)
+row          A     B    A/B      range    A/A  n  verdict
+http 8    5.02  5.00  1.008  0.99-1.03  1.010  7    noise
+httpr 8   5.33  5.22  1.019  0.99-1.04  0.994  7    noise
+httpt 8   6.28  5.22  1.197  1.16-1.24  0.986  7   faster
+httpb 8   9.24  6.50  1.419  1.39-1.44  0.993  7   faster
+http 64   4.65  4.68  1.004  0.95-1.01  0.998  7    noise
+httpr 64  5.03  4.90  1.027  0.95-1.08  0.996  7   faster
+httpt 64  6.36  4.95  1.284  1.14-1.46  1.018  7   faster
+httpb 64  9.31  6.48  1.437  1.41-1.49  1.014  7   faster
+
+runs: A 7, B 7, A/A 7; a ratio above 1 means B is faster
+geomean 1.162 over 8 rows (min 1.004 http 64; max 1.437 httpb 64)
+per-run geomean: min 1.137, median 1.161, max 1.188 over 7 runs
+A/A geomean 1.001

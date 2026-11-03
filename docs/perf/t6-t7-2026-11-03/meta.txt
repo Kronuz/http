@@ -1,0 +1,27 @@
+date 2026-11-03 22:17:14 UTC
+host Linux ip-172-31-33-152 7.0.0-1014-aws #14~24.04.1-Ubuntu SMP PREEMPT Fri Sep 18 21:24:59 UTC 2026 x86_64 x86_64 x86_64 GNU/Linux
+instance 
+CPU(s):                                  96
+Model name:                              Intel(R) Xeon(R) Platinum 8488C
+Thread(s) per core:                      2
+Socket(s):                               1
+CPU(s) scaling MHz:                      38%
+L3 cache:                                105 MiB (1 instance)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-95
+governor performance
+SERVER_CPUS=0-3 WRK_CPUS=8-11 KINDS=http httpr httpt httpb CONNS=8 64 ROUNDS=7 SECS=4 REACTORS=2
+bench revision  ()
+wrk debian/4.1.0-4build2 [epoll] Copyright (C) 2012 Will Glozer
+sha256 d680b03710fc5bbe clang/a
+sha256 cf4f9a7993c32f53 clang/a-count
+sha256 87c8a29a9fb9f1ae clang/b0
+sha256 38b06f9f077d26a0 clang/b0-count
+sha256 93c8a8674df75331 clang/b1
+sha256 c4fc3d0d47605818 clang/b1-count
+sha256 3290b193c4cceecc gcc/a
+sha256 c6676534546341bd gcc/a-count
+sha256 9b614a8bb2269bd8 gcc/b0
+sha256 8698d5d2a9d86c75 gcc/b0-count
+sha256 94967a766ad76e2e gcc/b1
+sha256 db2e039b73dbd55b gcc/b1-count

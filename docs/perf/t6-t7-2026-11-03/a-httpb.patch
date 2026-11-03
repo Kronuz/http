@@ -1,0 +1,51 @@
+From d3b6da516b0c7237cb7640a28bae8af9f5039d16 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Germ=C3=A1n=20M=C3=A9ndez=20Bravo?= <german.mb@gmail.com>
+Date: Tue, 3 Nov 2026 12:42:59 -0800
+Subject: [PATCH] Add a streamed POST kind to the S1 bench server
+
+The httpb kind in S1's API (async_read until eof), the A side of the
+T6 httpb row; same bytes as the task-API kind on main.
+---
+ bench/server_compare.cc | 19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/bench/server_compare.cc b/bench/server_compare.cc
+index 442c69e..c4efdda 100644
+--- a/bench/server_compare.cc
++++ b/bench/server_compare.cc
+@@ -86,6 +86,21 @@ public:
+ 	}
+ };
+ 
++// The same reply after reading a streamed request body to its end (the httpb kind, a POST), in S1's API.
++class StreamedApp : public http::HttpHandler {
++public:
++	bool wants_body_stream(const http::Request&) override { return true; }
++	asio::awaitable<void> handle(http::Request& request, http::ResponseWriter& response) override {
++		std::string chunk;
++		asio::error_code ec;
++		while (!ec) co_await request.body_stream->async_read(chunk, asio::redirect_error(use_awaitable, ec));
++		response.status(200);
++		response.set_header("Content-Type", "text/plain");
++		response.write("Hello, World!\n");
++		response.end();
++	}
++};
++
+ // The same reply through a Router route that suspends once on the reactor before it writes.
+ static http::Router make_yield_router() {
+ 	http::Router router;
+@@ -136,7 +151,9 @@ int main(int argc, char** argv) {
+ 	} else {
+ 		HelloApp hello;
+ 		http::Router yielding = make_yield_router();
+-		http::HttpHandler& app = kind == "httpr" ? static_cast<http::HttpHandler&>(yielding) : hello;
++		StreamedApp streamed;
++		http::HttpHandler& app = kind == "httpr" ? static_cast<http::HttpHandler&>(yielding)
++			: kind == "httpb" ? static_cast<http::HttpHandler&>(streamed) : hello;
+ 		http::HttpAsioService service(app, reactors, /*in_flight_limit=*/0);
+ 		if (kind == "httpt") {
+ 			service.set_request_timeout(std::chrono::seconds(30));
+-- 
+2.56.0
+

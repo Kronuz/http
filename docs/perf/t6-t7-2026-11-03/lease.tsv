@@ -1,0 +1,2 @@
+ended	instance	phase	exit	command
+2026-11-03T22:23:26Z	i-05ccc6083ac1b7cbf	bench	0	cp -r ~/t6-metal/. $OUT/ && cp ~/t6-metal.log $OUT/ && rm -rf $OUT/*/tmp && du -sh $OUT && tail -3 ~/t6-metal.log | cut -c1-120 
