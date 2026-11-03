@@ -42,8 +42,8 @@ struct App : http::HttpHandler {
 			co_return;
 		});
 		// Waits on a timer: the coroutine suspends and the loop serves other connections.
-		router.route("GET", "/slow", [this](http::Request&, http::ResponseWriter& w, const http::Params&) -> task::task<void> {
-			co_await sleep_for(this_loop(*service), std::chrono::milliseconds(SLOW_MS));
+		router.route("GET", "/slow", [](http::Request& req, http::ResponseWriter& w, const http::Params&) -> task::task<void> {
+			co_await sleep_for(req.scheduler().executor(), std::chrono::milliseconds(SLOW_MS));
 			w.send(200, "slow\n");
 		});
 		router.route("GET", "/big", [this](http::Request&, http::ResponseWriter& w, const http::Params&) -> task::task<void> {
@@ -114,7 +114,7 @@ struct ConcurrentStreamApp : http::HttpHandler {
 			std::size_t total = 0;
 			std::uint64_t sum = 0;
 			std::string chunk;
-			auto ex = this_loop(*service);
+			auto ex = req.scheduler().executor();
 			for (;;) {
 				asio::error_code ec = co_await read_chunk(*req.body_stream, chunk);
 				{ std::lock_guard<std::mutex> lk(mutex); threads.insert(std::this_thread::get_id()); }

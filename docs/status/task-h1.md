@@ -5,7 +5,7 @@
 - Design: `docs/design/task-handlers.md` revision 2 (branch `design/task-handlers`, http:694fb47), D1-D5, D7-D11, the gate rows, step 4; reviews `docs/reviews/task-handlers-rev2-design.md` (APPROVE WITH CONDITIONS: H1 may start against task C2 and R's interfaces), `docs/reviews/task-handlers-design.md`; the ledger `docs/status/task-handlers.md` (K1-K10; the lead's ruling on the four teardown phases).
 - Branch / worktree: `phase/task-h1` at `~/code/Kronuz/http-wt/task-h1`, from `origin/phase/task-handlers-s1` (http:03467b1, S1's counting and S2's pin).
 - Pins: task main task:6558c2e (C3, the B1 pin; `CMakeLists.txt:60`, the one `FetchContent_Declare(task ...)` line, declared before reactor so reactor builds against it too), reactor `phase/task-sessions` reactor:4f5a0b5 (step R; its fix round, with bounded `stop()` and the phase chaining, moves the pin when it lands).
-- State: in review (functional work done; the reactor pin moves when R's fix round lands)
+- State: fix round for the code review (CR2, CR3, CR4 done; CR1 waits on reactor's fix round)
 
 ## Done criteria (from the design's H1 row and K1-K10 as they apply; tick only with evidence)
 
@@ -18,7 +18,7 @@
 - [x] D9 affinity assert in Debug (`http_asio.h:279`); mutant D9-affine killed (T4 (h) death test)
 - [x] D10 pins: task C3 and reactor R, `task::asio` linked (`CMakeLists.txt:60,82`)
 - [x] Teardown ruling: `HttpAsioService::stop()`, `close()`, `destroy_roots()` (`http_asio.h:1123-1125`), each running the earlier ones; mutants X-close and X-destroy killed (coroutine_test [X], task's `destroy_roots` assert)
-- [ ] K1 (http's share) no `asio::awaitable`, `use_awaitable`, `awaitable_operators` or `co_spawn` in http's headers, tests and examples: all gone except `examples/bench_asio.cc`, the raw-Asio comparator, which sits in `examples/`, outside T1's `:!bench` exception (question for the lead: move it to `bench/` or except it)
+- [x] K1 (http's share) no `asio::awaitable`, `use_awaitable`, `awaitable_operators` or `co_spawn` in http's headers, tests and examples: `git grep -nE 'asio::awaitable|use_awaitable|awaitable_operators|co_spawn' -- '*.h' '*.cc' ':!bench'` is empty (the raw-Asio comparator moved to `bench/bench_asio.cc`)
 - [x] K2 every ctest at the base passes, none removed: 12 base tests plus `handler_count`, 13/13 (Debug, macOS, task C3)
 - [x] K4 T4 (a)-(h) without the streamed cases, each failing with its decision mutated (above; (a) and (f) are `handler_count_test`, (b)-(h) and [X] are `coroutine_test`)
 - [x] K5 ASan+UBSan and TSan separate builds clean: macOS Homebrew LLVM 23 (`-stdlib++-isystem`, zlib headers copied out of the SDK) 13/13 each, 0 reports; Linux (lease) g++ 13 Debug ASan+UBSan and clang 18 TSan 13/13 each, 0 reports; CI linux-asan-ubsan and linux-tsan green
@@ -59,15 +59,24 @@ three (a header field, the response header vector, the recv op) and B's same thr
 frame, which A's build never counted. `handler_count_test` pins handlers per request against a raw
 reactor task session: at C3, 1.000 for the raw session, /flat and /deep, 3.000 when the handler asks (2.000 and 4.000 at C2, where every completion was posted).
 
-## Consumer break list (grep at each repository's local HEAD, 2026-11-02)
+## Consumer break list (grep at each repository's origin head, fetched 2026-11-02; code review CR4)
 
-Each consumer breaks when it moves its http pin to this branch; none moves in H1.
+Each consumer breaks when it moves its http pin to this branch; none moves in H1. Grepped for `asio::awaitable|use_awaitable|co_spawn|tls_connection_factory_timed|CancelReason|on_cancel(|cancelled()|async_read(`.
 
-- http-log (http-log:d2315b8, pins http:fce24c6): `http_log.h:371` `AccessLog::handle` returns `asio::awaitable<void>` (becomes `task::task<void>`); `examples/demo.cc:14`, `test/completion_test.cc:21`, `test/test.cc:44,55,244` handlers; `examples/demo.cc:8`, `test/completion_test.cc:14`, `test/test.cc:38` drive handlers with `asio::co_spawn`; `test/completion_test.cc:95` constructs `HttpAsioService(handler, 1, 16)` (still valid).
-- prism (prism:bdaf3e6, pins http:fce24c6): `src/main.cc:234` `DemoApp::handle` and its router routes; `src/main.cc:324` `tls_connection_factory_timed` (gone: `tls_connection_factory`, same arguments plus the failure hook).
-- Detent (Detent:bd7c76a, pins an older http whose handler is `void handle(const Request&, ...)`): `src/detent_authority/service.hh:55`, `include/detent_relay/service.hh:40`, `src/detentd/detentd.hh:118` handlers and `src/detentd/detentd.cc:51-63` routes; `tls_connection_factory_timed` at `src/detent_relay/host.cc:244`, `src/detentd/main.cc:261`, `tests/detent_authority/test_distribution_service.cc:149`, `tests/detent_authority/test_transport_https.cc:55,119,166`, `tests/detent_delivery/bootstrap_tls_fixture.hh:48`, `tests/detent_delivery/relay_network_fixture.hh:220`. Its gap to this branch includes earlier http changes, not only H1's.
-- cluster (cluster:f053a82): no http use (it pins reactor only); nothing breaks from http. It breaks from reactor's Session change, step R's list.
-- Xapiand (Xapiand:88892b4cb): `src/server/search_service.h:54` `SearchService::handle`; `src/server/search_views.cc:3085` `hreq.on_cancel(... http::CancelReason)` (becomes `cancel_token()` with a `task::cancel_callback`); `src/manager.cc:934` `tls_connection_factory_timed`.
+- http-log (origin/main http-log:431b878, pins http:679c0f8): `http_log.h:371` `AccessLog::handle` returns `asio::awaitable<void>` (becomes `task::task<void>`); `examples/demo.cc:5,8,14` (`:14` the handler, `:5,:8` the `co_spawn` drive); `test/completion_test.cc:11,14,21`; `test/test.cc:35,38,44,55,244` (handlers `:44,:55,:244`; `co_spawn` drives `:35,:38`); `test/completion_test.cc:95` constructs `HttpAsioService(handler, 1, 16)` (still valid).
+- prism (origin/main prism:da169a9, pins http:d76c5ef): the route lambdas `src/main.cc:186,197,207,217,224,229` (each becomes `task::task<void>`), `:234` `DemoApp::handle`, `:324` `tls_connection_factory_timed` (gone: `tls_connection_factory`, same arguments plus the failure hook).
+- Detent (github/main Detent:cce3602; the `origin` remote is a stale local path; pins an older http whose handler is `void handle(const Request&, ...)`): `src/detent_authority/service.hh:55`, `include/detent_relay/service.hh:40`, `src/detentd/detentd.hh:118` handlers and `src/detentd/detentd.cc:51-63` routes; `tls_connection_factory_timed` at `src/detent_relay/host.cc:244`, `src/detentd/main.cc:261`, `tests/detent_authority/test_distribution_service.cc:149`, `tests/detent_authority/test_transport_https.cc:55,119,166`, `tests/detent_delivery/bootstrap_tls_fixture.hh:48`, `tests/detent_delivery/relay_network_fixture.hh:220`. `tests/detent_authority/test_transport_https.cc:136` calls `tls_connection_factory` with 4 arguments, which still compiles. Constructors such as `HttpAsioService(app, 1, 0, 16, factory, 4)` belong to the earlier-http gap, which is not H1's.
+- cluster (origin/main cluster:428d57d, pins reactor:ade618d): no http use; nothing breaks from http. It breaks from reactor's Session change, step R's list.
+- Xapiand has two heads, and which one Xapiand migrates from is the Xapiand lead's to say:
+  - origin/master Xapiand:3fe13a2fb (Oct 28, 312 commits behind local): the handler is synchronous (`src/server/search_service.h:49`); the factory `tls_connection_factory_timed` is at `src/manager.cc:1059`.
+  - local master Xapiand:88892b4cb (unpushed): `src/server/search_service.h:54` `SearchService::handle`; `src/server/search_views.cc:3075` (the definition), `:3085` `hreq.on_cancel(... http::CancelReason)` (becomes `cancel_token()` with a `task::cancel_callback`), `:2951` `BodyStream::async_read` (breaks in H2); `src/manager.cc:934` `tls_connection_factory_timed`; `src/server/host_asio.h:131-142` `Run::await` (T1's `async_initiate` over a task; design "What Xapiand changes", item 2).
+
+## Fix round (code review CR1-CR4)
+
+- CR2 (D9 on the loop thread): `AsioResponseWriter::affine()` (`http_asio.h:280`) also accepts no current task while `reactor_->on_loop()` holds, which covers a cancel callback that runs from a raw Asio handler (the watch completion, the reactor's abort walk). Tests: `coroutine_test` `/cb-write` + [T] (h), hang-up and `stop()` cases (a callback sets a header and wakes the handler; the 200 carries `X-Cancelled`); the death tests stay: `/affine-body` (a body moved to another scheduler) and the new `/affine-thread` (a raw thread, no task, off the loop). Mutants: M1 old assertion: abort (rc 134) in the new tests; M2 `!task::current()` without `on_loop()`: killed by the `/affine-thread` death test.
+- CR3: `bench_asio.cc` moved to `bench/` (CMake and AGENTS.md updated; the T1 grep is empty); `Request::scheduler()` (`http_message.h`, a forward-declared `task::asio_scheduler&`, set by the transport at `http_asio.h:874,984`, throws `std::logic_error` with no transport) replaces `this_loop(service)` in every handler (`test_loop.h` no longer has it). Test: `/scheduler` in `coroutine_test` (same scheduler as the reactor's, a timer and a `task::deadline` that ends a 30 s timer on it) and the detached-request throw. Mutants: M3 streamed path not setting it, M3b buffered path not setting it: killed (19 failures for M3b).
+- CR4: the consumer break list above is regrepped at the origin heads the review names.
+- CR1: waits on reactor.
 
 ## Done
 - The port (http:3ed0010, 17de113, 74f931a, f82c6ba), the C3 pin (c5e0354), the D4/D7 tests (f0f293b), the counting build's frame treatment (0085e1b). See Log.
@@ -81,8 +90,7 @@ Each consumer breaks when it moves its http pin to this branch; none moves in H1
 3. H2: the streamed path (D6); this branch carries only the minimum the buffered loop needs to compile.
 
 ## Blocked on
-- Lead: `examples/bench_asio.cc` (raw-Asio comparator in `examples/`, outside T1's `:!bench` exception): move to `bench/` or except it (K1).
-- Design gap, for the designer or the lead: a handler has no way to reach its loop's executor (formerly `co_await asio::this_coro::executor`); tests use `this_loop(service)` (`test/test_loop.h`). An app wanting a timer must reach `service.reactor(i)`; `task::current()` gives the scheduler but not its `asio_scheduler&`.
+- CR1: reactor's fix round (bounded `stop()`, phases that run the earlier ones); the lead sends its landed main hash.
 
 ## Log
 - 2026-11-02: worktree and branch from http:03467b1; pins moved (task:d3d94f3, reactor:4f5a0b5); headers, tests, examples and the bench ported to task.

@@ -165,7 +165,7 @@ struct App : http::HttpHandler {
 		p += name.size() + 1;
 		return query.substr(p, query.find('&', p) - p);
 	}
-	task::task<bool> sleep_for(std::chrono::milliseconds d) { return ::sleep_for(this_loop(*service), d); }
+	static task::task<bool> sleep_for(const http::Request& req, std::chrono::milliseconds d) { return ::sleep_for(req.scheduler().executor(), d); }
 	bool wants_body_stream(const http::Request& r) override { return r.path == "/stream" || r.path == "/tbody" || r.path == "/throwcb-stream"; }
 	std::unique_ptr<http::BodySink> on_request_body(http::Request& r) override {
 		struct Null : http::BodySink { std::size_t n = 0; void write(std::string_view c) override { n += c.size(); } void end() override {} };
@@ -182,15 +182,15 @@ struct App : http::HttpHandler {
 		if (req.path == "/echo") { w.send(200, std::to_string(req.body.size())); co_return; }
 		if (req.path == "/sink") { w.send(200, "sunk"); co_return; }
 		if (req.path == "/slow") {   // suspends, then answers
-			co_await sleep_for(300ms);
+			co_await sleep_for(req, 300ms);
 			w.send(200, "slow");
 			co_return;
 		}
 		if (req.path == "/throw-later") {   // throws after a suspension: the exception crosses it
-			co_await sleep_for(50ms);
+			co_await sleep_for(req, 50ms);
 			throw std::runtime_error("later");
 		}
-		if (req.path == "/hold") { co_await sleep_for(1000ms); w.send(200, "held"); co_return; }
+		if (req.path == "/hold") { co_await sleep_for(req, 1000ms); w.send(200, "held"); co_return; }
 		if (req.path == "/huge") { w.send(200, std::string(64u << 20, 'x')); co_return; }
 		if (req.path == "/stream") {   // reads the body with co_await; answers with the byte count
 			std::size_t total = 0;
@@ -223,7 +223,7 @@ struct App : http::HttpHandler {
 			task::cancel_callback throws(req.cancel_token(), [] { throw std::runtime_error("callback throws"); });
 			o->started = true;
 			// Held until the test releases it (5 s at most), so a slow host cannot finish it early.
-			for (auto end = clk::now() + 5s; !o->release.load() && clk::now() < end;) { co_await sleep_for(5ms); }
+			for (auto end = clk::now() + 5s; !o->release.load() && clk::now() < end;) { co_await sleep_for(req, 5ms); }
 			o->cancelled_late = req.cancel_token().requested() && !req.path.empty();   // touches the request after the cancel
 			o->finished = true;
 			w.send(200, "survived");
@@ -244,8 +244,8 @@ struct App : http::HttpHandler {
 			const auto limit = std::chrono::milliseconds(std::atoi(param(req.query, "ms").c_str()));
 			const auto until_t = clk::now() + limit;
 			const bool reads = req.path == "/read";
-			while (clk::now() < until_t && !(reads && token.requested())) { co_await sleep_for(10ms); }
-			co_await sleep_for(100ms);
+			while (clk::now() < until_t && !(reads && token.requested())) { co_await sleep_for(req, 10ms); }
+			co_await sleep_for(req, 100ms);
 			o->frame_ok = !req.path.empty() && req.method == (reads ? "GET" : "PUT");
 			w.send(200, std::string(reads ? "read:" : "write:") + (token.requested() ? "cancelled" : "completed"));
 			o->finished = true;
@@ -281,7 +281,7 @@ struct App : http::HttpHandler {
 			auto o = get_obs(id);
 			int fds[2];
 			if (::pipe(fds) != 0) { w.send(500, "pipe"); co_return; }
-			asio::posix::stream_descriptor pipe(this_loop(*service), fds[0]);
+			asio::posix::stream_descriptor pipe(req.scheduler().executor(), fds[0]);
 			char b[16];
 			o->started = true;
 			const auto [error, n] = co_await task::await_asio<void(asio::error_code, std::size_t)>(
@@ -300,6 +300,28 @@ struct App : http::HttpHandler {
 			co_await wake;
 			o->finished = true;
 			w.send(200, "event ended");
+			co_return;
+		}
+		if (req.path == "/scheduler") {   // Request::scheduler(): the connection's reactor scheduler serves timers and task::deadline
+			const bool same = &req.scheduler() == &service->reactor(0).scheduler();
+			const bool timer = co_await sleep_for(req, 5ms);
+			task::deadline<task::asio_scheduler> limit(req.scheduler(), clk::now() + 20ms);
+			asio::steady_timer long_timer(req.scheduler().executor(), 30s);
+			const auto t0 = clk::now();
+			const asio::error_code error = co_await task::await_asio<void(asio::error_code)>(
+				[&](auto h) { long_timer.async_wait(std::move(h)); }, limit.token());
+			w.send(200, std::string(same ? "same," : "other,") + (timer ? "timer," : "no-timer,") +
+				(limit.expired() && error && since_ms(t0) < 5000 ? "deadline" : "no-deadline"));
+			co_return;
+		}
+		if (req.path == "/cb-write") {   // T4 (h): the writer touched from a cancel callback on the loop thread (no current task)
+			auto o = get_obs(id);
+			task::event wake;
+			task::cancel_callback set(req.cancel_token(), [&w, &wake] { w.set_header("X-Cancelled", "1"); wake.set(); });
+			o->started = true;
+			co_await wake;
+			o->finished = true;
+			w.send(200, "callback wrote");
 			co_return;
 		}
 		if (req.path == "/checkpoint") {   // T4 (d), (e): a budget loop until the request is cancelled; task::cancelled escapes
@@ -362,6 +384,11 @@ struct App : http::HttpHandler {
 		if (req.path == "/affine-body") {   // T4 (h): the handler's own body moves away, then writes: Debug asserts
 			co_await task::schedule_on{task::scheduler_ref::of(*away)};
 			w.send(200, "away");
+			co_return;
+		}
+		if (req.path == "/affine-thread") {   // T4 (h): a raw thread (no task, not the loop) touches the writer: Debug asserts
+			std::thread([&w] { w.set_header("X-Thread", "1"); }).join();
+			w.send(200, "thread");
 			co_return;
 		}
 		w.send(404, "nope");
@@ -486,7 +513,7 @@ static void body_stream_tests() {
 
 // T4 (h), Debug: a handler body that moved to another scheduler and then writes fails the writer's
 // affinity assertion. Runs in a child forked before any thread exists; true when it held.
-static bool affinity_death_test() {
+static bool affinity_death_test(const char* path) {
 	const pid_t child = ::fork();
 	if (child == 0) {
 		App app;
@@ -499,7 +526,7 @@ static bool affinity_death_test() {
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
 		svc.start(port); wait_listen(port);
-		auto r = one(port, get("/affine-body", "Connection: close\r\n"));
+		auto r = one(port, get(path, "Connection: close\r\n"));
 		std::fflush(stdout);
 		::_exit(r.status == 200 ? 0 : 3);   // NDEBUG: the assertion is compiled out and the reply arrives
 	}
@@ -514,7 +541,8 @@ static bool affinity_death_test() {
 
 int main() {
 	std::printf("== coroutine handler tests ==\n");
-	check(affinity_death_test(), "[T] (h) a handler body that moved away and then writes fails the writer's affinity check (Debug)");
+	check(affinity_death_test("/affine-body"), "[T] (h) a handler body that moved away and then writes fails the writer's affinity check (Debug)");
+	check(affinity_death_test("/affine-thread"), "[T] (h) a raw thread (no task, off the loop) that writes fails the writer's affinity check (Debug)");
 	App app;
 
 	// [A] A coroutine handler that waits suspends; the loop serves others. One reactor.
@@ -897,6 +925,46 @@ int main() {
 			svc->destroy_roots();
 		}
 		check(task::detail::live_frames() == baseline, "[T] (d) no task frame outlives the service (" + std::to_string(task::detail::live_frames() - baseline) + " left)");
+	}
+	{   // Request::scheduler(): a handler starts a timer and a task::deadline on the connection's scheduler
+		unsigned short port = free_port();
+		http::HttpAsioService svc(app, 1, 64);
+		app.service = &svc;
+		svc.start(port); wait_listen(port);
+		auto r = one(port, get("/scheduler", "Connection: close\r\n"));
+		check(r.status == 200 && r.body == "same,timer,deadline", "[T] Request::scheduler() is the reactor's scheduler and serves a timer and a deadline (" + r.body + ")");
+		http::Request detached;
+		bool threw = false;
+		try { (void)detached.scheduler(); } catch (const std::logic_error&) { threw = true; }
+		check(threw, "[T] a request no transport serves has no scheduler");
+	}
+	{   // (h) a cancel callback on the loop thread, outside any task, touches the writer: the affinity check passes
+		unsigned short port = free_port();
+		auto svc = std::make_unique<http::HttpAsioService>(app, 1, 64);
+		app.service = svc.get();
+		svc->start(port); wait_listen(port);
+		{   // the client hangs up: the watch's read completion runs the callback
+			auto o = app.get_obs("h-hangup");
+			Conn c(port);
+			c.send(get("/cb-write?id=h-hangup"));
+			until([&] { return o->started.load(); });
+			c.shut_wr();
+			auto r = c.read_response();
+			check(r.status == 200 && r.body == "callback wrote" && header_value(r.head, "x-cancelled") == "1",
+				"[T] (h) a cancel callback on the hang-up writes through the writer");
+		}
+		{   // the service stops: the reactor's abort walk runs the callback
+			auto o = app.get_obs("h-stop");
+			Conn c(port);
+			c.send(get("/cb-write?id=h-stop"));
+			until([&] { return o->started.load(); });
+			svc->stop();
+			auto r = c.read_response();
+			check(r.status == 200 && r.body == "callback wrote" && header_value(r.head, "x-cancelled") == "1",
+				"[T] (h) a cancel callback on shutdown writes through the writer");
+		}
+		svc->close();
+		svc->destroy_roots();
 	}
 	{   // (e) task::cancelled after the request's cancellation is 503 + close; from the handler's own source, 500
 		unsigned short port = free_port();

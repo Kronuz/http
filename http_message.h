@@ -34,12 +34,15 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 #include "task.hh"
+
+namespace task { class asio_scheduler; }
 
 namespace http {
 
@@ -151,6 +154,16 @@ struct Request {
 	// null. The transport clears it before the watch goes away.
 	void set_cancel_watch(CancelWatch* watch) noexcept { cancel_watch_ = watch; }
 
+	// The connection's reactor scheduler, which the handler runs on. Its executor() serves what
+	// the handler starts on its loop: timers, sockets, task::deadline. Throws std::logic_error
+	// for a request no transport is serving.
+	task::asio_scheduler& scheduler() const {
+		if (!scheduler_) { throw std::logic_error("request has no scheduler"); }
+		return *scheduler_;
+	}
+	// For a transport: the scheduler of the loop that serves this request.
+	void set_scheduler(task::asio_scheduler* scheduler) noexcept { scheduler_ = scheduler; }
+
 	// Typed per-request application state (see RequestExtension). Created once at
 	// headers-complete by HttpHandler::create_extension(), before on_request_body()
 	// and wants_body_stream() so both can use it; reset when the connection is reused.
@@ -182,6 +195,7 @@ struct Request {
 		extension.reset();
 		cancel_.reset();
 		cancel_watch_ = nullptr;
+		scheduler_ = nullptr;
 	}
 
 private:
@@ -193,6 +207,7 @@ private:
 	}
 	mutable std::optional<task::cancel_source> cancel_;
 	mutable CancelWatch* cancel_watch_ = nullptr;   // engaged once, then cleared
+	task::asio_scheduler* scheduler_ = nullptr;
 };
 
 

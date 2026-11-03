@@ -89,7 +89,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 
 	# Raw-Asio throughput ceiling (no framework): the reference the framework is
 	# measured against. SO_REUSEPORT multi-reactor; run on Linux for real numbers.
-	add_executable(bench_asio examples/bench_asio.cc)
+	add_executable(bench_asio bench/bench_asio.cc)
 	target_link_libraries(bench_asio PRIVATE http)
 
 	# Framework throughput: the same fixed response served through HttpAsioService +

@@ -41,7 +41,7 @@ reactor (dep)         The generic Asio server runtime (Kronuz/reactor): the shar
                       shutdown. Extracted from http_asio.h so other services share it.
 examples/kv_store.cc  A complete REST app: buffered routes, a streamed response route, a
                       streamed request-body route (POST /bulk).
-examples/bench_asio.cc Raw-Asio throughput ceiling (no framework) — the reference bench_http
+bench/bench_asio.cc Raw-Asio throughput ceiling (no framework) — the reference bench_http
                       is measured against.
 examples/bench_http.cc Framework throughput: the same fixed response through HttpAsioService
                       (`--timeouts` turns on the production timeouts).

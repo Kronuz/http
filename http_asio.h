@@ -275,8 +275,9 @@ public:
 private:
 	void synchronous() const { affine(); if (is_deferred()) { throw std::logic_error("response authority was deferred"); } }
 	// Debug: a connection's writer is used on its loop, by a task running there (a handler body
-	// that moved to another scheduler must come back first).
-	void affine() const noexcept { assert(!reactor_ || task::current() == task::scheduler_ref::of(reactor_->scheduler())); }
+	// that moved to another scheduler must come back first) or by a raw handler on that loop
+	// (a cancel callback that Request::cancel runs, with no current task).
+	void affine() const noexcept { assert(!reactor_ || task::current() == task::scheduler_ref::of(reactor_->scheduler()) || (!task::current() && reactor_->on_loop())); }
 	const asio::any_io_executor* executor_ = nullptr;
 	reactor::Reactor* reactor_ = nullptr;
 	std::shared_ptr<detail::AsioDeferredControl> deferred_;
@@ -870,6 +871,7 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 				// ---- STREAMED BODY: the handler runs while the feed reads the body ----
 				Request request = parser.take_headers();
 				request.remote = remote;
+				request.set_scheduler(&scheduler);
 				reactor->lag().note_activity();
 				bool keep_alive = request.keep_alive;
 				auto stream = std::make_shared<BodyStream>(ex, /*capacity=*/8);
@@ -979,6 +981,7 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 			if (request_deadline != clock::time_point::max() && clock::now() >= request_deadline) { co_return; }
 			Request request = parser.take();
 			request.remote = remote;
+			request.set_scheduler(&scheduler);
 			reactor->lag().note_activity();
 			parser.resume();
 			bool keep_alive = request.keep_alive;

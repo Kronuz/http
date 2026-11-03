@@ -193,7 +193,7 @@ struct App : http::HttpHandler {
 		if (req.path == "/lazy") {   // waits for the test without asking about cancellation, then asks (or never does)
 			auto o = get_obs(param(req.query, "id"));
 			o->started = true;
-			const auto loop = this_loop(*service);
+			const auto loop = req.scheduler().executor();
 			for (auto end = clk::now() + 5s; !o->release.load() && clk::now() < end;) { co_await sleep_for(loop, 2ms); }
 			const std::string ask = param(req.query, "ask");
 			if (ask == "cb") {
@@ -211,7 +211,7 @@ struct App : http::HttpHandler {
 			auto o = get_obs(param(req.query, "id"));
 			task::cancel_callback record(req.cancel_token(), [o](task::cancel_reason r) { o->reason = static_cast<int>(r); });
 			o->started = true;
-			const auto loop = this_loop(*service);
+			const auto loop = req.scheduler().executor();
 			for (auto end = clk::now() + 5s; !o->release.load() && clk::now() < end;) { co_await sleep_for(loop, 2ms); }
 			o->finished = true;
 			w.send(200, "held");
