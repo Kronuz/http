@@ -1,5 +1,5 @@
 // The benchmark counters (bench/counting.h): operator new calls and Asio handler invocations are counted exactly.
-// The handler count is checked against io_context::run()'s own count of the handlers it ran, on posts, awaitables and
+// The handler count is checked against io_context::run()'s own count of the handlers it ran, on posts, tasks and
 // a socket round trip; the allocation count against known numbers of operator new calls and coroutine frames.
 #include "counting.h"
 
@@ -7,8 +7,8 @@
 #include <cstdio>
 #include <cstdlib>
 
-using asio::awaitable;
-using asio::use_awaitable;
+#include "task_asio.hh"
+
 using asio::ip::tcp;
 
 static int failures = 0;
@@ -23,26 +23,24 @@ static int failures = 0;
 static unsigned long long allocs() { return g_allocs.load(); }
 static unsigned long long handlers() { return g_handlers.load(); }
 
-static awaitable<void> leaf() { co_return; }
+static task::task<void> leaf() { co_return; }
 
-static awaitable<void> hop(int n) {
-	auto ex = co_await asio::this_coro::executor;
-	for (int i = 0; i < n; ++i) co_await asio::post(ex, use_awaitable);
+static task::task<void> hop(int n) {
+	for (int i = 0; i < n; ++i) co_await task::yield();
 }
 
-static awaitable<void> echo_server(tcp::acceptor& acceptor) {
-	tcp::socket s = co_await acceptor.async_accept(use_awaitable);
+static task::task<void> echo_server(tcp::acceptor& acceptor, tcp::socket& s) {
+	co_await task::await_asio<void(asio::error_code)>([&](auto h) { acceptor.async_accept(s, std::move(h)); });
 	char b[1];
-	co_await asio::async_read(s, asio::buffer(b), use_awaitable);
-	co_await asio::async_write(s, asio::buffer(b), use_awaitable);
+	co_await task::await_asio<void(asio::error_code, std::size_t)>([&](auto h) { asio::async_read(s, asio::buffer(b), std::move(h)); });
+	co_await task::await_asio<void(asio::error_code, std::size_t)>([&](auto h) { asio::async_write(s, asio::buffer(b), std::move(h)); });
 }
 
-static awaitable<void> client(tcp::endpoint ep) {
-	tcp::socket s(co_await asio::this_coro::executor);
-	co_await s.async_connect(ep, use_awaitable);
+static task::task<void> client(tcp::socket& s, tcp::endpoint ep) {
+	co_await task::await_asio<void(asio::error_code)>([&](auto h) { s.async_connect(ep, std::move(h)); });
 	char b[1] = {'x'};
-	co_await asio::async_write(s, asio::buffer(b), use_awaitable);
-	co_await asio::async_read(s, asio::buffer(b), use_awaitable);
+	co_await task::await_asio<void(asio::error_code, std::size_t)>([&](auto h) { asio::async_write(s, asio::buffer(b), std::move(h)); });
+	co_await task::await_asio<void(asio::error_code, std::size_t)>([&](auto h) { asio::async_read(s, asio::buffer(b), std::move(h)); });
 }
 
 int main() {
@@ -70,28 +68,34 @@ int main() {
 		CHECK(ran == 100);
 		CHECK(handlers() - h == ran);
 	}
-	// awaitables: the count agrees with run(), and each spawned frame reaches operator new (recycling is off).
+	// tasks: the count agrees with run(), and each spawned frame reaches operator new (TASK_FRAME_POOL=0).
 	{
 		asio::io_context io(1);
+		task::asio_scheduler scheduler(io.get_executor());
+		const auto on_loop = task::scheduler_ref::of(scheduler);
 		unsigned long long h = handlers(), a = allocs();
-		for (int i = 0; i < 50; ++i) asio::co_spawn(io, leaf(), asio::detached);
+		for (int i = 0; i < 50; ++i) task::spawn(on_loop, leaf());
 		std::size_t ran = io.run();
+		CHECK(ran == 50);
 		CHECK(handlers() - h == ran);
-		CHECK(allocs() - a >= 50);
+		CHECK(allocs() - a >= 100);   // each spawn: the task's frame and its root's
 		io.restart();
 		h = handlers();
-		asio::co_spawn(io, hop(10), asio::detached);
+		task::spawn(on_loop, hop(10));
 		ran = io.run();
-		CHECK(ran >= 10);
+		CHECK(ran == 11);
 		CHECK(handlers() - h == ran);
 	}
 	// a socket round trip: connect, accept, read, write on one loop.
 	{
 		asio::io_context io(1);
+		task::asio_scheduler scheduler(io.get_executor());
+		const auto on_loop = task::scheduler_ref::of(scheduler);
 		tcp::acceptor acceptor(io, tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
+		tcp::socket server(io), peer(io);
 		unsigned long long h = handlers();
-		asio::co_spawn(io, echo_server(acceptor), asio::detached);
-		asio::co_spawn(io, client(acceptor.local_endpoint()), asio::detached);
+		task::spawn(on_loop, echo_server(acceptor, server));
+		task::spawn(on_loop, client(peer, acceptor.local_endpoint()));
 		std::size_t ran = io.run();
 		CHECK(ran >= 6);
 		CHECK(handlers() - h == ran);

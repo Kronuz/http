@@ -22,7 +22,7 @@ static void check(bool ok, const std::string& m) {
 }
 
 struct App : http::HttpHandler {
-	asio::awaitable<void> handle(http::Request&, http::ResponseWriter& w) override { w.send(200, "ok\n"); co_return; }
+	task::task<void> handle(http::Request&, http::ResponseWriter& w) override { w.send(200, "ok\n"); co_return; }
 };
 
 // A keep-alive client: one connection, sequential GET /x, each answer read in full.

@@ -59,21 +59,21 @@ class KvApp : public http::HttpHandler {
 
 public:
 	KvApp() {
-		router_.route("GET", "/kv/", [this](http::Request&, http::ResponseWriter& resp, const http::Params&) -> asio::awaitable<void> {
+		router_.route("GET", "/kv/", [this](http::Request&, http::ResponseWriter& resp, const http::Params&) -> task::task<void> {
 			std::lock_guard<std::mutex> lk(mutex_);   // GET /kv/ -> list keys
 			std::string body;
 			for (const auto& [k, v] : store_) { body += k; body += '\n'; }
 			resp.send(200, body);
 			co_return;
 		});
-		router_.route("GET", "/kv/:key", [this](http::Request&, http::ResponseWriter& resp, const http::Params& p) -> asio::awaitable<void> {
+		router_.route("GET", "/kv/:key", [this](http::Request&, http::ResponseWriter& resp, const http::Params& p) -> task::task<void> {
 			std::lock_guard<std::mutex> lk(mutex_);
 			auto it = store_.find(std::string(p.get("key")));
 			if (it == store_.end()) { resp.send(404, "not found\n"); co_return; }
 			resp.send(200, it->second);
 			co_return;
 		});
-		router_.route("PUT", "/kv/:key", [this](http::Request& req, http::ResponseWriter& resp, const http::Params& p) -> asio::awaitable<void> {
+		router_.route("PUT", "/kv/:key", [this](http::Request& req, http::ResponseWriter& resp, const http::Params& p) -> task::task<void> {
 			std::lock_guard<std::mutex> lk(mutex_);
 			std::string key(p.get("key"));
 			bool created = store_.find(key) == store_.end();
@@ -81,14 +81,14 @@ public:
 			resp.send(created ? 201 : 204, created ? "created\n" : "");
 			co_return;
 		});
-		router_.route("DELETE", "/kv/:key", [this](http::Request&, http::ResponseWriter& resp, const http::Params& p) -> asio::awaitable<void> {
+		router_.route("DELETE", "/kv/:key", [this](http::Request&, http::ResponseWriter& resp, const http::Params& p) -> task::task<void> {
 			std::lock_guard<std::mutex> lk(mutex_);
 			resp.send(store_.erase(std::string(p.get("key"))) ? 204 : 404, "");
 			co_return;
 		});
 		// A streaming response: emit N lines as chunks, never holding them all in
 		// memory. The same seam produces a chunked body -- the writer frames it.
-		router_.route("GET", "/stream/:n", [](http::Request&, http::ResponseWriter& resp, const http::Params& p) -> asio::awaitable<void> {
+		router_.route("GET", "/stream/:n", [](http::Request&, http::ResponseWriter& resp, const http::Params& p) -> task::task<void> {
 			long n = std::atol(std::string(p.get("n")).c_str());
 			resp.status(200);
 			resp.content_type("text/plain; charset=utf-8");
@@ -100,14 +100,14 @@ public:
 		});
 		// A streamed request body: POST NDJSON; the body is counted line-by-line as
 		// it arrives (see on_request_body) and never buffered whole.
-		router_.route("POST", "/bulk", [](http::Request& req, http::ResponseWriter& resp, const http::Params&) -> asio::awaitable<void> {
+		router_.route("POST", "/bulk", [](http::Request& req, http::ResponseWriter& resp, const http::Params&) -> task::task<void> {
 			auto ctx = std::static_pointer_cast<BulkCtx>(req.user_data);
 			resp.send(200, "received " + std::to_string(ctx ? ctx->lines : 0) + " lines\n");
 			co_return;
 		});
 	}
 
-	asio::awaitable<void> handle(http::Request& request, http::ResponseWriter& response) override {
+	task::task<void> handle(http::Request& request, http::ResponseWriter& response) override {
 		co_await router_.handle(request, response);
 	}
 

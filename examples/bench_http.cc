@@ -30,7 +30,7 @@
 // measurement is the framework's parse/route/frame overhead, not the app's.
 class HelloApp : public http::HttpHandler {
 public:
-	asio::awaitable<void> handle(http::Request& /*request*/, http::ResponseWriter& response) override {
+	task::task<void> handle(http::Request& /*request*/, http::ResponseWriter& response) override {
 		response.status(200);
 		response.set_header("Content-Type", "text/plain");
 		response.write("Hello, World!\n");

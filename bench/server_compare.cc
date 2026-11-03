@@ -5,7 +5,7 @@
 //   reactor  reactor::TcpServer with the same session body (the runtime without the http library)
 //   http     http::HttpAsioService and a handler that writes the same body, no timeouts
 //   httpt    the same with the request, idle, header and inactivity timeouts a production service sets
-//   httpr    http through a Router whose one route yields once (asio::post) before it answers: the cost of a
+//   httpr    http through a Router whose one route yields once (task::yield) before it answers: the cost of a
 //            handler that suspends, which "http" never pays
 //
 //   http_server_compare KIND PORT REACTORS
@@ -40,7 +40,7 @@ using asio::awaitable;
 using asio::use_awaitable;
 using asio::ip::tcp;
 
-// The same request loop for the asio and reactor kinds: read, find the blank line, answer.
+// The request loop of the asio kind: read, find the blank line, answer.
 static awaitable<void> serve(tcp::socket socket) {
 	try {
 		socket.set_option(tcp::no_delay(true));
@@ -56,6 +56,28 @@ static awaitable<void> serve(tcp::socket socket) {
 			}
 		}
 	} catch (const std::exception&) {
+	}
+}
+
+// The same loop as a task, for the reactor kind (reactor::Session).
+static task::task<void> serve_task(tcp::socket socket) {
+	asio::error_code ignored;
+	socket.set_option(tcp::no_delay(true), ignored);
+	std::string buf;
+	char tmp[2048];
+	for (;;) {
+		auto [error, n] = co_await task::await_asio<void(asio::error_code, std::size_t)>(
+			[&](auto h) { socket.async_read_some(asio::buffer(tmp), std::move(h)); });
+		if (error) { co_return; }
+		buf.append(tmp, n);
+		std::size_t pos;
+		while ((pos = buf.find("\r\n\r\n")) != std::string::npos) {
+			buf.erase(0, pos + 4);
+			auto [write_error, written] = co_await task::await_asio<void(asio::error_code, std::size_t)>(
+				[&](auto h) { asio::async_write(socket, asio::buffer(RESP), std::move(h)); });
+			(void)written;
+			if (write_error) { co_return; }
+		}
 	}
 }
 
@@ -77,7 +99,7 @@ static awaitable<void> asio_acceptor(std::vector<std::unique_ptr<asio::io_contex
 
 class HelloApp : public http::HttpHandler {
 public:
-	asio::awaitable<void> handle(http::Request&, http::ResponseWriter& response) override {
+	task::task<void> handle(http::Request&, http::ResponseWriter& response) override {
 		response.status(200);
 		response.set_header("Content-Type", "text/plain");
 		response.write("Hello, World!\n");
@@ -89,8 +111,8 @@ public:
 // The same reply through a Router route that suspends once on the reactor before it writes.
 static http::Router make_yield_router() {
 	http::Router router;
-	router.route("GET", "/", [](http::Request&, http::ResponseWriter& response, const http::Params&) -> awaitable<void> {
-		co_await asio::post(co_await asio::this_coro::executor, use_awaitable);
+	router.route("GET", "/", [](http::Request&, http::ResponseWriter& response, const http::Params&) -> task::task<void> {
+		co_await task::yield();
 		response.status(200);
 		response.set_header("Content-Type", "text/plain");
 		response.write("Hello, World!\n");
@@ -127,7 +149,7 @@ int main(int argc, char** argv) {
 		for (auto& io : ios) io->stop();
 		for (auto& t : threads) t.join();
 	} else if (kind == "reactor") {
-		reactor::TcpServer server(reactors, 0, [](tcp::socket s, reactor::Reactor&) -> awaitable<void> { co_await serve(std::move(s)); });
+		reactor::TcpServer server(reactors, 0, [](tcp::socket s, reactor::Reactor&, reactor::SessionContext) { return serve_task(std::move(s)); });
 		server.start(port);
 		std::printf("ready reactor %zu\n", reactors);
 		std::fflush(stdout);

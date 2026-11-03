@@ -22,6 +22,7 @@
 #include "compressor_deflate.h"   // gunzip the compressed responses
 #include "http_asio.h"
 #include "http_router.h"
+#include "test_loop.h"
 
 static constexpr int SLOW_MS = 500;
 
@@ -33,32 +34,32 @@ static std::string big_body() {
 
 struct App : http::HttpHandler {
 	http::Router router;
+	http::HttpAsioService* service = nullptr;   // set once the service exists: /slow waits on its loop
 	std::string big = big_body();
 	App() {
-		router.route("GET", "/fast", [](http::Request&, http::ResponseWriter& w, const http::Params&) -> asio::awaitable<void> {
+		router.route("GET", "/fast", [](http::Request&, http::ResponseWriter& w, const http::Params&) -> task::task<void> {
 			w.send(200, "fast\n");
 			co_return;
 		});
 		// Waits on a timer: the coroutine suspends and the loop serves other connections.
-		router.route("GET", "/slow", [](http::Request&, http::ResponseWriter& w, const http::Params&) -> asio::awaitable<void> {
-			asio::steady_timer timer(co_await asio::this_coro::executor, std::chrono::milliseconds(SLOW_MS));
-			co_await timer.async_wait(asio::use_awaitable);
+		router.route("GET", "/slow", [this](http::Request&, http::ResponseWriter& w, const http::Params&) -> task::task<void> {
+			co_await sleep_for(this_loop(*service), std::chrono::milliseconds(SLOW_MS));
 			w.send(200, "slow\n");
 		});
-		router.route("GET", "/big", [this](http::Request&, http::ResponseWriter& w, const http::Params&) -> asio::awaitable<void> {
+		router.route("GET", "/big", [this](http::Request&, http::ResponseWriter& w, const http::Params&) -> task::task<void> {
 			w.send(200, big, "text/plain");
 			co_return;
 		});
-		router.route("GET", "/throw", [](http::Request&, http::ResponseWriter&, const http::Params&) -> asio::awaitable<void> {
+		router.route("GET", "/throw", [](http::Request&, http::ResponseWriter&, const http::Params&) -> task::task<void> {
 			throw std::runtime_error("boom");
 			co_return;
 		});
-		router.route("GET", "/remote", [](http::Request& req, http::ResponseWriter& w, const http::Params&) -> asio::awaitable<void> {
+		router.route("GET", "/remote", [](http::Request& req, http::ResponseWriter& w, const http::Params&) -> task::task<void> {
 			w.send(200, req.remote);
 			co_return;
 		});
 	}
-	asio::awaitable<void> handle(http::Request& req, http::ResponseWriter& resp) override { co_await router.handle(req, resp); }
+	task::task<void> handle(http::Request& req, http::ResponseWriter& resp) override { co_await router.handle(req, resp); }
 	void on_error(std::exception_ptr e, const http::Request&, http::ResponseWriter& resp) override {
 		try { std::rethrow_exception(e); }
 		catch (const std::exception& ex) { resp.send(500, std::string("mapped: ") + ex.what() + "\n"); }
@@ -79,7 +80,7 @@ struct CountSink : http::BodySink {
 	void end() override {}
 };
 struct StreamApp : http::HttpHandler {
-	asio::awaitable<void> handle(http::Request& req, http::ResponseWriter& resp) override {
+	task::task<void> handle(http::Request& req, http::ResponseWriter& resp) override {
 		auto ctx = std::static_pointer_cast<BulkCtx>(req.user_data);
 		size_t lines = ctx ? ctx->lines.load() : 0;
 		// req.body must be EMPTY if the body streamed to the sink (never buffered).
@@ -105,31 +106,29 @@ struct ConcurrentStreamApp : http::HttpHandler {
 	std::mutex mutex;
 	std::set<std::thread::id> threads;
 	std::atomic<bool> all_inside_run{true};
+	http::HttpAsioService* service = nullptr;   // set once the service exists
 	bool wants_body_stream(const http::Request& r) override { return r.method == "POST" && r.path == "/restore"; }
-	asio::awaitable<void> handle(http::Request& req, http::ResponseWriter& resp) override {
+	task::task<void> handle(http::Request& req, http::ResponseWriter& resp) override {
 		if (req.path == "/fast") { resp.send(200, "fast\n"); co_return; }
 		if (req.path == "/restore" && req.body_stream) {
 			std::size_t total = 0;
 			std::uint64_t sum = 0;
 			std::string chunk;
-			auto ex = co_await asio::this_coro::executor;
+			auto ex = this_loop(*service);
 			for (;;) {
-				asio::error_code ec;
-				co_await req.body_stream->async_read(chunk, asio::redirect_error(asio::use_awaitable, ec));
+				asio::error_code ec = co_await read_chunk(*req.body_stream, chunk);
 				{ std::lock_guard<std::mutex> lk(mutex); threads.insert(std::this_thread::get_id()); }
 				if (!reactor::inside_run()) { all_inside_run = false; }
 				if (ec == asio::error::eof) { break; }
 				if (ec) { resp.send(400, "body failed: " + ec.message() + "\n"); co_return; }
 				total += chunk.size();
 				for (unsigned char c : chunk) { sum += c; }
-				asio::steady_timer slow(ex, std::chrono::milliseconds(2));   // a slow consumer
-				co_await slow.async_wait(asio::use_awaitable);
+				co_await sleep_for(ex, std::chrono::milliseconds(2));   // a slow consumer
 			}
 			// Over-read past the end: must complete with eof immediately, never wait (a parser
 			// that flushes a trailing item then loops does exactly this).
 			std::string extra;
-			asio::error_code again;
-			co_await req.body_stream->async_read(extra, asio::redirect_error(asio::use_awaitable, again));
+			asio::error_code again = co_await read_chunk(*req.body_stream, extra);
 			bool empty_body = req.body.empty();
 			resp.send(200, std::to_string(total) + " " + std::to_string(sum) +
 				(empty_body ? " empty" : " buffered") + (again == asio::error::eof ? " end\n" : " overread\n"));
@@ -308,6 +307,7 @@ int main() {
 	{
 		unsigned short port = free_port();
 		http::HttpAsioService svc(app, 1, 256);
+		app.service = &svc;
 		svc.start(port); wait_listen(port);
 		std::vector<Resp> slow;
 		std::thread st([&] { slow = fire(port, "/slow", 4); });
@@ -324,6 +324,7 @@ int main() {
 	{
 		unsigned short port = free_port();
 		http::HttpAsioService svc(app, 1, 4);
+		app.service = &svc;
 		svc.start(port); wait_listen(port);
 		auto res = fire(port, "/slow", 16);
 		int n200 = count_status(res, 200), n503 = count_status(res, 503);
@@ -336,6 +337,7 @@ int main() {
 	{
 		unsigned short port = free_port();
 		http::HttpAsioService svc(app, 3, 64);
+		app.service = &svc;
 		http::AsioBindOptions b; b.reuse_port = true; svc.set_bind_options(b);
 		svc.start(port); wait_listen(port);
 		auto res = fire(port, "/fast", 60);
@@ -348,6 +350,7 @@ int main() {
 	{
 		unsigned short port = free_port();
 		http::HttpAsioService svc(app, 4, 64);
+		app.service = &svc;
 		http::AsioBindOptions b; b.reuse_port = false; svc.set_bind_options(b);
 		svc.start(port); wait_listen(port);
 		auto res = fire(port, "/fast", 60);
@@ -358,6 +361,7 @@ int main() {
 	{
 		unsigned short port = free_port();
 		http::HttpAsioService svc(app, 1, 64);
+		app.service = &svc;
 		svc.start(port); wait_listen(port);
 		int fd = ::socket(AF_INET, SOCK_STREAM, 0);
 		sockaddr_in a{}; a.sin_family = AF_INET; a.sin_port = htons(port);
@@ -379,6 +383,7 @@ int main() {
 	{
 		unsigned short port = free_port();
 		http::HttpAsioService svc(app, 1, 64);
+		app.service = &svc;
 		svc.enable_compression();
 		svc.start(port); wait_listen(port);
 		auto gz = do_request(port, "/big", "gzip");
@@ -392,6 +397,7 @@ int main() {
 	{
 		unsigned short port = free_port();
 		http::HttpAsioService svc(app, 1, 64);
+		app.service = &svc;
 		svc.start(port); wait_listen(port);
 		auto r = do_request(port, "/throw");
 		std::printf("  [G] error hook: /throw -> %d\n", r.status);
@@ -429,6 +435,7 @@ int main() {
 	{
 		unsigned short port = free_port();
 		http::HttpAsioService svc(app, 1, 64);
+		app.service = &svc;
 		svc.enable_conditional();
 		svc.start(port); wait_listen(port);
 		auto first = do_request(port, "/big");
@@ -445,6 +452,7 @@ int main() {
 	{
 		unsigned short port = free_port();
 		http::HttpAsioService svc(app, 1, 64);
+		app.service = &svc;
 		svc.enable_ranges();
 		svc.start(port); wait_listen(port);
 		auto full = do_request(port, "/big");
@@ -465,6 +473,7 @@ int main() {
 		unsigned short port = free_port();
 		ConcurrentStreamApp capp;
 		http::HttpAsioService svc(capp, 1, 64);
+		capp.service = &svc;
 		svc.start(port); wait_listen(port);
 
 		const std::size_t N = 2u * 1024 * 1024;   // 2 MB, >> the 8x64KB channel window
@@ -513,6 +522,7 @@ int main() {
 		unsigned short port = free_port();
 		ConcurrentStreamApp capp;
 		auto* svc = new http::HttpAsioService(capp, 1, 64);
+		capp.service = svc;
 		svc->start(port); wait_listen(port);
 		int fd = ::socket(AF_INET, SOCK_STREAM, 0);
 		sockaddr_in a{}; a.sin_family = AF_INET; a.sin_port = htons(port);

@@ -7,7 +7,7 @@
 //       and keeps the disconnect rules (EOF with nothing read fires; data ends the watch)
 //   [L] the lazy watch: it reads nothing until the handler asks (CancelWatch::engage), and the
 //       first question decides what happened meanwhile as the read would have; the Request hook
-//       engages it once, from on_cancel(), cancelled() or cancel_reason()
+//       engages it once, from the first cancel_token()
 //   [Q] the same over real TCP: a hang-up before the first question is seen by it, pipelined input
 //       before it ends the watch, a handler that never asks has its pipelined successors answered
 //   [N] a buffered reply sent at once as far as the socket takes it: replies to 4 MiB arrive whole
@@ -47,6 +47,7 @@
 #include <vector>
 
 #include "http_asio.h"
+#include "test_loop.h"
 
 using namespace std::chrono_literals;
 using clk = std::chrono::steady_clock;
@@ -153,13 +154,14 @@ static std::string post(const std::string& path, const std::string& body, const 
 // ---- the application ----
 struct Obs {
 	std::atomic<bool> started{false}, finished{false}, release{false};
-	std::atomic<int> reason{-1};   // CancelReason once cancelled
-	std::atomic<bool> at_once{false};   // /lazy: the callback ran inside on_cancel()
+	std::atomic<int> reason{-1};   // the task::cancel_reason once cancelled
+	std::atomic<bool> at_once{false};   // /lazy: the callback ran as it was registered
 };
 struct App : http::HttpHandler {
 	std::mutex mutex;
 	std::map<std::string, std::shared_ptr<Obs>> obs;
 	std::map<std::string, int> hits;   // requests the handler ran, by path
+	http::HttpAsioService* service = nullptr;   // the service running it: handlers wait on its loop
 	std::shared_ptr<Obs> get_obs(const std::string& id) {
 		std::lock_guard<std::mutex> lk(mutex);
 		auto& o = obs[id];
@@ -173,7 +175,7 @@ struct App : http::HttpHandler {
 		p += name.size() + 1;
 		return query.substr(p, query.find('&', p) - p);
 	}
-	asio::awaitable<void> handle(http::Request& req, http::ResponseWriter& w) override {
+	task::task<void> handle(http::Request& req, http::ResponseWriter& w) override {
 		{ std::lock_guard<std::mutex> lk(mutex); ++hits[req.path]; }
 		if (req.path == "/echo") { w.send(200, req.body); co_return; }
 		if (req.path == "/fast") { w.send(200, "fast"); co_return; }
@@ -191,17 +193,15 @@ struct App : http::HttpHandler {
 		if (req.path == "/lazy") {   // waits for the test without asking about cancellation, then asks (or never does)
 			auto o = get_obs(param(req.query, "id"));
 			o->started = true;
-			asio::steady_timer t(co_await asio::this_coro::executor);
-			for (auto end = clk::now() + 5s; !o->release.load() && clk::now() < end;) {
-				t.expires_after(2ms);
-				co_await t.async_wait(asio::use_awaitable);
-			}
+			const auto loop = this_loop(*service);
+			for (auto end = clk::now() + 5s; !o->release.load() && clk::now() < end;) { co_await sleep_for(loop, 2ms); }
 			const std::string ask = param(req.query, "ask");
 			if (ask == "cb") {
-				req.on_cancel([o](http::CancelReason r) { o->reason = static_cast<int>(r); });
+				task::cancel_callback record(req.cancel_token(), [o](task::cancel_reason r) { o->reason = static_cast<int>(r); });
 				o->at_once = o->reason.load() != -1;
 			} else if (ask == "poll") {
-				o->reason = req.cancelled() ? static_cast<int>(req.cancel_reason()) : 0;
+				const task::cancel_token token = req.cancel_token();
+				o->reason = token.requested() ? static_cast<int>(token.reason()) : 0;
 			}
 			o->finished = true;
 			w.send(200, "lazy");
@@ -209,13 +209,10 @@ struct App : http::HttpHandler {
 		}
 		if (req.path == "/hold") {   // runs until the test releases it, noting how a cancel reached it
 			auto o = get_obs(param(req.query, "id"));
-			req.on_cancel([o](http::CancelReason r) { o->reason = static_cast<int>(r); });
+			task::cancel_callback record(req.cancel_token(), [o](task::cancel_reason r) { o->reason = static_cast<int>(r); });
 			o->started = true;
-			asio::steady_timer t(co_await asio::this_coro::executor);
-			for (auto end = clk::now() + 5s; !o->release.load() && clk::now() < end;) {
-				t.expires_after(2ms);
-				co_await t.async_wait(asio::use_awaitable);
-			}
+			const auto loop = this_loop(*service);
+			for (auto end = clk::now() + 5s; !o->release.load() && clk::now() < end;) { co_await sleep_for(loop, 2ms); }
 			o->finished = true;
 			w.send(200, "held");
 			co_return;
@@ -235,6 +232,7 @@ static int pending_bytes(int fd) { int n = 0; ::ioctl(fd, FIONREAD, &n); return 
 struct Pair {
 	asio::io_context io;
 	Socket server{io};
+	task::asio_scheduler scheduler{io.get_executor()};   // after io and server: destroyed first
 	int client = -1;
 	Pair() {
 		asio::ip::tcp::acceptor acceptor(io, asio::ip::tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0));
@@ -244,7 +242,7 @@ struct Pair {
 		::connect(client, reinterpret_cast<sockaddr*>(&a), sizeof(a));
 		acceptor.accept(server);
 	}
-	~Pair() { if (client >= 0) { ::close(client); } }
+	~Pair() { io.stop(); if (client >= 0) { ::close(client); } }   // a stopped loop: the scheduler may destroy a read left pending
 	void send(const std::string& s) { std::size_t o = 0; while (o < s.size()) { ssize_t n = ::send(client, s.data() + o, s.size() - o, 0); if (n <= 0) { break; } o += static_cast<std::size_t>(n); } }
 	void settle() { io.restart(); io.run_for(150ms); }   // the loop runs what is ready, then idles out
 	// Waits until `n` bytes sit in the server socket's receive queue.
@@ -254,12 +252,13 @@ struct Read { std::string data; asio::error_code error; bool done = false; };
 // One read(output) of up to `max` bytes, driven on the pair's loop.
 static Read read_once(Pair& p, const std::shared_ptr<Input>& in, std::size_t max) {
 	Read r;
-	asio::co_spawn(p.io, [&, in]() -> asio::awaitable<void> {
+	auto reader = [&, in]() -> task::task<void> {
 		std::string buf(max, '\0');
-		try { std::size_t n = co_await in->read(asio::buffer(buf)); r.data.assign(buf, 0, n); }
-		catch (const asio::system_error& e) { r.error = e.code(); }
+		const http::detail::ReadResult got = co_await in->read(asio::buffer(buf), {});
+		if (got.error) { r.error = got.error; } else { r.data.assign(buf, 0, got.bytes); }
 		r.done = true;
-	}, asio::detached);
+	};
+	task::spawn(task::scheduler_ref::of(p.scheduler), reader());
 	p.io.restart();
 	for (auto end = clk::now() + 2s; !r.done && clk::now() < end;) { p.io.run_one_for(5ms); }
 	return r;
@@ -357,20 +356,20 @@ static void lazy_watch_tests() {
 		auto r = read_once(p, in, 100);
 		check(r.done && r.error == asio::error::eof, "[L] the EOF stays for the next read");
 	}
-	// Request: the first on_cancel(), cancelled() or cancel_reason() engages the watch, once.
+	// Request: the first cancel_token() engages the watch, once.
 	struct Probe : http::CancelWatch {
 		http::Request* request = nullptr;
 		bool gone = false;
 		int engaged = 0;
-		void engage() noexcept override { ++engaged; if (gone) { request->cancel(http::CancelReason::Disconnect); } }
+		void engage() noexcept override { ++engaged; if (gone) { request->cancel(http::disconnected); } }
 	};
 	{
 		http::Request r;
 		Probe w; w.request = &r;
 		r.set_cancel_watch(&w);
 		check(w.engaged == 0, "[L] setting the watch engages nothing");
-		check(!r.cancelled() && w.engaged == 1, "[L] cancelled() engages the watch");
-		(void)r.cancelled(); (void)r.cancel_reason(); r.on_cancel([](http::CancelReason) {});
+		check(!r.cancel_token().requested() && w.engaged == 1, "[L] cancel_token() engages the watch");
+		(void)r.cancel_token(); (void)r.cancel_token();
 		check(w.engaged == 1, "[L] once");
 	}
 	for (int how = 0; how < 3; ++how) {
@@ -379,26 +378,26 @@ static void lazy_watch_tests() {
 		r.set_cancel_watch(&w);
 		int calls = 0;
 		bool seen = false;
-		if (how == 0) { seen = r.cancelled(); }
-		if (how == 1) { seen = r.cancel_reason() == http::CancelReason::Disconnect; }
-		if (how == 2) { r.on_cancel([&](http::CancelReason why) { ++calls; seen = why == http::CancelReason::Disconnect; }); }
+		if (how == 0) { seen = r.cancel_token().requested(); }
+		if (how == 1) { seen = r.cancel_token().reason() == http::disconnected; }
+		if (how == 2) { task::cancel_callback cb(r.cancel_token(), [&](task::cancel_reason why) { ++calls; seen = why == http::disconnected; }); }
 		check(seen && w.engaged == 1 && calls == (how == 2 ? 1 : 0),
-			std::string("[L] a hang-up engage() finds is seen by the call that engaged it: ") + (how == 0 ? "cancelled()" : how == 1 ? "cancel_reason()" : "on_cancel() runs the callback once"));
+			std::string("[L] a hang-up engage() finds is seen by the token that engaged it: ") + (how == 0 ? "requested()" : how == 1 ? "reason()" : "a callback on it runs once"));
 	}
 	{
 		http::Request r;
 		Probe w; w.request = &r;
 		r.set_cancel_watch(&w);
-		r.cancel(http::CancelReason::Shutdown);
-		check(r.cancelled() && w.engaged == 0, "[L] a request already cancelled engages nothing");
+		r.cancel(task::cancel_reason::shutdown);
+		check(r.cancel_token().requested() && w.engaged == 0, "[L] a request already cancelled engages nothing");
 		http::Request q;
 		q.set_cancel_watch(&w);
 		q.clear();
-		(void)q.cancelled();
+		(void)q.cancel_token();
 		check(w.engaged == 0, "[L] clear() drops the watch");
 		q.set_cancel_watch(&w);
 		q.set_cancel_watch(nullptr);
-		(void)q.cancelled();
+		(void)q.cancel_token();
 		check(w.engaged == 0, "[L] and so does set_cancel_watch(nullptr)");
 	}
 }
@@ -579,7 +578,7 @@ struct Server {
 	App app;
 	unsigned short port = free_port();
 	http::HttpAsioService svc;
-	explicit Server(std::size_t in_flight = 64) : svc(app, 1, in_flight) {}
+	explicit Server(std::size_t in_flight = 64) : svc(app, 1, in_flight) { app.service = &svc; }
 	void start() { svc.start(port); Conn probe(port, 1); }
 	std::size_t inflight() { return static_cast<std::size_t>(svc.reactor(0).gate().inflight.load()); }
 };
@@ -683,7 +682,7 @@ int main() {
 		auto r1 = h.c.read_response();
 		until([&] { return o2->started.load(); });
 		until([&] { return o2->reason.load() != -1; }, 1000);
-		check(o2->reason == static_cast<int>(http::CancelReason::Disconnect), "[D] the pipelined request's own watch sees the half-close");
+		check(o2->reason == static_cast<int>(http::disconnected), "[D] the pipelined request's own watch sees the half-close");
 		o2->release = true;
 		auto r2 = h.c.read_response();
 		check(r1.body == "held" && r2.status == 200 && r2.body == "held", "[D] both are answered, the half-closed client included");
@@ -694,7 +693,7 @@ int main() {
 		Held h(s, "d3");
 		h.c.shut_wr();
 		until([&] { return h.o->reason.load() != -1; }, 1000);
-		check(h.o->reason == static_cast<int>(http::CancelReason::Disconnect), "[D] a half-close with nothing pipelined cancels the request in flight");
+		check(h.o->reason == static_cast<int>(http::disconnected), "[D] a half-close with nothing pipelined cancels the request in flight");
 		h.o->release = true;
 		check(h.c.read_response().body == "held", "[D] and its response is still written");
 	}
@@ -826,7 +825,7 @@ int main() {
 
 	// [Q] The watch starts when the handler first asks about cancellation, and the first question
 	// sees what happened before it: a hang-up is a disconnect (polled or by callback, which runs
-	// inside on_cancel), pipelined input ends the watch, and a handler that never asks still has
+	// as it is registered), pipelined input ends the watch, and a handler that never asks still has
 	// the requests pipelined behind it answered in order.
 	{
 		Server s;
@@ -841,8 +840,8 @@ int main() {
 			std::this_thread::sleep_for(30ms);
 			o->release = true;
 			until([&] { return o->finished.load(); });
-			check(o->reason == static_cast<int>(http::CancelReason::Disconnect), "[Q] " + ask + ": a half-close before the first question is a disconnect at that question");
-			if (ask == "cb") { check(o->at_once.load(), "[Q] cb: and the callback ran inside on_cancel()"); }
+			check(o->reason == static_cast<int>(http::disconnected), "[Q] " + ask + ": a half-close before the first question is a disconnect at that question");
+			if (ask == "cb") { check(o->at_once.load(), "[Q] cb: and the callback ran as it was registered"); }
 			check(c.read_response().body == "lazy" && c.ends_silently(), "[Q] " + ask + ": the response is still written, then the connection closes");
 		}
 		{

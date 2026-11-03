@@ -35,7 +35,7 @@ struct App : HttpHandler {
 	std::condition_variable ready;
 	std::deque<Pending> pending;
 	std::atomic<unsigned> fast = 0;
-	asio::awaitable<void> handle(Request &request, ResponseWriter &writer) override {
+	task::task<void> handle(Request &request, ResponseWriter &writer) override {
 		if (request.path == "/fast") {
 			++fast;
 			writer.send(200, "sync");

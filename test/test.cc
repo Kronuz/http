@@ -6,7 +6,6 @@
  * exercise what http:: adds on top. Run via ctest (http_test).
  */
 
-#include <asio.hpp>
 
 #include "http_accept.h"
 #include "http_conditional.h"
@@ -52,13 +51,10 @@ struct RecordingWriter : http::ResponseWriter {
 	void set_close() override { closed_ = true; }
 };
 
-// Runs a coroutine to completion on a private loop.
-static void drive(asio::awaitable<void> task) {
-	asio::io_context io;
-	std::exception_ptr failure;
-	asio::co_spawn(io, std::move(task), [&](std::exception_ptr e) { failure = e; });
-	io.run();
-	if (failure) { std::rethrow_exception(failure); }
+// Runs a task to completion on a private scheduler.
+static void drive(task::task<void> work) {
+	task::inline_scheduler scheduler;
+	task::run(scheduler, std::move(work));
 }
 
 static RecordingWriter run(http::HttpHandler& h, const std::string& method, const std::string& target) {
@@ -74,7 +70,7 @@ static RecordingWriter run(http::HttpHandler& h, const std::string& method, cons
 
 static http::Router::Route mark(const char* id, std::vector<std::string> names = {}) {
 	std::string sid = id;
-	return [sid, names](http::Request&, http::ResponseWriter& resp, const http::Params& p) -> asio::awaitable<void> {
+	return [sid, names](http::Request&, http::ResponseWriter& resp, const http::Params& p) -> task::task<void> {
 		std::string body = "id=" + sid;
 		for (const auto& n : names) {
 			body += " ";
@@ -96,7 +92,7 @@ int main() {
 	r.route("POST", "/items", mark("create"));
 	r.route("PUT", "/items/:id", mark("update", {"id"}));
 	// a streamed response: status + several writes + end
-	r.route("GET", "/multi", [](http::Request&, http::ResponseWriter& resp, const http::Params&) -> asio::awaitable<void> {
+	r.route("GET", "/multi", [](http::Request&, http::ResponseWriter& resp, const http::Params&) -> task::task<void> {
 		resp.status(200);
 		resp.write("a");
 		resp.write("b");
@@ -232,7 +228,7 @@ int main() {
 				s->note = "seen " + req.method + " " + req.path;
 				return s;
 			}
-			asio::awaitable<void> handle(http::Request& req, http::ResponseWriter& resp) override {
+			task::task<void> handle(http::Request& req, http::ResponseWriter& resp) override {
 				auto& st = req.ext<MyState>();   // the same object create_extension built
 				st.hits += 1;
 				resp.send(200, st.note + " x" + std::to_string(st.hits));

@@ -28,7 +28,7 @@ struct App final : HttpHandler {
 	std::mutex mutex;
 	std::condition_variable ready;
 	std::optional<Pending> pending;
-	asio::awaitable<void> handle(Request &request, ResponseWriter &writer) override {
+	task::task<void> handle(Request &request, ResponseWriter &writer) override {
 		if (request.path == "/fast") {
 			writer.send(200, "fast");
 			co_return;

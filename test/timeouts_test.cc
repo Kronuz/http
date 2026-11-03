@@ -29,7 +29,7 @@ static void check(bool ok, const char* what) {
 }
 
 struct Echo : http::HttpHandler {
-	asio::awaitable<void> handle(http::Request& req, http::ResponseWriter& w) override {
+	task::task<void> handle(http::Request& req, http::ResponseWriter& w) override {
 		if (req.path == "/big") { w.send(200, std::string(std::stoul(req.query.substr(2)), 'x')); co_return; }   // query "n=<bytes>"
 		w.send(200, std::to_string(req.body.size()));
 		co_return;
