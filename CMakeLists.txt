@@ -57,7 +57,7 @@ endif()
 # --- task: the coroutine type of handlers, connections and sessions, and their cancellation ---
 # Header-only; its asio binding finds the ASIO_INCLUDE_DIR set above and fetches no second Asio. Declared before
 # reactor, so this pin is the one reactor builds against too. Set FETCHCONTENT_SOURCE_DIR_TASK for a local checkout.
-FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG d3d94f31e62688bcdd51f8110ee08ed74f53fc81)
+FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG 6558c2e9c533ebb0fa1177f22edd4fff528f6efa)
 FetchContent_MakeAvailable(task)
 
 # --- reactor: the generic Asio server runtime (shared reactor pool + accept + shutdown) ---
