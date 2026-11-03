@@ -40,6 +40,8 @@
 - Last verified: nothing built or run (design only); every file:line in both designs read at the
   commits their headers name.
 
+- Lead ruling (2026-11-02, from Detent W2 D15): `HttpAsioService` exposes task's four teardown phases as separate calls (`stop()`, `close()`, `destroy_roots()`, then destruction, the destructor running any phase not yet run), forwarding reactor's `TcpServer` calls of step R, so an application runs each phase across http's reactors and its own schedulers together. H1 carries it with a test and a mutant.
+
 ## Log
 - 2026-11-02: worktree and branch created from http `origin/main` 679c0f8; design draft revision 1
   and this ledger written.
