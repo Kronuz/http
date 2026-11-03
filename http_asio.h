@@ -874,7 +874,7 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 				request.set_scheduler(&scheduler);
 				reactor->lag().note_activity();
 				bool keep_alive = request.keep_alive;
-				auto stream = std::make_shared<BodyStream>(ex, /*capacity=*/8);
+				auto stream = std::make_shared<BodyStream>(scheduler, /*capacity=*/8);
 				request.body_stream = stream;
 				AsioResponseWriter writer(request, options, &ex, reactor);
 				RequestAbort<Stream> tracked(*reactor, request, socket);

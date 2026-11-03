@@ -106,6 +106,9 @@ struct Conn {
 static std::string get(const std::string& path, const std::string& extra = "") {
 	return "GET " + path + " HTTP/1.1\r\nHost: x\r\n" + extra + "\r\n";
 }
+static std::string post(const std::string& path, const std::string& body, const std::string& extra = "") {
+	return "POST " + path + " HTTP/1.1\r\nHost: x\r\nContent-Length: " + std::to_string(body.size()) + "\r\n" + extra + "\r\n" + body;
+}
 static Resp one(unsigned short port, const std::string& request) {
 	Conn c(port);
 	c.send(request);
@@ -166,7 +169,7 @@ struct App : http::HttpHandler {
 		return query.substr(p, query.find('&', p) - p);
 	}
 	static task::task<bool> sleep_for(const http::Request& req, std::chrono::milliseconds d) { return ::sleep_for(req.scheduler().executor(), d); }
-	bool wants_body_stream(const http::Request& r) override { return r.path == "/stream" || r.path == "/tbody" || r.path == "/throwcb-stream"; }
+	bool wants_body_stream(const http::Request& r) override { return r.path == "/stream" || r.path == "/tbody" || r.path == "/throwcb-stream" || r.path.rfind("/affine-read", 0) == 0; }
 	std::unique_ptr<http::BodySink> on_request_body(http::Request& r) override {
 		struct Null : http::BodySink { std::size_t n = 0; void write(std::string_view c) override { n += c.size(); } void end() override {} };
 		return r.path == "/sink" ? std::make_unique<Null>() : nullptr;
@@ -196,7 +199,7 @@ struct App : http::HttpHandler {
 			std::size_t total = 0;
 			std::string chunk;
 			for (;;) {
-				asio::error_code ec = co_await read_chunk(*req.body_stream, chunk);
+				asio::error_code ec = co_await req.body_stream->read(chunk);
 				if (ec == asio::error::eof) { break; }
 				if (ec) { w.send(400, "failed: " + ec.message()); co_return; }
 				total += chunk.size();
@@ -208,7 +211,7 @@ struct App : http::HttpHandler {
 			auto o = get_obs(id);
 			std::string chunk;
 			for (;;) {
-				asio::error_code ec = co_await read_chunk(*req.body_stream, chunk);
+				asio::error_code ec = co_await req.body_stream->read(chunk);
 				if (!ec) { continue; }
 				o->cancelled_at_end = req.cancel_token().requested();
 				o->end_kind = ec == asio::error::eof ? 1 : ec == asio::error::operation_aborted ? 2 : 3;
@@ -393,6 +396,14 @@ struct App : http::HttpHandler {
 			w.send(200, "away");
 			co_return;
 		}
+		if (req.path == "/affine-read" || req.path == "/affine-read-child") {   // T4 (h): a body read away from the loop asserts; a child that came home reads
+			if (req.path == "/affine-read") { co_await task::schedule_on{task::scheduler_ref::of(*away)}; }
+			else { co_await [](task::asio_scheduler& other) -> task::task<void> { co_await task::schedule_on{task::scheduler_ref::of(other)}; }(*away); }
+			std::string chunk;
+			const asio::error_code ec = co_await req.body_stream->read(chunk);
+			w.send(200, ec ? "failed" : chunk);
+			co_return;
+		}
 		if (req.path == "/affine-thread") {   // T4 (h): a raw thread (no task, not the loop) touches the writer: Debug asserts
 			std::thread([&w] { w.set_header("X-Thread", "1"); }).join();
 			w.send(200, "thread");
@@ -420,7 +431,7 @@ static void body_stream_tests() {
 	};
 	using Ec = asio::error_code;
 	{   // order, then a sticky eof
-		http::BodyStream s(io.get_executor(), 4);
+		http::BodyStream s(scheduler, 4);
 		std::vector<std::string> got; Ec last, again;
 		run([&]() -> task::task<void> {
 			auto producer = [&]() -> task::task<void> {
@@ -429,29 +440,29 @@ static void body_stream_tests() {
 			task::spawn(on_loop, producer());
 			std::string c;
 			for (;;) {
-				Ec ec = co_await read_chunk(s, c);
+				Ec ec = co_await s.read(c);
 				if (ec) { last = ec; break; }
 				got.push_back(c);
 			}
-			again = co_await read_chunk(s, c);
+			again = co_await s.read(c);
 		}());
 		check(got == std::vector<std::string>({"a", "b", "c"}), "[B] chunks arrive in order");
 		check(last == asio::error::eof && again == asio::error::eof, "[B] the end is eof, and it is sticky");
 	}
 	{   // fail(): buffered chunks first, then the error
-		http::BodyStream s(io.get_executor(), 4);
+		http::BodyStream s(scheduler, 4);
 		std::string first; Ec e1, e2;
 		run([&]() -> task::task<void> {
 			co_await s.push("kept", {});
 			s.fail(asio::error::connection_reset);
 			std::string c;
-			e1 = co_await read_chunk(s, c); first = c;
-			e2 = co_await read_chunk(s, c);
+			e1 = co_await s.read(c); first = c;
+			e2 = co_await s.read(c);
 		}());
 		check(!e1 && first == "kept" && e2 == asio::error::connection_reset, "[B] a failed body delivers what was buffered, then the error");
 	}
 	{   // bounded: a push waits while the channel is full, and abandon() releases it
-		http::BodyStream s(io.get_executor(), 2);
+		http::BodyStream s(scheduler, 2);
 		int pushed = 0; bool third = true;
 		run([&]() -> task::task<void> {
 			auto producer = [&]() -> task::task<void> {
@@ -468,7 +479,7 @@ static void body_stream_tests() {
 		check(pushed == 2 && !third, "[B] the channel is bounded (flow control), and abandon() releases a waiting push");
 	}
 	{   // a push waiting for room ends when its token is requested
-		http::BodyStream s(io.get_executor(), 1);
+		http::BodyStream s(scheduler, 1);
 		task::cancel_source stop;
 		bool second = true;
 		run([&]() -> task::task<void> {
@@ -483,27 +494,36 @@ static void body_stream_tests() {
 		}());
 		check(!second, "[B] a requested token ends a waiting push with false");
 	}
-	{   // a plain-lambda handler (what task::await_asio supplies) and cancellation
-		http::BodyStream s(io.get_executor(), 2);
-		Ec ec1 = asio::error::would_block, ec2 = asio::error::would_block;
-		std::string chunk1, chunk2;
-		s.async_read(chunk1, [&](Ec e) { ec1 = e; });
-		io.restart(); io.poll();
-		check(ec1 == asio::error::would_block, "[B] a read with nothing buffered stays pending");
-		run([&]() -> task::task<void> { co_await s.push("x", {}); }());
-		io.restart(); io.run();
-		check(!ec1 && chunk1 == "x", "[B] a plain-lambda completion token works");
-		asio::cancellation_signal cancel;
-		s.async_read(chunk2, asio::bind_cancellation_slot(cancel.slot(), [&](Ec e) { ec2 = e; }));
-		io.restart(); io.poll();
-		cancel.emit(asio::cancellation_type::all);
-		io.restart(); io.run();
-		check(ec2 == asio::error::operation_aborted, "[B] a pending read is cancellable");
-		run([&]() -> task::task<void> { co_await s.push("kept", {}); }());
-		Ec ec3; std::string chunk3;
-		s.async_read(chunk3, [&](Ec e) { ec3 = e; });
-		io.restart(); io.run();
-		check(!ec3 && chunk3 == "kept", "[B] a cancelled read loses nothing");
+	{   // a read's token: a requested token ends a pending read, loses nothing, and the next read goes on
+		http::BodyStream s(scheduler, 2);
+		Ec pending = asio::error::would_block, before = asio::error::would_block, after;
+		std::string kept, after_chunk;
+		task::cancel_source early;
+		early.request();
+		run([&]() -> task::task<void> {
+			before = co_await s.read(kept, early.token());   // requested before it starts: never receives
+			task::cancel_source stop;
+			auto canceller = [&]() -> task::task<void> { co_await wait(20ms); stop.request(); };
+			task::spawn(on_loop, canceller());
+			std::string c;
+			pending = co_await s.read(c, stop.token());
+			co_await s.push("kept", {});
+			after = co_await s.read(after_chunk);
+		}());
+		check(before == asio::error::operation_aborted && kept.empty(), "[B] a read whose token was already requested returns operation_aborted at once");
+		check(pending == asio::error::operation_aborted, "[B] a pending read ends with operation_aborted when its token is requested");
+		check(!after && after_chunk == "kept", "[B] a cancelled read loses nothing; the next read gets the chunk");
+	}
+	{   // a deadline on a read: the handler's own bound
+		http::BodyStream s(scheduler, 2);
+		Ec ec; bool expired = false;
+		run([&]() -> task::task<void> {
+			task::deadline<task::asio_scheduler> d(scheduler, std::chrono::steady_clock::now() + 30ms);
+			std::string c;
+			ec = co_await s.read(c, d.token());
+			expired = d.expired();
+		}());
+		check(ec == asio::error::operation_aborted && expired, "[B] a task::deadline bounds a read");
 	}
 	{   // Request::cancel_token: a late callback runs at once, and only the first cancel counts
 		http::Request r;
@@ -520,7 +540,8 @@ static void body_stream_tests() {
 
 // T4 (h), Debug: a handler body that moved to another scheduler and then writes fails the writer's
 // affinity assertion. Runs in a child forked before any thread exists; true when it held.
-static bool affinity_death_test(const char* path) {
+static bool affinity_death_test(const std::string& request) {
+	std::fflush(stdout);   // the child must not repeat what the parent buffered
 	const pid_t child = ::fork();
 	if (child == 0) {
 		App app;
@@ -533,7 +554,7 @@ static bool affinity_death_test(const char* path) {
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
 		svc.start(port); wait_listen(port);
-		auto r = one(port, get(path, "Connection: close\r\n"));
+		auto r = one(port, request);
 		std::fflush(stdout);
 		::_exit(r.status == 200 ? 0 : 3);   // NDEBUG: the assertion is compiled out and the reply arrives
 	}
@@ -548,8 +569,9 @@ static bool affinity_death_test(const char* path) {
 
 int main() {
 	std::printf("== coroutine handler tests ==\n");
-	check(affinity_death_test("/affine-body"), "[T] (h) a handler body that moved away and then writes fails the writer's affinity check (Debug)");
-	check(affinity_death_test("/affine-thread"), "[T] (h) a raw thread (no task, off the loop) that writes fails the writer's affinity check (Debug)");
+	check(affinity_death_test(get("/affine-body", "Connection: close\r\n")), "[T] (h) a handler body that moved away and then writes fails the writer's affinity check (Debug)");
+	check(affinity_death_test(get("/affine-thread", "Connection: close\r\n")), "[T] (h) a raw thread (no task, off the loop) that writes fails the writer's affinity check (Debug)");
+	check(affinity_death_test(post("/affine-read", "abc", "Connection: close\r\n")), "[T] (h) a handler body that moved away and then reads its BodyStream fails the read's affinity check (Debug)");
 	App app;
 
 	// [A] A coroutine handler that waits suspends; the loop serves others. One reactor.
@@ -1054,6 +1076,8 @@ int main() {
 			svc.start(port); wait_listen(port);
 			auto r = one(port, get("/affine-child", "Connection: close\r\n"));
 			check(r.status == 200 && r.body == "home", "[T] (h) a child that schedule_on()s away comes home: the writer passes its check");
+			auto rr = one(port, post("/affine-read-child", "abc", "Connection: close\r\n"));
+			check(rr.status == 200 && rr.body == "abc", "[T] (h) a child that schedule_on()s away comes home: the body read passes its check");
 		}
 		guard.reset();
 		other_io.stop();

@@ -15,7 +15,3 @@ inline task::task<bool> sleep_for(asio::any_io_executor loop, std::chrono::stead
 	co_return !error;
 }
 
-// Reads the next chunk of a streamed body (BodyStream::async_read) from a task.
-inline task::task<asio::error_code> read_chunk(http::BodyStream& body, std::string& chunk) {
-	co_return co_await task::await_asio<void(asio::error_code)>([&](auto h) { body.async_read(chunk, std::move(h)); });
-}

@@ -39,7 +39,7 @@ struct Echo : http::HttpHandler {
 		if (req.path == "/stream") {
 			std::string chunk;
 			asio::error_code ec;
-			while (!(ec = co_await read_chunk(*req.body_stream, chunk))) {}
+			while (!(ec = co_await req.body_stream->read(chunk))) {}
 			stream_end = ec.value();
 			w.send(200, "streamed");
 			co_return;

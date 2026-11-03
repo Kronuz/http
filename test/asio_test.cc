@@ -116,7 +116,7 @@ struct ConcurrentStreamApp : http::HttpHandler {
 			std::string chunk;
 			auto ex = req.scheduler().executor();
 			for (;;) {
-				asio::error_code ec = co_await read_chunk(*req.body_stream, chunk);
+				asio::error_code ec = co_await req.body_stream->read(chunk);
 				{ std::lock_guard<std::mutex> lk(mutex); threads.insert(std::this_thread::get_id()); }
 				if (!reactor::inside_run()) { all_inside_run = false; }
 				if (ec == asio::error::eof) { break; }
@@ -128,7 +128,7 @@ struct ConcurrentStreamApp : http::HttpHandler {
 			// Over-read past the end: must complete with eof immediately, never wait (a parser
 			// that flushes a trailing item then loops does exactly this).
 			std::string extra;
-			asio::error_code again = co_await read_chunk(*req.body_stream, extra);
+			asio::error_code again = co_await req.body_stream->read(extra);
 			bool empty_body = req.body.empty();
 			resp.send(200, std::to_string(total) + " " + std::to_string(sum) +
 				(empty_body ? " empty" : " buffered") + (again == asio::error::eof ? " end\n" : " overread\n"));
@@ -517,7 +517,7 @@ int main() {
 	}
 	// [L] Shutdown while a stream is mid-flight must not hang: a client sends headers +
 	// a partial body (less than Content-Length) and holds; stop() cancels the body read,
-	// so the handler waiting in async_read() sees an error and completes.
+	// so the handler waiting in read() sees an error and completes.
 	{
 		unsigned short port = free_port();
 		ConcurrentStreamApp capp;

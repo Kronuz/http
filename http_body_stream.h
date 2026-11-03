@@ -22,13 +22,13 @@
 
 // BodyStream: a request body read with co_await on the connection's loop. When a handler
 // opts in (HttpHandler::wants_body_stream), the connection feeds the body into a bounded
-// channel as it arrives and the handler reads it with async_read(), so a multi-gigabyte
-// RESTORE or bulk load runs in O(capacity * chunk) memory and back-pressure reaches the
-// socket: when the channel is full the connection stops reading.
+// channel as it arrives and the handler reads it with read(), so a multi-gigabyte RESTORE or
+// bulk load runs in O(capacity * chunk) memory and back-pressure reaches the socket: when the
+// channel is full the connection stops reading.
 //
-// async_read() is an ordinary Asio operation; a task::task handler awaits it with
 //     std::string chunk;
-//     auto ec = co_await task::await_asio<void(asio::error_code)>([&](auto h) { body.async_read(chunk, std::move(h)); });
+//     while (!(ec = co_await request.body_stream->read(chunk))) { use(chunk); }
+//
 // Everything runs on the connection's loop; a BodyStream is not thread-safe.
 
 #pragma once
@@ -38,6 +38,7 @@
 
 #include "task_asio.hh"
 
+#include <cassert>
 #include <cstddef>
 #include <string>
 #include <utility>
@@ -46,22 +47,31 @@ namespace http {
 
 class BodyStream {
 public:
-	BodyStream(asio::any_io_executor executor, std::size_t capacity)
-		: channel_(std::move(executor), capacity != 0 ? capacity : 1) {}
+	BodyStream(task::asio_scheduler& scheduler, std::size_t capacity)
+		: scheduler_(scheduler), channel_(scheduler.executor(), capacity != 0 ? capacity : 1) {}
 	BodyStream(const BodyStream&) = delete;
 	BodyStream& operator=(const BodyStream&) = delete;
 
-	// Reads the next chunk into `chunk`. Completes with:
+	// Reads the next chunk into `chunk`. Returns:
 	//   no error                the chunk holds body bytes (never empty);
 	//   asio::error::eof        the body ended; `chunk` is empty; the result is sticky;
-	//   any other error         the body failed (the client closed mid-body, the service
-	//                           is stopping, the handler read after it was abandoned).
-	// Chunks already buffered are delivered before the end or the error. Cancelling the
-	// operation completes it with operation_aborted and loses nothing.
-	template <typename CompletionToken>
-	auto async_read(std::string& chunk, CompletionToken&& token) {
-		return asio::async_compose<CompletionToken, void(asio::error_code)>(
-			ReadOp{this, &chunk}, token, channel_.get_executor());
+	//   operation_aborted       `token` was requested; nothing is lost, the next read goes on;
+	//   any other error         the body failed (the client closed mid-body, the service is
+	//                           stopping, the handler read after it was abandoned).
+	// Chunks already buffered are delivered before the end or the error. `token` is the
+	// handler's own (a deadline, its source); the transport fails the body on a disconnect
+	// or shutdown without one.
+	task::task<asio::error_code> read(std::string& chunk, task::cancel_token token = {}) {
+		affine();
+		auto [error, got] = co_await task::await_asio<void(asio::error_code, std::string)>(
+			[this](auto handler) { channel_.async_receive(std::move(handler)); }, std::move(token));
+		chunk.clear();
+		if (error == asio::experimental::error::channel_closed) {
+			co_return error_ ? error_ : asio::error_code(asio::error::eof);
+		}
+		if (error == asio::experimental::error::channel_cancelled) { co_return asio::error::operation_aborted; }
+		if (!error) { chunk = std::move(got); }
+		co_return error;
 	}
 
 	// ---- the transport's side ----
@@ -96,31 +106,13 @@ private:
 		closed_ = true;
 		channel_.close();
 	}
+	// Debug: read on the stream's loop, by a task running there or a raw handler on it
+	// (the rule AsioResponseWriter follows).
+	void affine() const noexcept {
+		assert(task::current() == task::scheduler_ref::of(scheduler_) || (!task::current() && scheduler_.runs_here()));
+	}
 
-	struct ReadOp {
-		BodyStream* stream;
-		std::string* out;
-		bool started = false;
-		template <typename Self>
-		void operator()(Self& self, asio::error_code error = {}, std::string chunk = {}) {
-			if (!started) {
-				started = true;
-				stream->channel_.async_receive(std::move(self));
-				return;
-			}
-			if (error == asio::experimental::error::channel_closed) {
-				out->clear();
-				error = stream->error_ ? stream->error_ : asio::error::eof;
-			} else if (error) {
-				out->clear();
-				if (error == asio::experimental::error::channel_cancelled) { error = asio::error::operation_aborted; }
-			} else {
-				*out = std::move(chunk);
-			}
-			self.complete(error);
-		}
-	};
-
+	task::asio_scheduler& scheduler_;
 	Channel channel_;
 	asio::error_code error_;
 	bool closed_ = false;
