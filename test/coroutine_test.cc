@@ -314,6 +314,13 @@ struct App : http::HttpHandler {
 				(limit.expired() && error && since_ms(t0) < 5000 ? "deadline" : "no-deadline"));
 			co_return;
 		}
+		if (req.path == "/ignore") {   // T4 (d): a handler with no token, suspended on a long timer: only the phases end it
+			auto o = get_obs(id);
+			o->started = true;
+			co_await sleep_for(req, 1h);
+			w.send(200, "never");
+			co_return;
+		}
 		if (req.path == "/cb-write") {   // T4 (h): the writer touched from a cancel callback on the loop thread (no current task)
 			auto o = get_obs(id);
 			task::event wake;
@@ -965,6 +972,28 @@ int main() {
 		}
 		svc->close();
 		svc->destroy_roots();
+	}
+	{   // (d) a handler that ignores cancellation: stop() returns within the grace, the phases leave no frame
+		const auto baseline = task::detail::live_frames();
+		{
+			unsigned short port = free_port();
+			auto svc = std::make_unique<http::HttpAsioService>(app, 1, 64);
+			app.service = svc.get();
+			svc->set_shutdown_grace(200ms);
+			svc->start(port); wait_listen(port);
+			Conn c(port);
+			c.send(get("/ignore?id=d-ignore"));
+			check(until([&] { return app.get_obs("d-ignore")->started.load(); }), "[T] (d) the handler that ignores cancellation is suspended");
+			std::this_thread::sleep_for(20ms);
+			const auto t0 = clk::now();
+			svc->stop();
+			const double took = since_ms(t0);
+			std::printf("  [T] (d) stop() with a handler that ignores cancellation (grace 200 ms) -> %.0f ms\n", took);
+			check(took < 2 * 200 + 100, "[T] (d) stop() returns within twice the grace plus 100 ms");
+			svc->close();
+			svc->destroy_roots();
+		}
+		check(task::detail::live_frames() == baseline, "[T] (d) no task frame outlives the service after an ignored cancellation (" + std::to_string(task::detail::live_frames() - baseline) + " left)");
 	}
 	{   // (e) task::cancelled after the request's cancellation is 503 + close; from the handler's own source, 500
 		unsigned short port = free_port();

@@ -4,8 +4,8 @@
 
 - Design: `docs/design/task-handlers.md` revision 2 (branch `design/task-handlers`, http:694fb47), D1-D5, D7-D11, the gate rows, step 4; reviews `docs/reviews/task-handlers-rev2-design.md` (APPROVE WITH CONDITIONS: H1 may start against task C2 and R's interfaces), `docs/reviews/task-handlers-design.md`; the ledger `docs/status/task-handlers.md` (K1-K10; the lead's ruling on the four teardown phases).
 - Branch / worktree: `phase/task-h1` at `~/code/Kronuz/http-wt/task-h1`, from `origin/phase/task-handlers-s1` (http:03467b1, S1's counting and S2's pin).
-- Pins: task main task:6558c2e (C3, the B1 pin; `CMakeLists.txt:60`, the one `FetchContent_Declare(task ...)` line, declared before reactor so reactor builds against it too), reactor `phase/task-sessions` reactor:4f5a0b5 (step R; its fix round, with bounded `stop()` and the phase chaining, moves the pin when it lands).
-- State: fix round for the code review (CR2, CR3, CR4 done; CR1 waits on reactor's fix round)
+- Pins: task main task:6558c2e (C3, the B1 pin; `CMakeLists.txt:60`, the one `FetchContent_Declare(task ...)` line, declared before reactor so reactor builds against it too), reactor main reactor:2fd30c8 (step R after its fix round: bounded `stop()`, each phase running the earlier ones; `CMakeLists.txt:72`).
+- State: fix round for the code review done (CR1-CR4); CI in the Log; ready for the re-check
 
 ## Done criteria (from the design's H1 row and K1-K10 as they apply; tick only with evidence)
 
@@ -22,7 +22,7 @@
 - [x] K2 every ctest at the base passes, none removed: 12 base tests plus `handler_count`, 13/13 (Debug, macOS, task C3)
 - [x] K4 T4 (a)-(h) without the streamed cases, each failing with its decision mutated (above; (a) and (f) are `handler_count_test`, (b)-(h) and [X] are `coroutine_test`)
 - [x] K5 ASan+UBSan and TSan separate builds clean: macOS Homebrew LLVM 23 (`-stdlib++-isystem`, zlib headers copied out of the SDK) 13/13 each, 0 reports; Linux (lease) g++ 13 Debug ASan+UBSan and clang 18 TSan 13/13 each, 0 reports; CI linux-asan-ubsan and linux-tsan green
-- [x] K7 allocations and io handlers per request at most A (S1), counting build: see "Counts" (B1 on task C3, reactor 4f5a0b5; re-measure when R's fix round lands)
+- [x] K7 allocations and io handlers per request at most A (S1), counting build: see "Counts" (table below: B1 on task C3, reactor 4f5a0b5; rerun at reactor 2fd30c8 in the fix round: same B1 counts)
 - [x] K9 zero live task frames after the teardown phases: T4 (d) "no task frame outlives the service (0 left)", [X] "after destroy_roots() on both, no task frame is left (0)"
 - [x] K10 CI green on every job (run 41585840133 at http:f0f293b: linux gcc/clang/arm64, asan-ubsan, tsan, macOS arm64/x86_64, FreeBSD)
 - [x] Consumer break list (below)
@@ -76,7 +76,9 @@ Each consumer breaks when it moves its http pin to this branch; none moves in H1
 - CR2 (D9 on the loop thread): `AsioResponseWriter::affine()` (`http_asio.h:280`) also accepts no current task while `reactor_->on_loop()` holds, which covers a cancel callback that runs from a raw Asio handler (the watch completion, the reactor's abort walk). Tests: `coroutine_test` `/cb-write` + [T] (h), hang-up and `stop()` cases (a callback sets a header and wakes the handler; the 200 carries `X-Cancelled`); the death tests stay: `/affine-body` (a body moved to another scheduler) and the new `/affine-thread` (a raw thread, no task, off the loop). Mutants: M1 old assertion: abort (rc 134) in the new tests; M2 `!task::current()` without `on_loop()`: killed by the `/affine-thread` death test.
 - CR3: `bench_asio.cc` moved to `bench/` (CMake and AGENTS.md updated; the T1 grep is empty); `Request::scheduler()` (`http_message.h`, a forward-declared `task::asio_scheduler&`, set by the transport at `http_asio.h:874,984`, throws `std::logic_error` with no transport) replaces `this_loop(service)` in every handler (`test_loop.h` no longer has it). Test: `/scheduler` in `coroutine_test` (same scheduler as the reactor's, a timer and a `task::deadline` that ends a 30 s timer on it) and the detached-request throw. Mutants: M3 streamed path not setting it, M3b buffered path not setting it: killed (19 failures for M3b).
 - CR4: the consumer break list above is regrepped at the origin heads the review names.
-- CR1: waits on reactor.
+- CR1: the reactor pin moves to reactor:2fd30c8 (`CMakeLists.txt:72`); no http code changed for its API. Test: `coroutine_test` [T] (d) `/ignore` (a handler with no token on a 1 h timer, grace 200 ms): `stop()` returns in 419 ms (bound: 2 x grace + 100 ms), `close()` and `destroy_roots()` leave 0 live frames. Against the old pin reactor:4f5a0b5 (`REACTOR_INCLUDE_DIR` on a `git archive`), `coroutine_test` does not finish (rc 124 at 60 s, stopped in a `stop()` before it reaches (d)'s new case: the run's last line is the [H] chunked case). Probes (Linux lease, `.scratch/review-h1/run-review.sh`, all scenarios): `ignore` `stop()` 401 ms, 0 frames; `hop-b` 0 frames; `cbwrite`, `cbwrite-stop` and the other nine pass; suite 13/13; ASan+UBSan (g++ 13 Debug) and TSan (clang 18 Debug) both clean, 0 reports.
+- Counts rerun at reactor:2fd30c8 (macOS, R=2, 3 s per row, counting build, same procedure): B1 allocs/req http 3.00 / 3.00 / 3.00, httpr 5.00 / 5.02 / 5.49, httpt 4.00 / 4.00 / 4.00 at C=1 / 8 / 64; A (S1) 3.00 / 3.00 / 3.00, 7.00 / 7.23 / 8.29, 22.00 / 22.23 / 22.85; handlers/req equal (1.00, 2.00, 2.00). B1 <= A on every row; same as before the pin move.
+- CI at 5a2dd3a: every job green except macos-arm64, where `timeouts` failed "a slow but moving body completes" (a timing case; it passed on the same commit's x86_64 job, on the prior commit, and 13/13 locally after the pin move). Not attributed to this change; see the Log.
 
 ## Done
 - The port (http:3ed0010, 17de113, 74f931a, f82c6ba), the C3 pin (c5e0354), the D4/D7 tests (f0f293b), the counting build's frame treatment (0085e1b). See Log.
@@ -85,12 +87,11 @@ Each consumer breaks when it moves its http pin to this branch; none moves in H1
 - Nothing running; in review.
 
 ## Next
-1. Code review of this branch.
-2. When reactor's fix round lands (bounded `stop()`, each phase running the earlier ones, the +2 allocations per connection fixed): move the reactor pin, add T4 (d)'s handler that ignores cancellation (bounded by the grace), re-measure the counts.
-3. H2: the streamed path (D6); this branch carries only the minimum the buffered loop needs to compile.
+1. Re-check of CR1-CR4.
+2. H2: the streamed path (D6); this branch carries only the minimum the buffered loop needs to compile.
 
 ## Blocked on
-- CR1: reactor's fix round (bounded `stop()`, phases that run the earlier ones); the lead sends its landed main hash.
+- Nothing.
 
 ## Log
 - 2026-11-02: worktree and branch from http:03467b1; pins moved (task:d3d94f3, reactor:4f5a0b5); headers, tests, examples and the bench ported to task.
@@ -99,3 +100,4 @@ Each consumer breaks when it moves its http pin to this branch; none moves in H1
 ## Lead rulings (2026-11-03)
 - `examples/bench_asio.cc` (raw-Asio comparator) moves under `bench/` with the other measurement code, so K1 holds with no new exception.
 - A handler reaches its loop through the request: `Request` exposes the connection's reactor scheduler as `task::asio_scheduler& scheduler()` (its `executor()` gives the loop's executor for timers, sockets and `task::deadline`), replacing `co_await asio::this_coro::executor`. One way, explicit, and it is the scheduler D9's affinity rule already names. Lands in the H1 fix round, with a test.
+- 2026-11-03: code review fix round: CR2 (affine on the loop thread), CR3 (`bench_asio` under `bench/`, `Request::scheduler()`), CR4 (break list) at http:5a2dd3a; CR1 on reactor:2fd30c8 with T4 (d)'s ignoring handler. Suites and probes clean under ASan+UBSan and TSan; counts rerun.
