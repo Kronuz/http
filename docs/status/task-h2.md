@@ -47,7 +47,7 @@
 | timeouts | idle <= 410 ms for 400, header <= 310 ms for 300 | Linux ASan 400 / 300 ms; macOS ASan 402 / 302 ms |
 | admission | gate 0 on every path, next 20 admitted | every path 0, admitted; `stop()` 53 ms |
 | shutdown | 300 idle within 50 ms; stalled uploads 0 ms; stalled reply at the grace; 25 storm rounds, no frame outlives `stop()` | 300 idle 4 ms (TSan 7); stalled streamed 1 ms (macOS 0); never-reading client 406 ms for 400 (TSan 478, macOS 411); 25 rounds clean, 60/60 cancelled |
-| streamcancel | `read_err` 0 (see Design problems) | mid-body close: `read_err=1`, request cancelled, the probe's own check passes |
+| streamcancel | `read_err` 1 (lead ruling, Design problems 1) | mid-body close: `read_err=1`, request cancelled, the probe's own check passes |
 | deferred_stop | four modes clean | four modes clean |
 | cap | boundaries exact | every boundary but "CL = 2^64-1 -> 413", which fails at http:2bede1b too (the parser's, as L3's review recorded) |
 | cl | boundaries exact | as L3's review |
@@ -79,7 +79,7 @@ The case sends a byte every 100 ms against a 300 ms inactivity timeout, so it fa
 
 ## Design problems
 
-1. T3's `probe_streamcancel` row expects `read_err` 0. `read_err` 0 was L3-B1's symptom (a body cut mid-way read as complete); the design's own D1 requires a failed read (`connection_reset`) there, so the correct result is `read_err=1`, which the probe's own check accepts. The row should say 1.
+1. T3's `probe_streamcancel` row expects `read_err` 0. `read_err` 0 was L3-B1's symptom (a body cut mid-way read as complete); the design's own D1 requires a failed read (`connection_reset`) there, so the correct result is `read_err=1`, which the probe's own check accepts. Lead ruling (2026-11-03, on the code review's agreement): the row says 1.
 
 ## Done
 - `BodyStream::read` on task with D9 (http:30ac15c); the flake's test fix (http:0fc20b7); the `httpb` bench kind (http:1ad87d8); the lazy streamed watch, the [S] and handler-count tests, the docs and this ledger (Log).
@@ -88,6 +88,7 @@ The case sends a byte every 100 ms against a 300 ms inactivity timeout, so it fa
 - Nothing running.
 
 ## Next
+- Follow-ups from the code review (docs/reviews/task-h2-code-review.md): N1, a body that times out cancels the request as `disconnected`; N2, the unexplained `readahead_test` abort (keep output next time); N3, a docs line on early answers turning keep-alive off.
 1. Code review of `phase/task-h2`.
 2. Step M: the lead measures T6 and T7 (the `httpb` kind is ready).
 
@@ -99,3 +100,4 @@ The case sends a byte every 100 ms against a 300 ms inactivity timeout, so it fa
 - 2026-11-03: the flake's test fix (http:0fc20b7) and the `httpb` kind (http:1ad87d8). T3 on the old watch: Linux g++ ASan+UBSan and clang TSan, macOS ASan+UBSan and TSan, suite 13/13 each, every probe as the table, 0 reports. Mutants round 1 left D9-read, D6-stop, D6-link, D6-watch alive; tests added; round 2 killed all but D6-stop. Counts showed `httpb` B at 9 handlers against A's 8; handler tracking found the eager watch.
 - 2026-11-03: the lazy streamed watch, [S] cases and the streamed `handler_count` pair (http:d7e928f); docs (http:65f3359). Rounds 3 and 4 killed D6-stop, D6-watch, D6-lazy-always, D6-lazy-never; `none` passes. After the change: Linux g++ Debug 13/13; Linux ASan+UBSan (g++ 13) and TSan (clang 18) suite 13/13 and every T3 probe as the table (stalled reply 411 / 476 ms, 300 idle 4 / 7 ms), 0 reports; macOS Debug 13/13; `httpb` counts 7 handlers, 19 allocs. Round 4's `none` run of `handler_count` timed out once: a stale binary (round 3's last rebuild postdated the rsync'd fix's mtime, so the fixed test was not recompiled until a mutant touched `http_asio.h`); 190 later runs on the lease, 160 of them 4 at once, never hung.
 - 2026-11-03: pushed `phase/task-h2`; CI run 41603112360 at http:45ddd7a green on every job. Build dirs deleted (local and lease).
+- 2026-11-03: code review APPROVE TO LAND (http:2332971); landed on main.
