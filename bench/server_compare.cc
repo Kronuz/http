@@ -108,6 +108,20 @@ public:
 	}
 };
 
+// The same reply after reading a streamed request body to its end (the httpb kind, a POST).
+class StreamedApp : public http::HttpHandler {
+public:
+	bool wants_body_stream(const http::Request&) override { return true; }
+	task::task<void> handle(http::Request& request, http::ResponseWriter& response) override {
+		std::string chunk;
+		while (!co_await request.body_stream->read(chunk)) {}
+		response.status(200);
+		response.set_header("Content-Type", "text/plain");
+		response.write("Hello, World!\n");
+		response.end();
+	}
+};
+
 // The same reply through a Router route that suspends once on the reactor before it writes.
 static http::Router make_yield_router() {
 	http::Router router;
@@ -158,7 +172,9 @@ int main(int argc, char** argv) {
 	} else {
 		HelloApp hello;
 		http::Router yielding = make_yield_router();
-		http::HttpHandler& app = kind == "httpr" ? static_cast<http::HttpHandler&>(yielding) : hello;
+		StreamedApp streamed;
+		http::HttpHandler& app = kind == "httpr" ? static_cast<http::HttpHandler&>(yielding)
+			: kind == "httpb" ? static_cast<http::HttpHandler&>(streamed) : hello;
 		http::HttpAsioService service(app, reactors, /*in_flight_limit=*/0);
 		if (kind == "httpt") {
 			service.set_request_timeout(std::chrono::seconds(30));
