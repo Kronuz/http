@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -207,16 +208,25 @@ int main() {
 		put(fd, "GET /big?n=" + std::to_string(size) + " HTTP/1.1\r\nConnection: close\r\nHost: x\r\n\r\n");
 		std::string got;
 		char b[16384];
+		// Read k is due at t0 + k * 6 ms (absolute): an oversleep is caught up, not added, so 255 steps
+		// take at least 1.5 s however the runner schedules, and a 64 KiB slice (four reads) needs far less than the bound.
 		const auto t0 = clk::now();
-		for (;;) {
+		auto gap = 0ms;
+		auto last = t0;
+		for (int k = 1;; ++k) {
 			const ssize_t n = ::recv(fd, b, sizeof(b), 0);
 			if (n <= 0) { break; }
 			got.append(b, static_cast<std::size_t>(n));
-			std::this_thread::sleep_for(8ms);   // 256 or more reads: at least 2 s in all, four or more reads per 64 KiB slice
+			const auto now = clk::now();
+			gap = std::max(gap, std::chrono::duration_cast<std::chrono::milliseconds>(now - last));
+			last = now;
+			std::this_thread::sleep_until(t0 + k * 6ms);
 		}
 		const double s = std::chrono::duration<double>(clk::now() - t0).count();
-		check(got.size() > size && got.compare(got.size() - size, size, std::string(size, 'x')) == 0 && s > 1.0,
-			"a slow reader that keeps moving receives the whole reply, taking longer than the inactivity timeout");
+		std::printf("    %zu bytes in %.2f s, longest wait between reads %lld ms\n", got.size(), s, static_cast<long long>(gap.count()));
+		check(got.size() > size && got.compare(got.size() - size, size, std::string(size, 'x')) == 0,
+			"a slow reader that keeps moving receives the whole reply");
+		check(s > 1.0, "and its transfer takes longer than the inactivity timeout");
 		::close(fd);
 		mover.stop();
 	}
