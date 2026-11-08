@@ -1,0 +1,70 @@
+-- compressors: found system lz4 (/usr/local/lib/liblz4.dylib)
+-- compressors: found zstd via CMake config
+-- Configuring done (6.3s)
+-- Generating done (0.1s)
+-- Build files have been written to: /Users/kronuz/code/Kronuz/http-wt/l3-http/build-asan
+[  6%] Building CXX object CMakeFiles/http_owned_stream_test.dir/test/owned_stream_test.cc.o
+[  9%] Built target http_parser
+[ 21%] Built target compressors
+[ 24%] Building CXX object CMakeFiles/http_deferred_test.dir/test/deferred_test.cc.o
+[ 27%] Building CXX object CMakeFiles/kv_store.dir/examples/kv_store.cc.o
+[ 30%] Linking CXX executable http_deferred_test
+[ 33%] Linking CXX executable http_owned_stream_test
+[ 33%] Built target http_deferred_test
+[ 39%] Built target bench_asio
+[ 42%] Building CXX object CMakeFiles/bench_http.dir/examples/bench_http.cc.o
+[ 42%] Built target http_owned_stream_test
+[ 45%] Building CXX object CMakeFiles/http_owned_stream_asio_test.dir/test/owned_stream_asio_test.cc.o
+[ 48%] Linking CXX executable kv_store
+[ 48%] Built target kv_store
+[ 51%] Building CXX object CMakeFiles/coroutine_test.dir/test/coroutine_test.cc.o
+[ 54%] Linking CXX executable bench_http
+[ 54%] Built target bench_http
+[ 57%] Building CXX object CMakeFiles/request_parser_fuzz_replay.dir/fuzz/request_parser_fuzz.cc.o
+[ 60%] Linking CXX executable http_owned_stream_asio_test
+[ 60%] Built target http_owned_stream_asio_test
+[ 63%] Building CXX object CMakeFiles/http_test.dir/test/test.cc.o
+[ 66%] Linking CXX executable http_test
+[ 66%] Built target http_test
+[ 69%] Building CXX object CMakeFiles/deferred_asio_test.dir/test/deferred_asio_test.cc.o
+[ 72%] Linking CXX executable request_parser_fuzz_replay
+[ 75%] Built target request_parser_fuzz_replay
+[ 78%] Building CXX object CMakeFiles/lag_asio_test.dir/test/lag_asio_test.cc.o
+[ 81%] Linking CXX executable coroutine_test
+[ 81%] Built target coroutine_test
+[ 84%] Building CXX object CMakeFiles/asio_test.dir/test/asio_test.cc.o
+[ 87%] Linking CXX executable deferred_asio_test
+[ 87%] Built target deferred_asio_test
+[ 90%] Building CXX object CMakeFiles/timeouts_test.dir/test/timeouts_test.cc.o
+[ 93%] Linking CXX executable lag_asio_test
+[ 93%] Built target lag_asio_test
+[ 96%] Linking CXX executable asio_test
+[ 96%] Built target asio_test
+[100%] Linking CXX executable timeouts_test
+[100%] Built target timeouts_test
+Test project /Users/kronuz/code/Kronuz/http-wt/l3-http/build-asan
+      Start  1: owned_stream
+ 1/10 Test  #1: owned_stream .....................   Passed    0.33 sec
+      Start  2: owned_stream_asio
+ 2/10 Test  #2: owned_stream_asio ................   Passed    0.58 sec
+      Start  3: coroutine
+ 3/10 Test  #3: coroutine ........................   Passed    5.77 sec
+      Start  4: request_parser_fuzz_replay
+ 4/10 Test  #4: request_parser_fuzz_replay .......   Passed    0.29 sec
+      Start  5: deferred
+ 5/10 Test  #5: deferred .........................   Passed    0.34 sec
+      Start  6: http
+ 6/10 Test  #6: http .............................   Passed    0.28 sec
+      Start  7: deferred_asio
+ 7/10 Test  #7: deferred_asio ....................   Passed    0.79 sec
+      Start  8: lag_asio
+ 8/10 Test  #8: lag_asio .........................   Passed    2.86 sec
+      Start  9: asio
+ 9/10 Test  #9: asio .............................   Passed    1.59 sec
+      Start 10: timeouts
+10/10 Test #10: timeouts .........................   Passed    4.47 sec
+
+100% tests passed out of 10
+
+Total Test time (real) =  17.32 sec
+exit=0
