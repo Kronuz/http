@@ -8,10 +8,12 @@ A generic, extensible HTTP/1.1 application framework on **standalone Asio** (C++
 coroutines). It puts the application *above* the server, behind one seam: the
 application implements one interface,
 `HttpHandler::handle(const Request&, ResponseWriter&)`, and the framework parses,
-routes, negotiates, frames, and writes. Header-only. Read `README.md` for the shape,
+routes, negotiates, frames, and writes. The server is header-only; optional client POSIX and TLS targets compile their transport code. Read `README.md` for the shape,
 `ARCHITECTURE.md` for the request lifecycle; this is the working notes.
 
 ## File map
+
+Client APIs and dependency profiles are in [docs/CLIENTS.md](docs/CLIENTS.md). `http_client_core.h` owns response framing and bounded cleanup; `http_client_request.h` owns request preparation and absolute expiry; `http_client_response.h` buffers the same parser. `http_client_posix.*`, `http_client_asio.h` and `http_client_tls.*` provide optional drivers and the bounded TLS cache. Preserve the client-only dependency closure when changing CMake. Parser structure changes require coherent rebuilds.
 
 ```
 http_message.h        Request + the buffered Response value + reason_phrase().

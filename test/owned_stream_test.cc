@@ -7,6 +7,42 @@ void check(bool value, std::source_location where = std::source_location::curren
 	if (!value)
 		throw std::runtime_error("owned stream invariant at " + std::to_string(where.line()));
 }
+class CountingResource final : public std::pmr::memory_resource {
+  public:
+	unsigned allocations = 0, releases = 0;
+  private:
+	void *do_allocate(std::size_t size, std::size_t alignment) override {
+		auto *result = std::pmr::new_delete_resource()->allocate(size, alignment);
+		++allocations;
+		return result;
+	}
+	void do_deallocate(void *pointer, std::size_t size, std::size_t alignment) override {
+		++releases;
+		std::pmr::new_delete_resource()->deallocate(pointer, size, alignment);
+	}
+	bool do_is_equal(const std::pmr::memory_resource &other) const noexcept override { return this == &other; }
+};
+void default_resource_capture() {
+	CountingResource first, second;
+	struct Restore {
+		std::pmr::memory_resource *previous;
+		~Restore() { std::pmr::set_default_resource(previous); }
+	} restore{std::pmr::set_default_resource(&first)};
+	auto value = std::allocate_shared<int>(detail::StreamAllocator<int>{}, 42);
+	std::weak_ptr<int> weak = value;
+	std::pmr::set_default_resource(&second);
+	value.reset();
+	check(first.allocations == 1 && first.releases == 0);
+	weak.reset();
+	check(first.releases == 1 && second.releases == 0);
+	std::pmr::set_default_resource(&first);
+	struct ChangesDefault {
+		explicit ChangesDefault(std::pmr::memory_resource *next) { std::pmr::set_default_resource(next); }
+	};
+	auto unique = detail::make_resource_unique<ChangesDefault>({}, &second);
+	unique.reset();
+	check(first.allocations == 2 && first.releases == 2 && second.allocations == 0 && second.releases == 0);
+}
 StreamOptions options() {
 	StreamOptions result;
 	result.reply.deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -225,6 +261,7 @@ void chunked() {
 } // namespace
 int main() {
 	try {
+		default_resource_capture();
 		held_original();
 		peer_disconnect();
 		peer_completion_boundaries();
