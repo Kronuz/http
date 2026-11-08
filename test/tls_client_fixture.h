@@ -2,6 +2,7 @@
 #include "http_client_tls.h"
 #include <openssl/x509v3.h>
 #include <atomic>
+#include <future>
 #include <mutex>
 #include <poll.h>
 #include <sys/socket.h>
@@ -49,10 +50,19 @@ struct Credentials {
 		client->set_verify_mode(asio::ssl::verify_peer);
 	}
 };
+struct LateReply {
+	std::string bytes;
+	std::promise<void> release, queued;
+	std::future<void> permission = release.get_future();
+	std::atomic<bool> sent = false;
+};
 class Server {
   public:
-	explicit Server(std::shared_ptr<asio::ssl::context> context)
-		: context_(std::move(context)), acceptor_(io_, {asio::ip::address_v4::loopback(), 0}) {
+	explicit Server(std::shared_ptr<asio::ssl::context> context,
+		std::string reply = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+		std::shared_ptr<LateReply> late = {})
+		: context_(std::move(context)), reply_(std::move(reply)), late_(std::move(late)),
+		  acceptor_(io_, {asio::ip::address_v4::loopback(), 0}) {
 		acceptor_.non_blocking(true);
 		endpoint_ = acceptor_.local_endpoint();
 		thread_ = std::thread([this] { serve(); });
@@ -68,6 +78,8 @@ class Server {
 	asio::ip::tcp::endpoint endpoint() const { return endpoint_; }
   private:
 	std::shared_ptr<asio::ssl::context> context_;
+	std::string reply_;
+	std::shared_ptr<LateReply> late_;
 	asio::io_context io_;
 	asio::ip::tcp::acceptor acceptor_;
 	asio::ip::tcp::endpoint endpoint_;
@@ -96,8 +108,16 @@ class Server {
 				const auto size = asio::read_until(stream, input, "\r\n\r\n", error);
 				if (error) break;
 				input.consume(size);
-				constexpr std::string_view reply = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
-				asio::write(stream, asio::buffer(reply.data(), reply.size()), error);
+				asio::write(stream, asio::buffer(reply_), error);
+				if (!error && late_ && !late_->sent.exchange(true)) {
+					if (late_->permission.wait_for(std::chrono::seconds(2)) != std::future_status::ready) {
+						late_->queued.set_exception(std::make_exception_ptr(std::runtime_error("late reply gate timeout")));
+						break;
+					}
+					asio::write(stream, asio::buffer(late_->bytes), error);
+					if (error) late_->queued.set_exception(std::make_exception_ptr(std::system_error(error)));
+					else late_->queued.set_value();
+				}
 			}
 			{
 				std::lock_guard lock(gate_);
