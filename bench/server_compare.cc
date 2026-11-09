@@ -7,6 +7,8 @@
 //   httpt    the same with the request, idle, header and inactivity timeouts a production service sets
 //   httpr    http through a Router whose one route yields once (task::yield) before it answers: the cost of a
 //            handler that suspends, which "http" never pays
+//   httpc    http with a handler that asks for its cancel token first, as a search does: the cost of the
+//            disconnect watch that question engages, which "http" never pays
 //
 //   http_server_compare KIND PORT REACTORS
 //   http_server_compare version
@@ -108,6 +110,19 @@ public:
 	}
 };
 
+// The same reply from a handler that first asks for its cancel token (the httpc kind), as a search that bounds
+// its work by the request's cancellation does: the question engages the connection's disconnect watch.
+class AskingApp : public http::HttpHandler {
+public:
+	task::task<void> handle(http::Request& request, http::ResponseWriter& response) override {
+		if (request.cancel_token().requested()) { co_return; }
+		response.status(200);
+		response.set_header("Content-Type", "text/plain");
+		response.write("Hello, World!\n");
+		response.end();
+	}
+};
+
 // The same reply after reading a streamed request body to its end (the httpb kind, a POST).
 class StreamedApp : public http::HttpHandler {
 public:
@@ -173,8 +188,10 @@ int main(int argc, char** argv) {
 		HelloApp hello;
 		http::Router yielding = make_yield_router();
 		StreamedApp streamed;
+		AskingApp asking;
 		http::HttpHandler& app = kind == "httpr" ? static_cast<http::HttpHandler&>(yielding)
-			: kind == "httpb" ? static_cast<http::HttpHandler&>(streamed) : hello;
+			: kind == "httpb" ? static_cast<http::HttpHandler&>(streamed)
+			: kind == "httpc" ? static_cast<http::HttpHandler&>(asking) : hello;
 		http::HttpAsioService service(app, reactors, /*in_flight_limit=*/0);
 		if (kind == "httpt") {
 			service.set_request_timeout(std::chrono::seconds(30));

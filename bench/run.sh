@@ -4,7 +4,7 @@
 # -DHTTP_BENCH_COUNT_ALLOCS=ON also reports allocs/req and handlers/req (operator new calls and Asio handler
 # invocations per request); that build is for counting, not timing.
 #   sh bench/run.sh KIND REACTORS CONNECTIONS SECONDS [close]
-# KIND is asio, reactor, http, httpt, httpr or httpb (see server_compare.cc; httpb is a POST of a 1 KiB body,
+# KIND is asio, reactor, http, httpt, httpr, httpc or httpb (see server_compare.cc; httpb is a POST of a 1 KiB body,
 # bench/post_body.lua, read as a streamed body), beast (server_beast.cc) or httplib (server_httplib.cc).
 # BIN names the server binary (default: the one in $BUILD, default build, that serves KIND), LABEL what to print for it
 # (default its file name); `close` sends Connection: close, one request per connection. Needs wrk on PATH.
