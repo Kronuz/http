@@ -6,32 +6,41 @@
 #   sh bench/watch_ab.sh build    Release builds (timed and counting) of every series, stamped with their commits
 #   sh bench/watch_ab.sh run      verify, counts, the timed rounds, and one report per REFS series against a
 #
-# Environment (defaults): REFS="name=checkout ..." (e.g. "base=$JOB_REF_BASE"), OUT=.scratch/watch-ab,
-#   KINDS="http httpc" CONNS="1 8 64" ROUNDS=7 SECS=4 REACTORS=2. `run` builds what `build` did not, or what was
-#   built from another commit. Results: $OUT/report-<name>.txt (a against <name>, aa the control), $OUT/counts-*.txt.
+# Environment (defaults): REFS="name=checkout ..." (e.g. "base=$JOB_REF_BASE"), OUT=.scratch/watch-ab/out,
+#   BINS=.scratch/watch-ab (the builds, shared by runs), KINDS="http httpc" CONNS="1 8 64" ROUNDS=7 SECS=4
+#   REACTORS=2. `run` builds what `build` did not, or what was built from another commit. Results:
+#   $OUT/report-<name>.txt (a against <name>, aa the control), $OUT/counts-*.txt, $OUT/medians.txt; copied to
+#   $JOB_OUT when a campaign job runs it.
 set -eu
 cd "$(dirname "$0")/.."
-OUT=${OUT:-.scratch/watch-ab}
+OUT=${OUT:-.scratch/watch-ab/out}
+BINS=${BINS:-.scratch/watch-ab}
 REFS=${REFS:-}
 export KINDS=${KINDS:-"http httpc"} CONNS=${CONNS:-"1 8 64"} ROUNDS=${ROUNDS:-7} SECS=${SECS:-4} REACTORS=${REACTORS:-2}
 BIN=$OUT/bin
-mkdir -p "$BIN"
+mkdir -p "$BIN" "$BINS/bin"
 
 # build_series NAME SOURCE: the timed and counting servers of SOURCE as $BIN/NAME and $BIN/NAME-count.
 build_series() {
 	name=$1; src=$(cd "$2" && pwd); rev=$(git -C "$src" rev-parse HEAD)
-	if [ -x "$BIN/$name" ] && [ -x "$BIN/$name-count" ] && [ "$(cat "$BIN/$name.rev" 2>/dev/null)" = "$rev" ]; then return 0; fi
-	dir=$(pwd)/$OUT/build/$name
+	if ! { [ -x "$BINS/bin/$name" ] && [ -x "$BINS/bin/$name-count" ] && [ "$(cat "$BINS/bin/$name.rev" 2>/dev/null)" = "$rev" ]; }; then
+		build_dirs "$name" "$src" "$rev"
+	fi
+	cp "$BINS/bin/$name" "$BINS/bin/$name-count" "$BINS/bin/$name.rev" "$BIN/"
+	echo "# $name: $rev ($(file -b "$BIN/$name"))"
+}
+build_dirs() {
+	name=$1; src=$2; rev=$3
+	dir=$(pwd)/$BINS/build/$name
 	cmake -S "$src" -B "$dir" -DCMAKE_BUILD_TYPE=Release -DHTTP_BUILD_BENCH=ON -DHTTP_BENCH_COUNT_ALLOCS=OFF \
 		-DFETCHCONTENT_BASE_DIR="$dir/_deps" > /dev/null
 	cmake --build "$dir" --target http_server_compare
-	cp "$dir/http_server_compare" "$BIN/$name"
+	cp "$dir/http_server_compare" "$BINS/bin/$name"
 	cmake -S "$src" -B "$dir-count" -DCMAKE_BUILD_TYPE=Release -DHTTP_BUILD_BENCH=ON -DHTTP_BENCH_COUNT_ALLOCS=ON \
 		-DFETCHCONTENT_BASE_DIR="$dir-count/_deps" > /dev/null
 	cmake --build "$dir-count" --target http_server_compare
-	cp "$dir-count/http_server_compare" "$BIN/$name-count"
-	echo "$rev" > "$BIN/$name.rev"
-	echo "# $name: $rev ($(file -b "$BIN/$name"))"
+	cp "$dir-count/http_server_compare" "$BINS/bin/$name-count"
+	echo "$rev" > "$BINS/bin/$name.rev"
 }
 
 build_all() {
@@ -73,6 +82,7 @@ run)
 			# req/s are sorted; sort CPU by insertion
 			for (i = 1; i <= m; i++) for (j = i + 1; j <= m; j++) if (c[j] < c[i]) { t = c[i]; c[i] = c[j]; c[j] = t }
 			printf "MEDIAN %s rounds=%d rps=%s cpu_us=%s\n", k, m, rps[k, int((m + 1) / 2)], c[int((m + 1) / 2)] } }' | sort | tee "$OUT/medians.txt"
+	if [ -n "${JOB_OUT:-}" ]; then mkdir -p "$JOB_OUT/watch-ab" && cp -R "$OUT"/report-*.txt "$OUT"/counts-*.txt "$OUT"/medians.txt "$OUT"/series.txt "$OUT"/run.log "$OUT"/runs "$JOB_OUT/watch-ab/"; fi
 	;;
 *) sed -n '2,/^set -eu/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac
