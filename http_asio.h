@@ -430,19 +430,19 @@ struct ReadResult {
 //     Pipelined input (the client sent the next request early) ends the watch for the
 //     rest of that request: a later disconnect is not seen until the next read.
 // On a plain TCP socket a request's watch is lazy: it reads nothing until the handler first
-// asks for its cancel token (engage(), through Request's CancelWatch hook), and then a peek at
-// the socket decides what happened meanwhile by the same rules. A handler that never asks
-// costs no read, so its request's next read is the socket's own, after the reply.
+// asks for its cancel token (engage(), through Request's CancelWatch hook), and then one read
+// that does not wait decides what happened meanwhile by the same rules. A handler that never
+// asks costs no read, so its request's next read is the socket's own, after the reply.
 template<class Stream>
 class ConnectionInput : public std::enable_shared_from_this<ConnectionInput<Stream>>, public CancelWatch {
 public:
 	// The most the watch reads ahead of the parser.
 	static constexpr std::size_t kReadAhead = 4096;
-	// Whether watch(..., lazy) can wait for engage(): a plain TCP socket can be asked, at once
-	// and without reading it, what the peer did while nobody watched (recv with MSG_PEEK and
-	// MSG_DONTWAIT). A TLS stream cannot (its records must be decrypted to tell a close_notify
-	// from data), so its watch reads from the start.
-#if defined(MSG_PEEK) && defined(MSG_DONTWAIT)
+	// Whether watch(..., lazy) can wait for engage(): a plain TCP socket can be asked, at once,
+	// what the peer did while nobody watched (a recv with MSG_DONTWAIT into the input's buffer).
+	// A TLS stream cannot (its records must be decrypted to tell a close_notify from data), so
+	// its watch reads from the start.
+#if defined(MSG_DONTWAIT)
 	static constexpr bool kLazyWatch = std::is_same_v<Stream, asio::ip::tcp::socket>;
 #else
 	static constexpr bool kLazyWatch = false;
@@ -471,19 +471,17 @@ public:
 		arm();
 	}
 	void unwatch() noexcept { on_disconnect_ = nullptr; }
-	// CancelWatch: the handler asked about cancellation; starts a lazy watch. What the peer did
-	// while nobody watched decides as the read would have: data waiting (a pipelined request)
-	// ends the watch, EOF or a socket error is a disconnect, and nothing yet arms the read.
+	// CancelWatch: the handler asked about cancellation; starts a lazy watch. One read that does
+	// not wait decides what the peer did while nobody watched, as the watch's read would have:
+	// data (a pipelined request) is read ahead and ends the watch, EOF or a socket error is a
+	// disconnect, and nothing yet arms the wait.
 	void engage() noexcept override {
 		if (!on_disconnect_ || pending_ || ready_) { return; }
-#if defined(MSG_PEEK) && defined(MSG_DONTWAIT)
 		if constexpr (kLazyWatch) {
-			char byte;
-			const auto n = ::recv(stream_.native_handle(), &byte, 1, MSG_PEEK | MSG_DONTWAIT);
-			if (n > 0) { on_disconnect_ = nullptr; return; }
-			if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) { fire(); return; }
+			asio::error_code error;
+			std::size_t size = 0;
+			if (receive_now(error, size)) { completed(error, size); return; }
 		}
-#endif
 		try { arm(); } catch (...) {}   // no memory for the read: the request goes unwatched
 	}
 
@@ -563,15 +561,47 @@ private:
 			[&](auto handler) { stream_.async_read_some(output, std::move(handler)); }, std::move(token));
 		co_return ReadResult{error, bytes};
 	}
+	// The watch's read. On plain TCP it waits for the socket to be readable and then reads
+	// without waiting: an asynchronous read would first try the socket at once, a second
+	// recv after the one engage() or the last read already found empty.
 	void arm() {
 		if (pending_ || ready_) { return; }
 		pending_ = true;
 		auto owner = this->shared_from_this();
 		try {
-			stream_.async_read_some(asio::buffer(buffer_, sizeof buffer_), [owner](asio::error_code error, std::size_t size) {
-				owner->completed(error, size);
-			});
+			if constexpr (kLazyWatch) {
+				stream_.async_wait(asio::socket_base::wait_read, [owner](asio::error_code error) { owner->readable(error); });
+			} else {
+				stream_.async_read_some(asio::buffer(buffer_, sizeof buffer_), [owner](asio::error_code error, std::size_t size) {
+					owner->completed(error, size);
+				});
+			}
 		} catch (...) { pending_ = false; throw; }
+	}
+	void readable(asio::error_code error) {
+		std::size_t size = 0;
+		if (!error && !receive_now(error, size)) {
+			pending_ = false;   // woken with nothing to read: wait again
+			try { arm(); return; } catch (...) { error = asio::error::no_memory; }
+		}
+		completed(error, size);
+	}
+	// A read into the input's buffer that does not wait; false when there is nothing to read.
+	// EOF is asio::error::eof, a failed read its errno.
+	bool receive_now(asio::error_code& error, std::size_t& size) {
+#if defined(MSG_DONTWAIT)
+		if constexpr (kLazyWatch) {
+			ssize_t n;
+			do { n = ::recv(stream_.native_handle(), buffer_, sizeof buffer_, MSG_DONTWAIT); } while (n < 0 && errno == EINTR);
+			if (n > 0) { error = {}; size = static_cast<std::size_t>(n); return true; }
+			if (n == 0) { error = asio::error::eof; size = 0; return true; }
+			if (errno == EAGAIN || errno == EWOULDBLOCK) { return false; }
+			error = asio::error_code(errno, asio::error::get_system_category()); size = 0;
+			return true;
+		}
+#endif
+		(void)error; (void)size;
+		return false;
 	}
 	void completed(asio::error_code error, std::size_t size) {
 		pending_ = false; ready_ = true; error_ = error; size_ = size; taken_ = 0;

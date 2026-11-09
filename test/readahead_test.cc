@@ -261,7 +261,7 @@ static Read read_once(Pair& p, const std::shared_ptr<Input>& in, std::size_t max
 // what happened meanwhile as the read would have.
 static void lazy_watch_tests() {
 	static_assert(Input::kLazyWatch, "a plain TCP socket's watch waits for engage()");
-	{   // nothing is read while nobody asks; asking ends the watch on data and leaves the data in the kernel
+	{   // nothing is read while nobody asks; asking reads ahead what waits, which ends the watch
 		Pair p;
 		const std::string data = pattern(10000);
 		p.send(data);
@@ -273,12 +273,13 @@ static void lazy_watch_tests() {
 		check(pending_bytes(p.server.native_handle()) == 10000 && fired == 0, "[L] a lazy watch reads nothing before engage()");
 		in->engage();
 		p.settle();
-		check(pending_bytes(p.server.native_handle()) == 10000 && fired == 0, "[L] engage() with data waiting ends the watch, reads nothing, fires nothing");
+		check(pending_bytes(p.server.native_handle()) == 10000 - static_cast<int>(Input::kReadAhead) && fired == 0,
+			"[L] engage() with data waiting reads ahead kReadAhead bytes at once, ends the watch, fires nothing");
 		::shutdown(p.client, SHUT_WR);
 		p.settle();
 		check(fired == 0, "[L] and a later EOF does not fire the ended watch");
 		auto a = read_once(p, in, 65536), b = read_once(p, in, 65536), c = read_once(p, in, 65536);
-		check(a.data + b.data + c.data == data, "[L] the bytes are read from the socket, in order");
+		check(a.data + b.data + c.data == data, "[L] the bytes are read, the read-ahead first, in order");
 	}
 	{   // EOF before anyone asked: engage() fires at once, before it returns
 		Pair p;
