@@ -1,4 +1,4 @@
-> Status: CURRENT (2026-11-03) the mechanism on `task::task` (design `docs/design/task-handlers.md` revision 2, steps H1 and H2; ledgers `docs/status/task-h1.md`, `docs/status/task-h2.md`). Supersedes the Phase 7c L3 note (`asio::awaitable` handlers, http:679c0f8).
+> Status: CURRENT (2026-11-09) the mechanism on `task::task` (design `docs/design/task-handlers.md` revision 2, steps H1 and H2; ledgers `docs/status/task-h1.md`, `docs/status/task-h2.md`). Supersedes the Phase 7c L3 note (`asio::awaitable` handlers, http:679c0f8).
 
 # Coroutine handlers
 
@@ -74,17 +74,22 @@ handler runs, the read takes it, or its first 4096 bytes, and that data ends the
 the rest of that request: a disconnect after it is not seen until the connection reads
 again. `read()` returns the bytes first and in order, and nothing more is read ahead until
 they are all consumed, so a connection holds at most 4096 bytes of input outside the kernel.
-The pending read is also the read for the next request. A watch armed after EOF was already
-seen cancels the request at once.
+The pending read is also the read for the next request: the connection's next read finds it
+pending and is resumed by its completion, with no coroutine frame or channel between them. A
+watch armed after EOF was already seen cancels the request at once.
 
 On plain TCP a buffered request's watch waits for the handler to ask. The request holds a
-`CancelWatch` hook that the first `cancel_token()` engages: a peek at the socket (`recv` with
-`MSG_PEEK | MSG_DONTWAIT`) applies the rules above to what the client did meanwhile (data
-waiting ends the watch and stays in the kernel; EOF or a socket error cancels the request
-before the call returns, so the token is already requested), and with nothing waiting the read
-is armed. A handler that never asks pays for no read. A streamed body's watch starts when the
+`CancelWatch` hook that the first `cancel_token()` engages: one read that does not wait (`recv`
+with `MSG_DONTWAIT` into the input buffer) applies the rules above to what the client did
+meanwhile (data waiting is read ahead and ends the watch; EOF or a socket error cancels the
+request before the call returns, so the token is already requested), and with nothing waiting
+the watch waits for the socket to be readable and then reads without waiting. An asynchronous
+read would first try the socket at once, a second `recv` after the one that just found it
+empty; so an asking request costs the same two `recv` calls as one that never asks (one that
+finds nothing, one that reads the next request). A handler that never asks pays for no read. A streamed body's watch starts when the
 body is complete, the same way: lazy, or armed at once when the handler already asked during the
-body. A TLS stream cannot be peeked through its records, so its watch arms the read when set.
+body. A TLS stream cannot be asked this way (its records must be decrypted to tell a
+close_notify from data), so its watch arms its read when set.
 
 ## Exceptions
 

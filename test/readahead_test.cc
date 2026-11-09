@@ -7,7 +7,8 @@
 //       and keeps the disconnect rules (EOF with nothing read fires; data ends the watch)
 //   [L] the lazy watch: it reads nothing until the handler asks (CancelWatch::engage), and the
 //       first question decides what happened meanwhile as the read would have; the Request hook
-//       engages it once, from the first cancel_token()
+//       engages it once, from the first cancel_token(); a read that finds the watch's read
+//       pending is resumed by it, its token ends the wait, and drain() waits for it
 //   [Q] the same over real TCP: a hang-up before the first question is seen by it, pipelined input
 //       before it ends the watch, a handler that never asks has its pipelined successors answered
 //   [N] a buffered reply sent at once as far as the socket takes it: replies to 4 MiB arrive whole
@@ -396,6 +397,98 @@ static void lazy_watch_tests() {
 	}
 }
 
+// A read that finds the watch's read pending: that read's completion resumes it (no frame, no
+// channel between them), its token ends the wait without losing bytes, and drain() waits for it.
+// One read(output) into `r`; its arguments live in its frame.
+static task::task<void> read_into(std::shared_ptr<Input> in, Read& r, task::cancel_token token) {
+	std::string buf(65536, '\0');
+	const http::detail::ReadResult got = co_await in->read(asio::buffer(buf), token);
+	if (got.error) { r.error = got.error; } else { r.data.assign(buf, 0, got.bytes); }
+	r.done = true;
+}
+static task::task<void> drain_into(std::shared_ptr<Input> in, bool& drained) {
+	co_await in->drain();
+	drained = true;
+}
+static void held_read_tests() {
+	// Starts one read(output) on the pair's loop; the caller runs the loop.
+	const auto start_read = [](Pair& p, const std::shared_ptr<Input>& in, Read& r, task::cancel_token token) {
+		task::spawn(task::scheduler_ref::of(p.scheduler), read_into(in, r, std::move(token)));
+	};
+	const auto run_until = [](Pair& p, const bool& done) {
+		p.io.restart();
+		for (auto end = clk::now() + 2s; !done && clk::now() < end;) { p.io.run_one_for(5ms); }
+	};
+	{   // the reader waits on the watch's read; what the client sends later arrives whole and in order
+		Pair p;
+		auto in = std::make_shared<Input>(p.server);
+		int fired = 0;
+		in->watch([&] { ++fired; }, /*lazy=*/true);
+		in->engage();   // nothing waiting: the watch waits for the socket
+		in->unwatch();
+		Read r;
+		start_read(p, in, r, {});
+		p.settle();
+		check(!r.done, "[U] a read with the watch's read pending waits for it");
+		const std::string data = pattern(10000, 7);
+		p.send(data);
+		run_until(p, r.done);
+		check(r.done && !r.error && !r.data.empty() && r.data.size() <= Input::kReadAhead && data.compare(0, r.data.size(), r.data) == 0,
+			"[U] the watch's read resumes the waiting reader with the first bytes (" + std::to_string(r.data.size()) + ")");
+		std::string got = r.data;
+		while (got.size() < data.size()) { auto n = read_once(p, in, 65536); if (!n.done || n.error) { break; } got += n.data; }
+		check(got == data && fired == 0, "[U] and the stream continues from the socket without a gap or a repeat");
+	}
+	{   // a requested token ends the wait with operation_aborted; the next read gets every byte
+		Pair p;
+		auto in = std::make_shared<Input>(p.server);
+		in->watch([] {}, true);
+		in->engage();
+		in->unwatch();
+		task::cancel_source source;
+		Read r;
+		start_read(p, in, r, source.token());
+		p.settle();
+		check(!r.done, "[U] the reader waits on the pending read");
+		source.request();
+		run_until(p, r.done);
+		check(r.done && r.error == asio::error::operation_aborted, "[U] its requested token ends the wait with operation_aborted");
+		const std::string data = pattern(3000, 8);
+		p.send(data);
+		check(p.arrived(3000), "[U] 3000 bytes sent after the cancel");
+		std::string got;
+		while (got.size() < data.size()) { auto n = read_once(p, in, 65536); if (!n.done || n.error) { break; } got += n.data; }
+		check(got == data, "[U] and the next reads return them all, in order");
+	}
+	{   // a token requested before the read waits ends it too
+		Pair p;
+		auto in = std::make_shared<Input>(p.server);
+		in->watch([] {}, true);
+		in->engage();
+		in->unwatch();
+		task::cancel_source source;
+		source.request();
+		Read r;
+		start_read(p, in, r, source.token());
+		run_until(p, r.done);
+		check(r.done && r.error == asio::error::operation_aborted, "[U] a read whose token is already requested ends with operation_aborted");
+	}
+	{   // drain() waits for the pending read, which the socket's close completes
+		Pair p;
+		auto in = std::make_shared<Input>(p.server);
+		in->watch([] {}, true);
+		in->engage();
+		bool drained = false;
+		task::spawn(task::scheduler_ref::of(p.scheduler), drain_into(in, drained));
+		p.settle();
+		check(!drained, "[U] drain() waits while the watch's read is pending");
+		asio::error_code ignored;
+		p.server.close(ignored);
+		run_until(p, drained);
+		check(drained, "[U] and returns once the closed socket completes it");
+	}
+}
+
 static void input_tests() {
 	// Bounded and ordered: 10000 bytes wait in the kernel; the watch takes 4096 of them and no more.
 	{
@@ -564,6 +657,7 @@ static void input_tests() {
 		check(bad == 0, "[U] " + std::to_string(total) + " random walks of sends, watches and reads return the stream byte for byte");
 	}
 	lazy_watch_tests();
+	held_read_tests();
 }
 #endif  // READAHEAD_TEST_INTEGRATION_ONLY
 

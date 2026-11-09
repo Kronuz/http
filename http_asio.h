@@ -48,7 +48,6 @@
 #pragma once
 
 #include <asio.hpp>
-#include <asio/experimental/channel.hpp>
 
 #include <algorithm>
 #include <array>
@@ -60,6 +59,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <coroutine>
 #include <optional>
 #include <string>
 #include <utility>
@@ -447,7 +447,7 @@ public:
 #else
 	static constexpr bool kLazyWatch = false;
 #endif
-	explicit ConnectionInput(Stream& stream) : stream_(stream), done_(stream.get_executor(), 1) {}
+	explicit ConnectionInput(Stream& stream) : stream_(stream) {}
 	template<class Control>
 	void monitor(const std::shared_ptr<Control>& control) {
 		if constexpr (std::is_same_v<Control, AsioDeferredControl>) observer_ = control;
@@ -485,39 +485,56 @@ public:
 		try { arm(); } catch (...) {}   // no memory for the read: the request goes unwatched
 	}
 
-	// Waits for the pending read to complete; nothing cancels the wait. The channel holds one
-	// completion that nobody may be waiting for; a stale one only makes a later wait return
-	// once more, and the loop asks pending_ again.
-	task::task<void> drain() {
-		while (pending_) {
-			co_await task::await_asio<void(asio::error_code)>([this](auto handler) { done_.async_receive(std::move(handler)); });
-		}
-	}
+	// The awaitable drain() returns: it waits for the pending read to complete, and nothing
+	// cancels the wait. A frame destroyed while it waits leaves no waiter behind.
+	class Drain {
+	public:
+		explicit Drain(ConnectionInput& input) noexcept : input_(input) {}
+		Drain(const Drain&) = delete;
+		Drain& operator=(const Drain&) = delete;
+		~Drain() { input_.forget(waiting_); }
+		bool await_ready() const noexcept { return !input_.pending_; }
+		void await_suspend(std::coroutine_handle<> h) noexcept { input_.wait_for_read(waiting_ = h); }
+		void await_resume() noexcept { waiting_ = {}; }
+	private:
+		ConnectionInput& input_;
+		std::coroutine_handle<> waiting_;
+	};
+	// Waits for the pending read to complete (the session's last step, so the socket and the
+	// input outlive the read).
+	Drain drain() noexcept { return Drain(*this); }
 
 	// The awaitable read() returns (see read()).
 	class Read {
 	public:
 		Read(ConnectionInput& input, asio::mutable_buffer output, task::cancel_token token)
 			: input_(input), output_(output), token_(std::move(token)) {}
+		Read(const Read&) = delete;
+		Read& operator=(const Read&) = delete;
+		~Read() { input_.forget(waiting_); }
 		bool await_ready() {
 			if (!input_.pending_ && !input_.ready_) {
 				direct_.emplace(SocketRead{&input_.stream_, output_}, std::move(token_));
 				return direct_->await_ready();
 			}
-			held_ = input_.read_held(output_, std::move(token_));
-			held_awaiter_.emplace(std::move(held_).operator co_await());
-			return false;
+			return input_.ready_;
 		}
 		std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) {
 			if (direct_) { return direct_->await_suspend(h) ? std::noop_coroutine() : h; }
-			return held_awaiter_->await_suspend(h);
+			// The watch's read is pending: its completion resumes h. A requested token ends it
+			// by cancelling it on the socket.
+			input_.wait_for_read(waiting_ = h);
+			cancel_.emplace(token_, Cancel{&input_.stream_});
+			return std::noop_coroutine();
 		}
 		ReadResult await_resume() {
 			if (direct_) {
 				const auto [error, bytes] = direct_->await_resume();
 				return {error, bytes};
 			}
-			return held_awaiter_->await_resume();
+			cancel_.reset();
+			waiting_ = {};
+			return input_.take(output_);
 		}
 	private:
 		struct SocketRead {
@@ -525,41 +542,55 @@ public:
 			asio::mutable_buffer output;
 			template<class Handler> void operator()(Handler&& handler) const { stream->async_read_some(output, std::forward<Handler>(handler)); }
 		};
+		struct Cancel {
+			Stream* stream;
+			void operator()() const { asio::error_code ignored; stream->lowest_layer().cancel(ignored); }
+		};
 		using Direct = decltype(task::await_asio<void(asio::error_code, std::size_t)>(std::declval<SocketRead>(), std::declval<task::cancel_token>()));
-		using HeldAwaiter = decltype(std::declval<task::task<ReadResult>>().operator co_await());
 		ConnectionInput& input_;
 		asio::mutable_buffer output_;
 		task::cancel_token token_;
 		std::optional<Direct> direct_;
-		task::task<ReadResult> held_;
-		std::optional<HeldAwaiter> held_awaiter_;
+		std::optional<task::cancel_callback<Cancel>> cancel_;
+		std::coroutine_handle<> waiting_;
 	};
 	// The next bytes: what the watch read ahead first, else a read of the socket that `token`
 	// cancels (a deadline's, the session's, or none). With nothing held it is the socket's own
-	// operation, awaited in place: no coroutine frame. A requested token ends a watch read the
-	// wait drains, by cancelling it on the socket.
+	// operation, awaited in place; with the watch's read pending, its completion resumes the
+	// reader. Neither makes a coroutine frame.
 	Read read(asio::mutable_buffer output, task::cancel_token token) { return Read(*this, output, std::move(token)); }
 private:
-	task::task<ReadResult> read_held(asio::mutable_buffer output, task::cancel_token token) {
-		if (pending_) {
-			task::cancel_callback cancel(token, [this] { asio::error_code ignored; stream_.lowest_layer().cancel(ignored); });
-			co_await drain();
+	// The one coroutine the pending read resumes when it completes: a reader or the drain, with
+	// the scheduler it suspended on.
+	void wait_for_read(std::coroutine_handle<> h) noexcept {
+		assert(!waiter_);
+		waiter_ = h;
+		waiter_scheduler_ = task::current();
+	}
+	void forget(std::coroutine_handle<> h) noexcept { if (h && waiter_ == h) { waiter_ = {}; } }
+	// As task::await_asio resumes from a handler: in place when the read completes in a
+	// top-level handler on the waiter's loop (in its scheduler's scope), else through it.
+	void resume_waiter() {
+		const auto h = std::exchange(waiter_, {});
+		if (!h) { return; }
+		const task::scheduler_ref s = waiter_scheduler_;
+		if (!s) { h.resume(); }
+		else if (s.runs_here() && !task::current()) { task::running_on scope(s); h.resume(); }
+		else { s.post(h); }
+	}
+	// What the watch's read left, for read(): the bytes read ahead, oldest first (the rest stays
+	// for the next read), else its EOF or error.
+	ReadResult take(asio::mutable_buffer output) noexcept {
+		assert(ready_);
+		if (size_) {
+			const std::size_t n = (std::min)(output.size(), size_ - taken_);
+			std::memcpy(output.data(), buffer_ + taken_, n);
+			taken_ += n;
+			if (taken_ == size_) { size_ = taken_ = 0; ready_ = false; }
+			return ReadResult{{}, n};
 		}
-		if (ready_) {
-			if (size_) {
-				// What the watch read ahead, oldest first; the rest stays for the next read.
-				const std::size_t n = (std::min)(output.size(), size_ - taken_);
-				std::memcpy(output.data(), buffer_ + taken_, n);
-				taken_ += n;
-				if (taken_ == size_) { size_ = taken_ = 0; ready_ = false; }
-				co_return ReadResult{{}, n};
-			}
-			ready_ = false;
-			co_return ReadResult{error_ ? error_ : asio::error::eof, 0};
-		}
-		const auto [error, bytes] = co_await task::await_asio<void(asio::error_code, std::size_t)>(
-			[&](auto handler) { stream_.async_read_some(output, std::move(handler)); }, std::move(token));
-		co_return ReadResult{error, bytes};
+		ready_ = false;
+		return ReadResult{error_ ? error_ : asio::error::eof, 0};
 	}
 	// The watch's read. On plain TCP it waits for the socket to be readable and then reads
 	// without waiting: an asynchronous read would first try the socket at once, a second
@@ -605,14 +636,15 @@ private:
 	}
 	void completed(asio::error_code error, std::size_t size) {
 		pending_ = false; ready_ = true; error_ = error; size_ = size; taken_ = 0;
-		done_.try_send(asio::error_code{});
 		if (error && error != asio::error::eof) {
 			if (auto c = observer_.lock()) { c->exchange->observe_peer_disconnect(); }
 			if (auto c = owned_observer_.lock()) { c->exchange->observe_peer_disconnect(); }
 		}
-		if (!on_disconnect_) { return; }
-		if (!error) { on_disconnect_ = nullptr; }
-		else if (error != asio::error::operation_aborted) { fire(); }
+		if (on_disconnect_) {
+			if (!error) { on_disconnect_ = nullptr; }
+			else if (error != asio::error::operation_aborted) { fire(); }
+		}
+		resume_waiter();   // last: the reader may arm the next read
 	}
 	void fire() {
 		auto callback = std::move(on_disconnect_);
@@ -620,7 +652,8 @@ private:
 		if (callback) { callback(); }
 	}
 	Stream& stream_;
-	asio::experimental::channel<void(asio::error_code)> done_;   // a completed read wakes drain()
+	std::coroutine_handle<> waiter_;   // resumed when the pending read completes
+	task::scheduler_ref waiter_scheduler_;
 	char buffer_[kReadAhead];
 	std::size_t size_ = 0, taken_ = 0;   // bytes the last read returned, and how many read() has handed out
 	asio::error_code error_;
