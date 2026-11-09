@@ -4,8 +4,8 @@
 // session's token, then the reply sent at once. A request served through HttpAsioService by a
 // handler that never suspends costs exactly what one round trip of that session costs, so the
 // handler (and a chain of child tasks it awaits) adds no handler; a handler that asks for its
-// cancel token pays for the disconnect watch's read, and one that never asks does not; a
-// streamed body's handler likewise (design D6).
+// cancel token adds none either, since the disconnect watch's read is the next request's read
+// and its completion resumes that read in place; a streamed body's handler likewise (design D6).
 #define ASIO_CUSTOM_HANDLER_TRACKING "counting_tracking.h"
 #include <asio.hpp>
 
@@ -130,8 +130,8 @@ int main() {
 	check(raw > 0, "the reference session served");
 	check(flat == raw, "(a) a handler that never suspends adds no io_context handler to the session's");
 	check(deep == raw, "(a) nor does a chain of child tasks it awaits that never suspend");
-	check(asks > raw, "(f) a handler that asks for its cancel token pays for the watch's read; one that never asks pays none");
-	check(stream > 0 && stream_asks > stream, "(f) so does a streamed body's handler: the watch after the body reads only for one that asks");
+	check(asks == raw, "(f) a handler that asks for its cancel token adds no handler: the watch's read is the next request's read");
+	check(stream > 0 && stream_asks == stream, "(f) nor does a streamed body's handler that asks: the watch after the body costs no handler");
 	std::printf("\n%s (%d failures)\n", failures == 0 ? "PASS" : "FAIL", failures);
 	return failures == 0 ? 0 : 1;
 }
