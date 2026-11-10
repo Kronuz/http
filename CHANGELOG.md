@@ -4,6 +4,35 @@ Newest first. Dates are 2026.
 
 Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://github.com/Kronuz/cpp-libraries/blob/main/docs/UPGRADING-2026-10.md#http) lists what changes for callers, how to find affected inputs, the commits not to pin, and the speedup.
 
+## 2026-11-09: a handler that asks for its token costs no extra read
+
+`bench_http`'s `http_server_compare` under `wrk`, i9-9980HK, exclusive job 261109-150350-f39012,
+http:8262172 against http:13933f0 with an A/A control: a handler that asks for its token serves
+16,570 to 23,688 req/s at 1 connection (1.39x faster, CPU per request 24.4 to 18.8 us) and 92,414
+to 105,055 at 8 (1.10x, 17.4 to 15.3 us); 64 connections and handlers that never ask are inside
+the noise. Details in `docs/perf/watch-peek.md`.
+
+### Changed
+
+- **The watch engages with one read.** The first `cancel_token()` on plain TCP peeked one byte
+  (`MSG_PEEK`) and then armed an asynchronous read, which Asio tries at once: two `recv` calls
+  that found the socket empty before every asking handler's reply. `engage()` now reads without
+  waiting into the connection's read-ahead buffer, deciding at once as before (data ends the
+  watch and is read ahead; EOF or an error cancels the request before `cancel_token()` returns),
+  and with nothing there the watch waits for readability and then reads without waiting. An
+  asking request makes the same two `recv` calls as one that never asks.
+- **The next read is resumed by the watch's read.** A read that found the watch's read pending
+  went through two task frames and a one-slot channel; the read's completion now resumes it in
+  place, as `task::await_asio` resumes from a handler. A handler that asks for its token costs
+  the session's one Asio handler per request (3 before), a streamed body's 7 (9 before).
+  Cancellation, the 4096-byte read-ahead bound and TLS are unchanged.
+
+### Added
+
+- `bench/server_compare.cc` kind `httpc` (a handler that asks for its token), `bench/watch_ab.sh`
+  (the A/B behind `docs/perf/watch-peek.md`), `test/watch_mutants.sh`, and `readahead_test` [U]
+  checks of a read resumed by the watch's read, its token, and `drain()`.
+
 ## 2026-11-03: `HttpAsioService::port()`
 
 `HttpAsioService::port()` returns the port the listeners are bound to, so `start(0)` can report
