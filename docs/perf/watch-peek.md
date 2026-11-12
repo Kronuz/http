@@ -24,9 +24,11 @@ more `recv`, two task frames, a channel operation and two more Asio handlers per
    the watch, EOF or an error cancels the request before `cancel_token()` returns, as the peek decided. With nothing
    there, the watch on plain TCP waits for readability (`async_wait`, which Asio does not try at once) and then reads
    without waiting. (http:f43dee4)
-2. The pending read's completion resumes the coroutine waiting on it in place, by the rule `task::await_asio` uses
-   (in a top-level handler on the waiter's loop, inside its scheduler's scope; else posted): no frame, no channel. A
-   reader's token still ends the wait by cancelling it on the socket; `drain()` waits the same way. (http:6ec7324)
+2. The pending read's completion resumes the coroutine waiting on it in place, through `task::await_asio`'s own
+   resume (in a top-level handler on the waiter's loop, inside its scheduler's scope and its inline-resume bound; else
+   posted): no frame, no channel. A reader's token still ends the wait by cancelling it on the socket, and marks it
+   cancelled, so a wake that finds nothing after a cancel the socket no longer saw ends the read instead of waiting
+   again; `drain()` waits the same way. (http:6ec7324)
 
 ## Counts
 
@@ -47,18 +49,20 @@ tracking), Release, macOS:
 
 `bench/watch_ab.sh run` as an `exclusive` job (261109-150350-f39012, 6 interleaved rounds of 4 s per series, 2
 reactors, `wrk` keep-alive; i9-9980HK, macOS, x86-64 Release binaries checked with `file`): after is http:13933f0,
-before is http:8262172, and a copy of the after binary is the A/A control. Rates and CPU are medians over the rounds;
-the ratio is the median per-round ratio with its range, beside the A/A control's per-round range; a row counts when
-its range sits on one side of 1 and its ratio lies outside the A/A range.
+before is http:8262172, and a copy of the after binary is the A/A control. Each round runs every series once per
+row, and the series that starts rotates by round (`bench/ab.sh run`). Rates and CPU are medians over the rounds;
+after vs before is the median per-round ratio after/before with its range, and the A/A range is the per-round
+after/control ratio, in the same direction; a row counts when its range sits on one side of 1 and its ratio lies
+outside the A/A range.
 
 | kind | conns | req/s before | req/s after | after vs before | A/A range | CPU us/req before | after | verdict |
 | --- | ---: | ---: | ---: | --- | --- | ---: | ---: | --- |
-| `httpc` (asks) | 1 | 16,570 | 23,688 | 1.39x faster (1.37-1.98) | 1.00-1.05 | 24.4 | 18.8 | 21% less CPU |
-| `httpc` (asks) | 8 | 92,414 | 105,055 | 1.10x faster (1.06-1.18) | 0.95-1.08 | 17.4 | 15.3 | 11% less CPU |
-| `httpc` (asks) | 64 | 131,346 | 133,057 | 1.03x (0.82-1.11) | 0.91-1.22 | 13.7 | 13.4 | noise |
-| `http` (never asks) | 1 | 23,359 | 24,515 | 1.04x (1.01-1.22) | 0.81-1.00 | 18.9 | 18.1 | noise |
-| `http` (never asks) | 8 | 105,463 | 105,522 | 0.98x (0.92-1.05) | 0.97-1.04 | 14.3 | 14.2 | noise |
-| `http` (never asks) | 64 | 133,364 | 130,363 | 1.00x (0.89-1.03) | 0.95-1.02 | 12.4 | 12.7 | noise |
+| `httpc` (asks) | 1 | 16,570 | 23,688 | 1.39x faster (1.37-1.98) | 0.96-1.00 | 24.4 | 18.8 | 21% less CPU |
+| `httpc` (asks) | 8 | 92,414 | 105,055 | 1.10x faster (1.06-1.18) | 0.93-1.05 | 17.4 | 15.3 | 11% less CPU |
+| `httpc` (asks) | 64 | 131,346 | 133,057 | 1.03x (0.82-1.11) | 0.82-1.10 | 13.7 | 13.4 | noise |
+| `http` (never asks) | 1 | 23,359 | 24,515 | 1.04x (1.01-1.22) | 1.00-1.24 | 18.9 | 18.1 | noise |
+| `http` (never asks) | 8 | 105,463 | 105,522 | 0.98x (0.92-1.05) | 0.96-1.03 | 14.3 | 14.2 | noise |
+| `http` (never asks) | 64 | 133,364 | 130,363 | 1.00x (0.89-1.03) | 0.98-1.05 | 12.4 | 12.7 | noise |
 
 What asking costs, `httpc` against `http` in the same binary (medians):
 
@@ -69,9 +73,10 @@ What asking costs, `httpc` against `http` in the same binary (medians):
 | 64 | 2% fewer req/s, +1.3 us | 2% more req/s, +0.7 us |
 
 The change removes most of what asking costs where a connection waits on its reply: 1.39x faster at 1 connection
-and 1.10x at 8. At 8 the lowest round (1.06) reaches into the top of the A/A range (1.08), so that win is the smaller
-and less certain one. At 64 connections the reactor is saturated and the A/B is noise (its range straddles 1). A
-request that never asks is unchanged at every count. A residual of 0.7 to 1.1 us of CPU per asking request remains,
+and 1.10x at 8. At 8 the lowest round (1.06) sits just above the top of the A/A range (1.05), so that win is the
+smaller and less certain one. At 64 connections the reactor is saturated and the A/B is noise (its range straddles 1). A
+request that never asks is unchanged at every count: at 1 connection its range (1.01-1.22) sits above 1, but its ratio
+(1.04) lies inside the A/A range (1.00-1.24). A residual of 0.7 to 1.1 us of CPU per asking request remains,
 not attributed; the counting build shows the same handlers and allocations per request for both kinds
 (`counts-*.txt` in the job's output: 1 handler and 3 allocations, against 3 and 6 before).
 

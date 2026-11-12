@@ -460,6 +460,39 @@ static void held_read_tests() {
 		while (got.size() < data.size()) { auto n = read_once(p, in, 65536); if (!n.done || n.error) { break; } got += n.data; }
 		check(got == data, "[U] and the next reads return them all, in order");
 	}
+	{   // a token requested after the watch's wait completed, before its handler runs, with nothing
+		// to read (a spurious wake): the socket cancel finds no operation, and the read still ends.
+		// A wait queued first on the same socket completes in the same reactor pass and runs first:
+		// it takes the byte and requests the token, so the watch's handler wakes to EAGAIN.
+		Pair p;
+		auto in = std::make_shared<Input>(p.server);
+		in->watch([] {}, true);
+		task::cancel_source source;
+		bool took = false;
+		p.server.async_wait(asio::socket_base::wait_read, [&](asio::error_code error) {
+			char b;
+			took = !error && ::recv(p.server.native_handle(), &b, 1, MSG_DONTWAIT) == 1;
+			source.request();
+		});
+		in->engage();   // the watch's wait, queued behind the one above
+		in->unwatch();
+		Read r;
+		start_read(p, in, r, source.token());
+		p.settle();
+		check(!r.done, "[U] the reader waits on the pending read");
+		p.send("x");
+		run_until(p, r.done);
+		check(took, "[U] the wake's byte is taken before the watch's handler runs");
+		check(r.done && r.error == asio::error::operation_aborted, "[U] a cancel between the wake and its handler ends the read with operation_aborted");
+		if (r.done) {   // a reader still waiting holds the input: no second reader may start
+			const std::string data = pattern(3000, 9);
+			p.send(data);
+			check(p.arrived(3000), "[U] 3000 bytes sent after that cancel");
+			std::string got;
+			while (got.size() < data.size()) { auto n = read_once(p, in, 65536); if (!n.done || n.error) { break; } got += n.data; }
+			check(got == data, "[U] and the next reads return them all, in order, after that cancel");
+		}
+	}
 	{   // a token requested before the read waits ends it too
 		Pair p;
 		auto in = std::make_shared<Input>(p.server);

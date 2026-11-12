@@ -522,9 +522,9 @@ public:
 		std::coroutine_handle<> await_suspend(std::coroutine_handle<> h) {
 			if (direct_) { return direct_->await_suspend(h) ? std::noop_coroutine() : h; }
 			// The watch's read is pending: its completion resumes h. A requested token ends it
-			// by cancelling it on the socket.
+			// by cancelling it on the socket and marking the wait cancelled (see readable()).
 			input_.wait_for_read(waiting_ = h);
-			cancel_.emplace(token_, Cancel{&input_.stream_});
+			cancel_.emplace(token_, Cancel{&input_});
 			return std::noop_coroutine();
 		}
 		ReadResult await_resume() {
@@ -543,8 +543,12 @@ public:
 			template<class Handler> void operator()(Handler&& handler) const { stream->async_read_some(output, std::forward<Handler>(handler)); }
 		};
 		struct Cancel {
-			Stream* stream;
-			void operator()() const { asio::error_code ignored; stream->lowest_layer().cancel(ignored); }
+			ConnectionInput* input;
+			void operator()() const {
+				input->cancelled_ = true;
+				asio::error_code ignored;
+				input->stream_.lowest_layer().cancel(ignored);
+			}
 		};
 		using Direct = decltype(task::await_asio<void(asio::error_code, std::size_t)>(std::declval<SocketRead>(), std::declval<task::cancel_token>()));
 		ConnectionInput& input_;
@@ -566,17 +570,13 @@ private:
 		assert(!waiter_);
 		waiter_ = h;
 		waiter_scheduler_ = task::current();
+		cancelled_ = false;
 	}
 	void forget(std::coroutine_handle<> h) noexcept { if (h && waiter_ == h) { waiter_ = {}; } }
-	// As task::await_asio resumes from a handler: in place when the read completes in a
-	// top-level handler on the waiter's loop (in its scheduler's scope), else through it.
+	// By task::await_asio's own rule (task_asio.hh): in place in a top-level handler on the
+	// waiter's loop, within the inline-resume bound, else through its scheduler.
 	void resume_waiter() {
-		const auto h = std::exchange(waiter_, {});
-		if (!h) { return; }
-		const task::scheduler_ref s = waiter_scheduler_;
-		if (!s) { h.resume(); }
-		else if (s.runs_here() && !task::current()) { task::running_on scope(s); h.resume(); }
-		else { s.post(h); }
+		if (const auto h = std::exchange(waiter_, {})) { task::detail::asio_park::resume(waiter_scheduler_, h); }
 	}
 	// What the watch's read left, for read(): the bytes read ahead, oldest first (the rest stays
 	// for the next read), else its EOF or error.
@@ -609,11 +609,16 @@ private:
 			}
 		} catch (...) { pending_ = false; throw; }
 	}
+	// A wake that finds nothing waits again, unless the waiting reader's token was requested
+	// after the wait completed (its socket cancel found nothing to cancel): that ends the read.
 	void readable(asio::error_code error) {
 		std::size_t size = 0;
 		if (!error && !receive_now(error, size)) {
-			pending_ = false;   // woken with nothing to read: wait again
-			try { arm(); return; } catch (...) { error = asio::error::no_memory; }
+			if (waiter_ && cancelled_) { error = asio::error::operation_aborted; }
+			else {
+				pending_ = false;
+				try { arm(); return; } catch (...) { error = asio::error::no_memory; }
+			}
 		}
 		completed(error, size);
 	}
@@ -658,6 +663,7 @@ private:
 	std::size_t size_ = 0, taken_ = 0;   // bytes the last read returned, and how many read() has handed out
 	asio::error_code error_;
 	bool pending_ = false, ready_ = false;
+	bool cancelled_ = false;   // the waiting reader's token was requested
 	std::function<void()> on_disconnect_;
 	std::weak_ptr<AsioDeferredControl> observer_;
 	std::weak_ptr<AsioOwnedStreamControl> owned_observer_;

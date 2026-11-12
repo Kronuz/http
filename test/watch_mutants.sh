@@ -1,17 +1,21 @@
 #!/bin/sh
 # Mutants of the disconnect watch (ConnectionInput in http_asio.h): each breaks one claim, and
 # readahead_test must fail against it. Prints one line per mutant and exits 1 if any survives.
-#   sh test/watch_mutants.sh [BUILD_DIR]     (default build-mutants; configured if missing)
+#   sh test/watch_mutants.sh [BUILD_DIR [MUTANT]]   (default build-mutants, configured if missing;
+#                                                    MUTANT runs that one alone)
 set -u
 cd "$(dirname "$0")/.." || exit 1
 BUILD=${1:-build-mutants}
+ONLY=${2:-}
 [ -f "$BUILD/CMakeCache.txt" ] || cmake -S . -B "$BUILD" -DCMAKE_BUILD_TYPE=Debug > /dev/null || exit 1
 cp http_asio.h "$BUILD/http_asio.h.orig"
 trap 'cp "$BUILD/http_asio.h.orig" http_asio.h' EXIT INT TERM
 
-# mutate NAME OLD NEW: OLD (one exact line fragment of http_asio.h) becomes NEW.
+# mutate NAME OLD NEW [CHECK]: OLD (one exact line fragment of http_asio.h) becomes NEW; with
+# CHECK, the mutant is killed only when that check is among readahead_test's failures.
 survived=0
 mutate() {
+	[ -z "$ONLY" ] || [ "$ONLY" = "$1" ] || return 0
 	cp "$BUILD/http_asio.h.orig" http_asio.h
 	python3 - "$2" "$3" <<'EOF' || { echo "mutant $1: the fragment is not in http_asio.h"; survived=1; return; }
 import sys
@@ -26,6 +30,8 @@ EOF
 	fi
 	if timeout 120 "$BUILD/readahead_test" >> "$BUILD/mutant.log" 2>&1; then
 		echo "mutant $1: SURVIVED"; survived=1
+	elif [ -n "${4:-}" ] && ! grep -qF "FAIL: $4" "$BUILD/mutant.log"; then
+		echo "mutant $1: failed, but not on its check: $4"; survived=1
 	else
 		echo "mutant $1: killed ($(grep -m1 -E 'FAIL' "$BUILD/mutant.log" | cut -c1-140))"
 	fi
@@ -34,13 +40,16 @@ EOF
 # The pending read never resumes the reader waiting on it.
 mutate no-resume '		resume_waiter();   // last: the reader may arm the next read' '		waiter_ = {};'
 # A reader waiting on the pending read ignores its token.
-mutate no-cancel '			cancel_.emplace(token_, Cancel{&input_.stream_});' '			(void)token_;'
+mutate no-cancel '			cancel_.emplace(token_, Cancel{&input_});' '			(void)token_;'
 # engage() does not decide at once: it only arms the wait.
 mutate engage-lazy '			if (receive_now(error, size)) { completed(error, size); return; }' '			(void)error; (void)size;'
 # engage() keeps what it read but does not end the watch on data.
 mutate engage-data '			if (n > 0) { error = {}; size = static_cast<std::size_t>(n); return true; }' '			if (n > 0) { error = asio::error::connection_reset; size = 0; return true; }'
 # EOF from the read that does not wait is taken for data.
 mutate eof-as-data '			if (n == 0) { error = asio::error::eof; size = 0; return true; }' '			if (n == 0) { return false; }'
+# A cancel that lands after the wait completed is lost: a wake that finds nothing waits again.
+mutate cancel-race '			if (waiter_ && cancelled_) { error = asio::error::operation_aborted; }' '			if (false) {}' \
+	'[U] a cancel between the wake and its handler ends the read with operation_aborted'
 
 cp "$BUILD/http_asio.h.orig" http_asio.h
 cmake --build "$BUILD" --target readahead_test > "$BUILD/mutant.log" 2>&1 && "$BUILD/readahead_test" > /dev/null 2>&1 \
