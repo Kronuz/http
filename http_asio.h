@@ -574,7 +574,8 @@ private:
 	}
 	void forget(std::coroutine_handle<> h) noexcept { if (h && waiter_ == h) { waiter_ = {}; } }
 	// By task::await_asio's own rule (task_asio.hh): in place in a top-level handler on the
-	// waiter's loop, within the inline-resume bound, else through its scheduler.
+	// waiter's loop, within the inline-resume bound, for a light reference; else, and always for
+	// a heavy one, through its scheduler (a heavy request's reads stay in the heavy lane).
 	void resume_waiter() {
 		if (const auto h = std::exchange(waiter_, {})) { task::detail::asio_park::resume(waiter_scheduler_, h); }
 	}

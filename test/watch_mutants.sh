@@ -50,6 +50,9 @@ mutate eof-as-data '			if (n == 0) { error = asio::error::eof; size = 0; return 
 # A cancel that lands after the wait completed is lost: a wake that finds nothing waits again.
 mutate cancel-race '			if (waiter_ && cancelled_) { error = asio::error::operation_aborted; }' '			if (false) {}' \
 	'[U] a cancel between the wake and its handler ends the read with operation_aborted'
+# A heavy waiter is resumed as a light one: inline in the watch's handler, outside the heavy lane.
+mutate heavy-inline 'asio_park::resume(waiter_scheduler_, h)' 'asio_park::resume(waiter_scheduler_.with_heavy(false), h)' \
+	"[H] a heavy reader's read is resumed through its scheduler, in the heavy lane"
 
 cp "$BUILD/http_asio.h.orig" http_asio.h
 cmake --build "$BUILD" --target readahead_test > "$BUILD/mutant.log" 2>&1 && "$BUILD/readahead_test" > /dev/null 2>&1 \

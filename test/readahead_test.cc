@@ -9,6 +9,7 @@
 //       first question decides what happened meanwhile as the read would have; the Request hook
 //       engages it once, from the first cancel_token(); a read that finds the watch's read
 //       pending is resumed by it, its token ends the wait, and drain() waits for it
+//   [H] a heavy reader's read is resumed through its scheduler, a light one's inline
 //   [Q] the same over real TCP: a hang-up before the first question is seen by it, pipelined input
 //       before it ends the watch, a handler that never asks has its pipelined successors answered
 //   [N] a buffered reply sent at once as far as the socket takes it: replies to 4 MiB arrive whole
@@ -522,6 +523,37 @@ static void held_read_tests() {
 	}
 }
 
+// The waiter's lane [H]: a heavy reader's read is resumed through its scheduler, in the heavy
+// lane; a light reader's inline in the watch's handler, as before.
+static task::task<void> read_lane(std::shared_ptr<Input> in, int& depth, bool& heavy, bool& done) {
+	std::string buf(65536, '\0');
+	co_await in->read(asio::buffer(buf), {});
+	depth = task::detail::inline_resume_depth;
+	heavy = task::current().heavy();
+	done = true;
+}
+static void lane_tests() {
+	for (const bool heavy_reader : {false, true}) {
+		Pair p;
+		auto in = std::make_shared<Input>(p.server);
+		in->watch([] {}, /*lazy=*/true);
+		in->engage();
+		in->unwatch();
+		int depth = -1;
+		bool heavy = false, done = false;
+		const auto ref = task::scheduler_ref::of(p.scheduler);
+		task::spawn(heavy_reader ? ref.with_heavy(true) : ref, read_lane(in, depth, heavy, done));
+		p.settle();
+		check(!done, std::string("[H] a ") + (heavy_reader ? "heavy" : "light") + " reader waits on the pending read");
+		p.send(pattern(100, 3));
+		p.io.restart();
+		for (auto end = clk::now() + 2s; !done && clk::now() < end;) { p.io.run_one_for(5ms); }
+		check(done, "[H] the read completes");
+		if (heavy_reader) { check(depth == 0 && heavy, "[H] a heavy reader's read is resumed through its scheduler, in the heavy lane"); }
+		else { check(depth == 1 && !heavy, "[H] a light reader's read is resumed inline in the watch's handler"); }
+	}
+}
+
 static void input_tests() {
 	// Bounded and ordered: 10000 bytes wait in the kernel; the watch takes 4096 of them and no more.
 	{
@@ -691,6 +723,7 @@ static void input_tests() {
 	}
 	lazy_watch_tests();
 	held_read_tests();
+	lane_tests();
 }
 #endif  // READAHEAD_TEST_INTEGRATION_ONLY
 
