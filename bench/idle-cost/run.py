@@ -189,6 +189,15 @@ def main() -> None:
             try:
                 server.wait(timeout=args.shutdown_timeout)
             except subprocess.TimeoutExpired:
+                print(
+                    json.dumps(
+                        {
+                            "shutdown_timeout_s": args.shutdown_timeout,
+                            "server_killed_by_driver": True,
+                        }
+                    ),
+                    flush=True,
+                )
                 server.kill()
                 server.wait()
     if server.returncode:
