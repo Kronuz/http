@@ -142,6 +142,12 @@ def main() -> None:
                 server.stdin.flush()
                 row = json.loads(server.stdout.readline())
                 if (
+                    args.tls
+                    and "release_connections" in row
+                    and row["release_connections"] != count
+                ):
+                    raise RuntimeError(f"RELEASE_BUFFERS observation mismatch: {row}")
+                if (
                     row["served"] != count
                     or row["active"] != count
                     or row["rejected"]

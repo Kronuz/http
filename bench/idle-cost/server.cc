@@ -26,6 +26,7 @@
 namespace {
 std::atomic<std::size_t> ssl_bytes{0}, ssl_blocks{0}, served{0}, failures{0}, release_connections{0};
 std::atomic<long> ssl_modes{0};
+std::atomic<std::size_t> bio_write_capacity{0};
 std::size_t usable(void* p) {
 #ifdef __APPLE__
     return p ? malloc_size(p) : 0;
@@ -99,6 +100,7 @@ void snapshot(const std::string& stage, const std::vector<std::unique_ptr<http::
     const auto [physical, compressed] = footprint();
     std::cout << "{\"stage\":\"" << stage << "\",\"served\":" << served.load()
               << ",\"active\":" << active << ",\"rejected\":" << rejected
+              << ",\"bio_write_capacity\":" << bio_write_capacity.load()
               << ",\"ssl_modes\":" << ssl_modes.load() << ",\"release_connections\":" << release_connections.load()
               << ",\"tls_failures\":" << failures.load() << ",\"rss\":" << rss()
               << ",\"physical_footprint\":" << physical << ",\"compressed\":" << compressed
@@ -146,6 +148,7 @@ int main(int argc, char** argv) {
             if (where & SSL_CB_HANDSHAKE_DONE) {
                 const auto modes = SSL_get_mode(const_cast<SSL*>(value));
                 ssl_modes.fetch_or(modes);
+                bio_write_capacity.store(BIO_get_write_buf_size(SSL_get_wbio(value), 0));
                 if (modes & SSL_MODE_RELEASE_BUFFERS) ++release_connections;
             }
         });
@@ -166,6 +169,7 @@ int main(int argc, char** argv) {
         services.push_back(std::move(service));
     }
     std::cout << "{\"listener_base\":" << base_port << ",\"socket_object\":" << sizeof(asio::ip::tcp::socket)
+              << ",\"tls_staging_buffer\":" << asio::ssl::detail::stream_core::max_tls_record_size
               << ",\"parser_object\":" << sizeof(http::RequestParser)
               << ",\"plain_input_object\":" << sizeof(http::detail::ConnectionInput<asio::ip::tcp::socket>)
               << ",\"timer_object\":" << sizeof(asio::steady_timer)
