@@ -64,3 +64,29 @@ void ssl_owners_json() {
     }
     std::cout << ']';
 }
+void socket_owners_json() {
+#ifdef __APPLE__
+    const auto capacity = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, nullptr, 0);
+    if (capacity <= 0) throw std::runtime_error("socket owner list size failed");
+    std::vector<proc_fdinfo> descriptors(capacity / sizeof(proc_fdinfo) + 32);
+    const auto filled = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, descriptors.data(),
+                                    static_cast<int>(descriptors.size() * sizeof(proc_fdinfo)));
+    if (filled <= 0) throw std::runtime_error("socket owner list failed");
+    std::size_t sockets = 0, receive = 0, send = 0, receive_capacity = 0, send_capacity = 0;
+    for (std::size_t i = 0; i < static_cast<std::size_t>(filled) / sizeof(proc_fdinfo); ++i) {
+        const auto& descriptor = descriptors[i];
+        if (descriptor.proc_fdtype != PROX_FDTYPE_SOCKET) continue;
+        socket_fdinfo info{};
+        if (proc_pidfdinfo(getpid(), descriptor.proc_fd, PROC_PIDFDSOCKETINFO, &info, sizeof(info))
+            != sizeof(info)) throw std::runtime_error("socket owner read failed");
+        if (info.psi.soi_kind != SOCKINFO_TCP) continue;
+        ++sockets;
+        receive += info.psi.soi_rcv.sbi_mbcnt; send += info.psi.soi_snd.sbi_mbcnt;
+        receive_capacity += info.psi.soi_rcv.sbi_hiwat; send_capacity += info.psi.soi_snd.sbi_hiwat;
+    }
+    std::cout << ",\"kernel_sockets\":" << sockets << ",\"kernel_receive_mbuf_bytes\":" << receive
+              << ",\"kernel_send_mbuf_bytes\":" << send
+              << ",\"kernel_receive_capacity\":" << receive_capacity
+              << ",\"kernel_send_capacity\":" << send_capacity;
+#endif
+}

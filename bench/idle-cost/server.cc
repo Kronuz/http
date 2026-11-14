@@ -11,6 +11,11 @@
 #include <vector>
 #ifdef __APPLE__
 #include <mach/mach.h>
+#ifdef HTTP_IDLE_SSL_OWNERS
+#include <libproc.h>
+#include <sys/proc_info.h>
+#include <unistd.h>
+#endif
 #include <malloc/malloc.h>
 #else
 #include <malloc.h>
@@ -99,7 +104,10 @@ void snapshot(const std::string& stage, const std::vector<std::unique_ptr<http::
               << ",\"openssl_live\":" << ssl_bytes.load()
               << ",\"openssl_blocks\":" << ssl_blocks.load();
 #ifdef HTTP_IDLE_SSL_OWNERS
-    ssl_owners_json();
+    if (stage != "memory-check") {
+        ssl_owners_json(); socket_owners_json();
+        std::cout << ",\"task_frames\":" << task::detail::live_frames();
+    }
 #endif
     std::cout << "}" << std::endl;
 }
