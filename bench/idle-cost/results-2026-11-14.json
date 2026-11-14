@@ -1,0 +1,5417 @@
+{
+  "product_commit": "http:09b644d",
+  "measured_binary_commit": "http:ff8cc93",
+  "host": "native x86_64 macOS 15.8.1, 32 GiB",
+  "build": "Apple clang 17, Release -O3 -DNDEBUG; runtime OpenSSL 3.6.5",
+  "runs": [
+    {
+      "input": {
+        "binary_name": "http_idle_cost",
+        "binary_sha256": "943f5cbcc169fdbeee82bedfd2f3e75f785b30442ac24cf0544018b3b9616462",
+        "driver_sha256": "917c9fec7ff7a8f4c289ede739c565a4d544312dd61a90ffedefe64bdc858751",
+        "counts": [
+          10000
+        ],
+        "tls": false,
+        "base_port": 28000
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28000,
+        "socket_object": 88,
+        "tls_staging_buffer": 17408,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {},
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 2301952,
+        "physical_footprint": 1478656,
+        "compressed": 0,
+        "allocator_live": 82064,
+        "allocator_reserved": 29818880,
+        "openssl_live": 0,
+        "openssl_blocks": 0
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 145973248,
+          "physical_footprint": 144998400,
+          "compressed": 0,
+          "allocator_live": 1043941008,
+          "allocator_reserved": 125485056,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 145973248,
+          "physical_footprint": 144998400,
+          "compressed": 0,
+          "allocator_live": 1043941008,
+          "allocator_reserved": 125485056,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 145973248,
+          "physical_footprint": 144998400,
+          "compressed": 0,
+          "allocator_live": 1043941008,
+          "allocator_reserved": 125485056,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        }
+      ],
+      "completed": {
+        "elapsed_s": 3.5172765972092748,
+        "connections": 10000
+      },
+      "capture": "memory-round1.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_small_read",
+        "binary_sha256": "ee7e90ddb177dde1060c5234fa15f590175fd1b4315dda87d6c1f3089df20047",
+        "driver_sha256": "917c9fec7ff7a8f4c289ede739c565a4d544312dd61a90ffedefe64bdc858751",
+        "counts": [
+          10000
+        ],
+        "tls": false,
+        "base_port": 28008
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28008,
+        "socket_object": 88,
+        "tls_staging_buffer": 17408,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {},
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 2301952,
+        "physical_footprint": 1478656,
+        "compressed": 0,
+        "allocator_live": 82064,
+        "allocator_reserved": 29818880,
+        "openssl_live": 0,
+        "openssl_blocks": 0
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 130678784,
+          "physical_footprint": 129703936,
+          "compressed": 0,
+          "allocator_live": 127461008,
+          "allocator_reserved": 221134848,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 130678784,
+          "physical_footprint": 129703936,
+          "compressed": 0,
+          "allocator_live": 127461008,
+          "allocator_reserved": 221134848,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 130678784,
+          "physical_footprint": 129703936,
+          "compressed": 0,
+          "allocator_live": 127461008,
+          "allocator_reserved": 221134848,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        }
+      ],
+      "completed": {
+        "elapsed_s": 10.167660523205996,
+        "connections": 10000
+      },
+      "capture": "memory-round1.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_cost",
+        "binary_sha256": "943f5cbcc169fdbeee82bedfd2f3e75f785b30442ac24cf0544018b3b9616462",
+        "driver_sha256": "917c9fec7ff7a8f4c289ede739c565a4d544312dd61a90ffedefe64bdc858751",
+        "counts": [
+          10000
+        ],
+        "tls": true,
+        "base_port": 28016
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28016,
+        "socket_object": 88,
+        "tls_staging_buffer": 17408,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {},
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 4542464,
+        "physical_footprint": 2138112,
+        "compressed": 0,
+        "allocator_live": 706176,
+        "allocator_reserved": 30326784,
+        "openssl_live": 617440,
+        "openssl_blocks": 8006
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 968896512,
+          "physical_footprint": 965574656,
+          "compressed": 0,
+          "allocator_live": 2046047056,
+          "allocator_reserved": 1186316288,
+          "openssl_live": 636736688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 968896512,
+          "physical_footprint": 965574656,
+          "compressed": 0,
+          "allocator_live": 2046047056,
+          "allocator_reserved": 1186316288,
+          "openssl_live": 636736688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 968896512,
+          "physical_footprint": 965574656,
+          "compressed": 0,
+          "allocator_live": 2046047056,
+          "allocator_reserved": 1186316288,
+          "openssl_live": 636736688,
+          "openssl_blocks": 548991
+        }
+      ],
+      "completed": {
+        "elapsed_s": 22.714008815120906,
+        "connections": 10000
+      },
+      "capture": "memory-round1.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_small_read",
+        "binary_sha256": "ee7e90ddb177dde1060c5234fa15f590175fd1b4315dda87d6c1f3089df20047",
+        "driver_sha256": "917c9fec7ff7a8f4c289ede739c565a4d544312dd61a90ffedefe64bdc858751",
+        "counts": [
+          10000
+        ],
+        "tls": true,
+        "base_port": 28024
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28024,
+        "socket_object": 88,
+        "tls_staging_buffer": 17408,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {},
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 4554752,
+        "physical_footprint": 2150400,
+        "compressed": 0,
+        "allocator_live": 706176,
+        "allocator_reserved": 30375936,
+        "openssl_live": 617440,
+        "openssl_blocks": 8006
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 962199552,
+          "physical_footprint": 958877696,
+          "compressed": 0,
+          "allocator_live": 1134721360,
+          "allocator_reserved": 1259470848,
+          "openssl_live": 636736688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 962199552,
+          "physical_footprint": 958877696,
+          "compressed": 0,
+          "allocator_live": 1134721360,
+          "allocator_reserved": 1259470848,
+          "openssl_live": 636736688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 962199552,
+          "physical_footprint": 958877696,
+          "compressed": 0,
+          "allocator_live": 1134721360,
+          "allocator_reserved": 1259470848,
+          "openssl_live": 636736688,
+          "openssl_blocks": 548991
+        }
+      ],
+      "completed": {
+        "elapsed_s": 22.866420715115964,
+        "connections": 10000
+      },
+      "capture": "memory-round1.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_small_tls",
+        "binary_sha256": "e7d3d4d8bc2760e69093fbf6b4c27987031efead132e4e2e4f1b033aced81143",
+        "driver_sha256": "917c9fec7ff7a8f4c289ede739c565a4d544312dd61a90ffedefe64bdc858751",
+        "counts": [
+          10000
+        ],
+        "tls": true,
+        "base_port": 28032
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28032,
+        "socket_object": 88,
+        "tls_staging_buffer": 2048,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {},
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 4599808,
+        "physical_footprint": 2195456,
+        "compressed": 0,
+        "allocator_live": 706176,
+        "allocator_reserved": 48283648,
+        "openssl_live": 617440,
+        "openssl_blocks": 8006
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 547303424,
+          "physical_footprint": 543981568,
+          "compressed": 0,
+          "allocator_live": 1431660880,
+          "allocator_reserved": 580141056,
+          "openssl_live": 329536688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 547303424,
+          "physical_footprint": 543981568,
+          "compressed": 0,
+          "allocator_live": 1431660880,
+          "allocator_reserved": 580141056,
+          "openssl_live": 329536688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 547303424,
+          "physical_footprint": 543981568,
+          "compressed": 0,
+          "allocator_live": 1431660880,
+          "allocator_reserved": 580141056,
+          "openssl_live": 329536688,
+          "openssl_blocks": 548991
+        }
+      ],
+      "completed": {
+        "elapsed_s": 22.967788790818304,
+        "connections": 10000
+      },
+      "capture": "memory-round1.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_small_both",
+        "binary_sha256": "265bc377e0e280e2620f11f744cc96d314822345f84b896ab73521e4d3a6e2f2",
+        "driver_sha256": "917c9fec7ff7a8f4c289ede739c565a4d544312dd61a90ffedefe64bdc858751",
+        "counts": [
+          10000
+        ],
+        "tls": true,
+        "base_port": 28040
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28040,
+        "socket_object": 88,
+        "tls_staging_buffer": 2048,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {},
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 4583424,
+        "physical_footprint": 2179072,
+        "compressed": 0,
+        "allocator_live": 706176,
+        "allocator_reserved": 39862272,
+        "openssl_live": 617440,
+        "openssl_blocks": 8006
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 538132480,
+          "physical_footprint": 534810624,
+          "compressed": 0,
+          "allocator_live": 520308048,
+          "allocator_reserved": 648118272,
+          "openssl_live": 329536688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 538132480,
+          "physical_footprint": 534810624,
+          "compressed": 0,
+          "allocator_live": 520308048,
+          "allocator_reserved": 648118272,
+          "openssl_live": 329536688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 538132480,
+          "physical_footprint": 534810624,
+          "compressed": 0,
+          "allocator_live": 520308048,
+          "allocator_reserved": 648118272,
+          "openssl_live": 329536688,
+          "openssl_blocks": 548991
+        }
+      ],
+      "completed": {
+        "elapsed_s": 23.896088884212077,
+        "connections": 10000
+      },
+      "capture": "memory-round1.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_small_both",
+        "binary_sha256": "265bc377e0e280e2620f11f744cc96d314822345f84b896ab73521e4d3a6e2f2",
+        "driver_sha256": "917c9fec7ff7a8f4c289ede739c565a4d544312dd61a90ffedefe64bdc858751",
+        "counts": [
+          10000
+        ],
+        "tls": true,
+        "base_port": 28064
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28064,
+        "socket_object": 88,
+        "tls_staging_buffer": 2048,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {},
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 4542464,
+        "physical_footprint": 2138112,
+        "compressed": 0,
+        "allocator_live": 706176,
+        "allocator_reserved": 29245440,
+        "openssl_live": 617440,
+        "openssl_blocks": 8006
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 200470528,
+          "physical_footprint": 535126016,
+          "compressed": 337977344,
+          "allocator_live": 520273232,
+          "allocator_reserved": 648134656,
+          "openssl_live": 329536688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 200470528,
+          "physical_footprint": 535126016,
+          "compressed": 337977344,
+          "allocator_live": 520273232,
+          "allocator_reserved": 648134656,
+          "openssl_live": 329536688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 200470528,
+          "physical_footprint": 535126016,
+          "compressed": 337977344,
+          "allocator_live": 520273232,
+          "allocator_reserved": 648134656,
+          "openssl_live": 329536688,
+          "openssl_blocks": 548991
+        }
+      ],
+      "completed": {
+        "elapsed_s": 18.88196809310466,
+        "connections": 10000
+      },
+      "capture": "memory-round2.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_small_tls",
+        "binary_sha256": "e7d3d4d8bc2760e69093fbf6b4c27987031efead132e4e2e4f1b033aced81143",
+        "driver_sha256": "917c9fec7ff7a8f4c289ede739c565a4d544312dd61a90ffedefe64bdc858751",
+        "counts": [
+          10000
+        ],
+        "tls": true,
+        "base_port": 28072
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28072,
+        "socket_object": 88,
+        "tls_staging_buffer": 2048,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {},
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 4706304,
+        "physical_footprint": 2301952,
+        "compressed": 0,
+        "allocator_live": 707200,
+        "allocator_reserved": 57901056,
+        "openssl_live": 617440,
+        "openssl_blocks": 8006
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 547659776,
+          "physical_footprint": 544337920,
+          "compressed": 0,
+          "allocator_live": 1431658320,
+          "allocator_reserved": 565166080,
+          "openssl_live": 329536688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 547659776,
+          "physical_footprint": 544337920,
+          "compressed": 0,
+          "allocator_live": 1431658320,
+          "allocator_reserved": 565166080,
+          "openssl_live": 329536688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 547659776,
+          "physical_footprint": 544337920,
+          "compressed": 0,
+          "allocator_live": 1431658320,
+          "allocator_reserved": 565166080,
+          "openssl_live": 329536688,
+          "openssl_blocks": 548991
+        }
+      ],
+      "completed": {
+        "elapsed_s": 23.21903720498085,
+        "connections": 10000
+      },
+      "capture": "memory-round2.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_small_read",
+        "binary_sha256": "ee7e90ddb177dde1060c5234fa15f590175fd1b4315dda87d6c1f3089df20047",
+        "driver_sha256": "917c9fec7ff7a8f4c289ede739c565a4d544312dd61a90ffedefe64bdc858751",
+        "counts": [
+          10000
+        ],
+        "tls": true,
+        "base_port": 28080
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28080,
+        "socket_object": 88,
+        "tls_staging_buffer": 17408,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {},
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 4644864,
+        "physical_footprint": 2240512,
+        "compressed": 0,
+        "allocator_live": 706176,
+        "allocator_reserved": 57835520,
+        "openssl_live": 617440,
+        "openssl_blocks": 8006
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 963264512,
+          "physical_footprint": 959942656,
+          "compressed": 0,
+          "allocator_live": 1134704464,
+          "allocator_reserved": 1278885888,
+          "openssl_live": 636736688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 963264512,
+          "physical_footprint": 959942656,
+          "compressed": 0,
+          "allocator_live": 1134704464,
+          "allocator_reserved": 1278885888,
+          "openssl_live": 636736688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 963264512,
+          "physical_footprint": 959942656,
+          "compressed": 0,
+          "allocator_live": 1134704464,
+          "allocator_reserved": 1278885888,
+          "openssl_live": 636736688,
+          "openssl_blocks": 548991
+        }
+      ],
+      "completed": {
+        "elapsed_s": 26.679980317130685,
+        "connections": 10000
+      },
+      "capture": "memory-round2.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_cost",
+        "binary_sha256": "943f5cbcc169fdbeee82bedfd2f3e75f785b30442ac24cf0544018b3b9616462",
+        "driver_sha256": "917c9fec7ff7a8f4c289ede739c565a4d544312dd61a90ffedefe64bdc858751",
+        "counts": [
+          10000
+        ],
+        "tls": true,
+        "base_port": 28088
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28088,
+        "socket_object": 88,
+        "tls_staging_buffer": 17408,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {},
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 4694016,
+        "physical_footprint": 2289664,
+        "compressed": 0,
+        "allocator_live": 713344,
+        "allocator_reserved": 49545216,
+        "openssl_live": 617440,
+        "openssl_blocks": 8006
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 971460608,
+          "physical_footprint": 968138752,
+          "compressed": 0,
+          "allocator_live": 2046083920,
+          "allocator_reserved": 1202470912,
+          "openssl_live": 636736688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 971460608,
+          "physical_footprint": 968138752,
+          "compressed": 0,
+          "allocator_live": 2046083920,
+          "allocator_reserved": 1202470912,
+          "openssl_live": 636736688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 971460608,
+          "physical_footprint": 968138752,
+          "compressed": 0,
+          "allocator_live": 2046083920,
+          "allocator_reserved": 1202470912,
+          "openssl_live": 636736688,
+          "openssl_blocks": 548991
+        }
+      ],
+      "completed": {
+        "elapsed_s": 26.118188285268843,
+        "connections": 10000
+      },
+      "capture": "memory-round2.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_small_read",
+        "binary_sha256": "ee7e90ddb177dde1060c5234fa15f590175fd1b4315dda87d6c1f3089df20047",
+        "driver_sha256": "917c9fec7ff7a8f4c289ede739c565a4d544312dd61a90ffedefe64bdc858751",
+        "counts": [
+          10000
+        ],
+        "tls": false,
+        "base_port": 28096
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28096,
+        "socket_object": 88,
+        "tls_staging_buffer": 17408,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {},
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 2433024,
+        "physical_footprint": 1609728,
+        "compressed": 0,
+        "allocator_live": 82064,
+        "allocator_reserved": 57491456,
+        "openssl_live": 0,
+        "openssl_blocks": 0
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 130637824,
+          "physical_footprint": 129662976,
+          "compressed": 0,
+          "allocator_live": 127461008,
+          "allocator_reserved": 209584128,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 130637824,
+          "physical_footprint": 129662976,
+          "compressed": 0,
+          "allocator_live": 127461008,
+          "allocator_reserved": 209584128,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 130637824,
+          "physical_footprint": 129662976,
+          "compressed": 0,
+          "allocator_live": 127461008,
+          "allocator_reserved": 209584128,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        }
+      ],
+      "completed": {
+        "elapsed_s": 12.603486251085997,
+        "connections": 10000
+      },
+      "capture": "memory-round2.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_cost",
+        "binary_sha256": "943f5cbcc169fdbeee82bedfd2f3e75f785b30442ac24cf0544018b3b9616462",
+        "driver_sha256": "917c9fec7ff7a8f4c289ede739c565a4d544312dd61a90ffedefe64bdc858751",
+        "counts": [
+          10000
+        ],
+        "tls": false,
+        "base_port": 28128
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28128,
+        "socket_object": 88,
+        "tls_staging_buffer": 17408,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {},
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 2338816,
+        "physical_footprint": 1515520,
+        "compressed": 0,
+        "allocator_live": 82064,
+        "allocator_reserved": 38338560,
+        "openssl_live": 0,
+        "openssl_blocks": 0
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 146059264,
+          "physical_footprint": 145084416,
+          "compressed": 0,
+          "allocator_live": 1043941008,
+          "allocator_reserved": 143540224,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 146059264,
+          "physical_footprint": 145084416,
+          "compressed": 0,
+          "allocator_live": 1043941008,
+          "allocator_reserved": 143540224,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 146059264,
+          "physical_footprint": 145084416,
+          "compressed": 0,
+          "allocator_live": 1043941008,
+          "allocator_reserved": 143540224,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        }
+      ],
+      "completed": {
+        "elapsed_s": 7.04695939226076,
+        "connections": 10000
+      },
+      "capture": "memory-round3.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_small_read",
+        "binary_sha256": "ee7e90ddb177dde1060c5234fa15f590175fd1b4315dda87d6c1f3089df20047",
+        "driver_sha256": "917c9fec7ff7a8f4c289ede739c565a4d544312dd61a90ffedefe64bdc858751",
+        "counts": [
+          10000
+        ],
+        "tls": false,
+        "base_port": 28136
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28136,
+        "socket_object": 88,
+        "tls_staging_buffer": 17408,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {},
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 2437120,
+        "physical_footprint": 1613824,
+        "compressed": 0,
+        "allocator_live": 82064,
+        "allocator_reserved": 57475072,
+        "openssl_live": 0,
+        "openssl_blocks": 0
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 130646016,
+          "physical_footprint": 129671168,
+          "compressed": 0,
+          "allocator_live": 127461008,
+          "allocator_reserved": 201244672,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 130646016,
+          "physical_footprint": 129671168,
+          "compressed": 0,
+          "allocator_live": 127461008,
+          "allocator_reserved": 201244672,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 130646016,
+          "physical_footprint": 129671168,
+          "compressed": 0,
+          "allocator_live": 127461008,
+          "allocator_reserved": 201244672,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        }
+      ],
+      "completed": {
+        "elapsed_s": 13.140982698649168,
+        "connections": 10000
+      },
+      "capture": "memory-round3.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_cost",
+        "binary_sha256": "943f5cbcc169fdbeee82bedfd2f3e75f785b30442ac24cf0544018b3b9616462",
+        "driver_sha256": "0c09615d3be0e4fddbef57999f8685cbbbcc844fc9d906c4b484de04e1ee8fcb",
+        "counts": [
+          10000
+        ],
+        "tls": false,
+        "base_port": 28800
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28800,
+        "socket_object": 88,
+        "tls_staging_buffer": 17408,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {
+        "server_pid": 72466,
+        "source_port_base": 10000
+      },
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 2420736,
+        "physical_footprint": 1597440,
+        "compressed": 0,
+        "allocator_live": 82064,
+        "allocator_reserved": 50069504,
+        "openssl_live": 0,
+        "openssl_blocks": 0
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 146243584,
+          "physical_footprint": 145268736,
+          "compressed": 0,
+          "allocator_live": 1043941008,
+          "allocator_reserved": 162594816,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 146243584,
+          "physical_footprint": 145268736,
+          "compressed": 0,
+          "allocator_live": 1043941008,
+          "allocator_reserved": 162594816,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 146243584,
+          "physical_footprint": 145268736,
+          "compressed": 0,
+          "allocator_live": 1043941008,
+          "allocator_reserved": 162594816,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        }
+      ],
+      "completed": {
+        "elapsed_s": 3.5533230137079954,
+        "connections": 10000
+      },
+      "capture": "memory-missing.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_cost",
+        "binary_sha256": "943f5cbcc169fdbeee82bedfd2f3e75f785b30442ac24cf0544018b3b9616462",
+        "driver_sha256": "0c09615d3be0e4fddbef57999f8685cbbbcc844fc9d906c4b484de04e1ee8fcb",
+        "counts": [
+          10000
+        ],
+        "tls": true,
+        "base_port": 28808
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28808,
+        "socket_object": 88,
+        "tls_staging_buffer": 17408,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {
+        "server_pid": 72497,
+        "source_port_base": 11250
+      },
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 4730880,
+        "physical_footprint": 2326528,
+        "compressed": 0,
+        "allocator_live": 714368,
+        "allocator_reserved": 57917440,
+        "openssl_live": 617440,
+        "openssl_blocks": 8006
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 972910592,
+          "physical_footprint": 969588736,
+          "compressed": 0,
+          "allocator_live": 2046072144,
+          "allocator_reserved": 1194360832,
+          "openssl_live": 636736688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 972910592,
+          "physical_footprint": 969588736,
+          "compressed": 0,
+          "allocator_live": 2046072144,
+          "allocator_reserved": 1194360832,
+          "openssl_live": 636736688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 972910592,
+          "physical_footprint": 969588736,
+          "compressed": 0,
+          "allocator_live": 2046072144,
+          "allocator_reserved": 1194360832,
+          "openssl_live": 636736688,
+          "openssl_blocks": 548991
+        }
+      ],
+      "completed": {
+        "elapsed_s": 27.085809427779168,
+        "connections": 10000
+      },
+      "capture": "memory-missing.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_small_read",
+        "binary_sha256": "ee7e90ddb177dde1060c5234fa15f590175fd1b4315dda87d6c1f3089df20047",
+        "driver_sha256": "0c09615d3be0e4fddbef57999f8685cbbbcc844fc9d906c4b484de04e1ee8fcb",
+        "counts": [
+          10000
+        ],
+        "tls": true,
+        "base_port": 28816
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28816,
+        "socket_object": 88,
+        "tls_staging_buffer": 17408,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {
+        "server_pid": 72685,
+        "source_port_base": 12500
+      },
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 4702208,
+        "physical_footprint": 2297856,
+        "compressed": 0,
+        "allocator_live": 706176,
+        "allocator_reserved": 58015744,
+        "openssl_live": 617440,
+        "openssl_blocks": 8006
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 961708032,
+          "physical_footprint": 958386176,
+          "compressed": 0,
+          "allocator_live": 1134737744,
+          "allocator_reserved": 1277722624,
+          "openssl_live": 636736688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 961708032,
+          "physical_footprint": 958386176,
+          "compressed": 0,
+          "allocator_live": 1134737744,
+          "allocator_reserved": 1277722624,
+          "openssl_live": 636736688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 961708032,
+          "physical_footprint": 958386176,
+          "compressed": 0,
+          "allocator_live": 1134737744,
+          "allocator_reserved": 1277722624,
+          "openssl_live": 636736688,
+          "openssl_blocks": 548991
+        }
+      ],
+      "completed": {
+        "elapsed_s": 29.1141934315674,
+        "connections": 10000
+      },
+      "capture": "memory-missing.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_small_tls",
+        "binary_sha256": "e7d3d4d8bc2760e69093fbf6b4c27987031efead132e4e2e4f1b033aced81143",
+        "driver_sha256": "0c09615d3be0e4fddbef57999f8685cbbbcc844fc9d906c4b484de04e1ee8fcb",
+        "counts": [
+          10000
+        ],
+        "tls": true,
+        "base_port": 28920
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28920,
+        "socket_object": 88,
+        "tls_staging_buffer": 2048,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {
+        "server_pid": 75415,
+        "source_port_base": 40000
+      },
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 4464640,
+        "physical_footprint": 2060288,
+        "compressed": 0,
+        "allocator_live": 706176,
+        "allocator_reserved": 19660800,
+        "openssl_live": 617440,
+        "openssl_blocks": 8006
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 547323904,
+          "physical_footprint": 544002048,
+          "compressed": 0,
+          "allocator_live": 1431673168,
+          "allocator_reserved": 580321280,
+          "openssl_live": 329536688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 547323904,
+          "physical_footprint": 544002048,
+          "compressed": 0,
+          "allocator_live": 1431673168,
+          "allocator_reserved": 580321280,
+          "openssl_live": 329536688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 547323904,
+          "physical_footprint": 544002048,
+          "compressed": 0,
+          "allocator_live": 1431673168,
+          "allocator_reserved": 580321280,
+          "openssl_live": 329536688,
+          "openssl_blocks": 548991
+        }
+      ],
+      "completed": {
+        "elapsed_s": 18.083151411265135,
+        "connections": 10000
+      },
+      "capture": "memory-last2.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_small_both",
+        "binary_sha256": "265bc377e0e280e2620f11f744cc96d314822345f84b896ab73521e4d3a6e2f2",
+        "driver_sha256": "0c09615d3be0e4fddbef57999f8685cbbbcc844fc9d906c4b484de04e1ee8fcb",
+        "counts": [
+          10000
+        ],
+        "tls": true,
+        "base_port": 28928
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28928,
+        "socket_object": 88,
+        "tls_staging_buffer": 2048,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {
+        "server_pid": 75555,
+        "source_port_base": 43000
+      },
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 4587520,
+        "physical_footprint": 2183168,
+        "compressed": 0,
+        "allocator_live": 706176,
+        "allocator_reserved": 47235072,
+        "openssl_live": 617440,
+        "openssl_blocks": 8006
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 538468352,
+          "physical_footprint": 535146496,
+          "compressed": 0,
+          "allocator_live": 520312656,
+          "allocator_reserved": 656064512,
+          "openssl_live": 329536688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 538468352,
+          "physical_footprint": 535146496,
+          "compressed": 0,
+          "allocator_live": 520312656,
+          "allocator_reserved": 656064512,
+          "openssl_live": 329536688,
+          "openssl_blocks": 548991
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 538468352,
+          "physical_footprint": 535146496,
+          "compressed": 0,
+          "allocator_live": 520312656,
+          "allocator_reserved": 656064512,
+          "openssl_live": 329536688,
+          "openssl_blocks": 548991
+        }
+      ],
+      "completed": {
+        "elapsed_s": 25.416079752147198,
+        "connections": 10000
+      },
+      "capture": "memory-last2.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_cost",
+        "binary_sha256": "943f5cbcc169fdbeee82bedfd2f3e75f785b30442ac24cf0544018b3b9616462",
+        "driver_sha256": "0c09615d3be0e4fddbef57999f8685cbbbcc844fc9d906c4b484de04e1ee8fcb",
+        "counts": [
+          100000
+        ],
+        "tls": false,
+        "base_port": 19000
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 19000,
+        "socket_object": 88,
+        "tls_staging_buffer": 17408,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {
+        "server_pid": 78660,
+        "source_port_base": 32500
+      },
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 2252800,
+        "physical_footprint": 1429504,
+        "compressed": 0,
+        "allocator_live": 82064,
+        "allocator_reserved": 20267008,
+        "openssl_live": 0,
+        "openssl_blocks": 0
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-100000-0",
+          "served": 100000,
+          "active": 100000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 1435217920,
+          "physical_footprint": 1434243072,
+          "compressed": 0,
+          "allocator_live": 10438501008,
+          "allocator_reserved": 733478912,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        },
+        {
+          "stage": "idle-100000-1",
+          "served": 100000,
+          "active": 100000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 1435217920,
+          "physical_footprint": 1434243072,
+          "compressed": 0,
+          "allocator_live": 10438501008,
+          "allocator_reserved": 733478912,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        },
+        {
+          "stage": "idle-100000-2",
+          "served": 100000,
+          "active": 100000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 1435217920,
+          "physical_footprint": 1434243072,
+          "compressed": 0,
+          "allocator_live": 10438501008,
+          "allocator_reserved": 733478912,
+          "openssl_live": 0,
+          "openssl_blocks": 0
+        }
+      ],
+      "completed": {
+        "elapsed_s": 43.558163196314126,
+        "connections": 100000
+      },
+      "capture": "final-plain100k.log"
+    }
+  ],
+  "owner_profiles": [
+    {
+      "input": {
+        "binary_name": "http_idle_owners",
+        "binary_sha256": "d3aa98d2905767f1e7c20d6e1b1353af934e7c1efe60cdc0e22d6a78ea30d341",
+        "driver_sha256": "0c09615d3be0e4fddbef57999f8685cbbbcc844fc9d906c4b484de04e1ee8fcb",
+        "counts": [
+          10000
+        ],
+        "tls": false,
+        "base_port": 28400
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28400,
+        "socket_object": 88,
+        "tls_staging_buffer": 17408,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {
+        "server_pid": 75740,
+        "source_port_base": 10000
+      },
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 2351104,
+        "physical_footprint": 1531904,
+        "compressed": 0,
+        "allocator_live": 82064,
+        "allocator_reserved": 39419904,
+        "openssl_live": 0,
+        "openssl_blocks": 0,
+        "openssl_accounting": "requested-profile",
+        "openssl_profile_headers": 0,
+        "openssl_owners": [],
+        "kernel_sockets": 8,
+        "kernel_receive_mbuf_bytes": 0,
+        "kernel_send_mbuf_bytes": 0,
+        "kernel_receive_capacity": 1048576,
+        "kernel_send_capacity": 1048576,
+        "task_frames": 16
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 146022400,
+          "physical_footprint": 145059840,
+          "compressed": 0,
+          "allocator_live": 1043941008,
+          "allocator_reserved": 141344768,
+          "openssl_live": 0,
+          "openssl_blocks": 0,
+          "openssl_accounting": "requested-profile",
+          "openssl_profile_headers": 0,
+          "openssl_owners": [],
+          "kernel_sockets": 10008,
+          "kernel_receive_mbuf_bytes": 0,
+          "kernel_send_mbuf_bytes": 0,
+          "kernel_receive_capacity": 4084032852,
+          "kernel_send_capacity": 1474959976,
+          "task_frames": 40016
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 146128896,
+          "physical_footprint": 145166336,
+          "compressed": 0,
+          "allocator_live": 1044072080,
+          "allocator_reserved": 141344768,
+          "openssl_live": 0,
+          "openssl_blocks": 0,
+          "openssl_accounting": "requested-profile",
+          "openssl_profile_headers": 0,
+          "openssl_owners": [],
+          "kernel_sockets": 10008,
+          "kernel_receive_mbuf_bytes": 0,
+          "kernel_send_mbuf_bytes": 0,
+          "kernel_receive_capacity": 4084032852,
+          "kernel_send_capacity": 1474959976,
+          "task_frames": 40016
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 0,
+          "ssl_modes": 0,
+          "release_connections": 0,
+          "tls_failures": 0,
+          "rss": 146128896,
+          "physical_footprint": 145166336,
+          "compressed": 0,
+          "allocator_live": 1044072080,
+          "allocator_reserved": 141344768,
+          "openssl_live": 0,
+          "openssl_blocks": 0,
+          "openssl_accounting": "requested-profile",
+          "openssl_profile_headers": 0,
+          "openssl_owners": [],
+          "kernel_sockets": 10008,
+          "kernel_receive_mbuf_bytes": 0,
+          "kernel_send_mbuf_bytes": 0,
+          "kernel_receive_capacity": 4084032852,
+          "kernel_send_capacity": 1474959976,
+          "task_frames": 40016
+        }
+      ],
+      "completed": {
+        "elapsed_s": 12.483285780996084,
+        "connections": 10000
+      },
+      "capture": "owner-profiles.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_owners",
+        "binary_sha256": "d3aa98d2905767f1e7c20d6e1b1353af934e7c1efe60cdc0e22d6a78ea30d341",
+        "driver_sha256": "0c09615d3be0e4fddbef57999f8685cbbbcc844fc9d906c4b484de04e1ee8fcb",
+        "counts": [
+          10000
+        ],
+        "tls": true,
+        "base_port": 28960
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28960,
+        "socket_object": 88,
+        "tls_staging_buffer": 17408,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {
+        "server_pid": 77365,
+        "source_port_base": 45000
+      },
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 4702208,
+        "physical_footprint": 2260992,
+        "compressed": 0,
+        "allocator_live": 834160,
+        "allocator_reserved": 29327360,
+        "openssl_live": 533021,
+        "openssl_blocks": 8006,
+        "openssl_accounting": "requested-profile",
+        "openssl_profile_headers": 128096,
+        "openssl_owners": [
+          {
+            "file": "threads_pthread.c",
+            "bytes": 8544,
+            "blocks": 43
+          },
+          {
+            "file": "threads_common.c",
+            "bytes": 64,
+            "blocks": 1
+          },
+          {
+            "file": "sparse_array.c",
+            "bytes": 70912,
+            "blocks": 560
+          },
+          {
+            "file": "unknown",
+            "bytes": 904,
+            "blocks": 1
+          },
+          {
+            "file": "initthread.c",
+            "bytes": 120,
+            "blocks": 5
+          },
+          {
+            "file": "stack.c",
+            "bytes": 46848,
+            "blocks": 1150
+          },
+          {
+            "file": "lhash.c",
+            "bytes": 133304,
+            "blocks": 2835
+          },
+          {
+            "file": "o_names.c",
+            "bytes": 5688,
+            "blocks": 237
+          },
+          {
+            "file": "property.c",
+            "bytes": 23312,
+            "blocks": 692
+          },
+          {
+            "file": "provider_conf.c",
+            "bytes": 16,
+            "blocks": 1
+          },
+          {
+            "file": "rand_lib.c",
+            "bytes": 93,
+            "blocks": 2
+          },
+          {
+            "file": "decoder_pkey.c",
+            "bytes": 268,
+            "blocks": 9
+          },
+          {
+            "file": "provider_core.c",
+            "bytes": 323,
+            "blocks": 4
+          },
+          {
+            "file": "property_string.c",
+            "bytes": 549,
+            "blocks": 23
+          },
+          {
+            "file": "core_namemap.c",
+            "bytes": 9326,
+            "blocks": 589
+          },
+          {
+            "file": "hashtable.c",
+            "bytes": 94096,
+            "blocks": 591
+          },
+          {
+            "file": "bss_core.c",
+            "bytes": 56,
+            "blocks": 1
+          },
+          {
+            "file": "drbg.c",
+            "bytes": 880,
+            "blocks": 4
+          },
+          {
+            "file": "self_test_core.c",
+            "bytes": 16,
+            "blocks": 1
+          },
+          {
+            "file": "indicator_core.c",
+            "bytes": 8,
+            "blocks": 1
+          },
+          {
+            "file": "internal.c",
+            "bytes": 32,
+            "blocks": 1
+          },
+          {
+            "file": "thread_posix.c",
+            "bytes": 112,
+            "blocks": 2
+          },
+          {
+            "file": "provider_child.c",
+            "bytes": 88,
+            "blocks": 1
+          },
+          {
+            "file": "conf_mod.c",
+            "bytes": 471,
+            "blocks": 17
+          },
+          {
+            "file": "buffer.c",
+            "bytes": 128,
+            "blocks": 4
+          },
+          {
+            "file": "eng_lib.c",
+            "bytes": 456,
+            "blocks": 3
+          },
+          {
+            "file": "ex_data.c",
+            "bytes": 48,
+            "blocks": 1
+          },
+          {
+            "file": "ssl_lib.c",
+            "bytes": 1832,
+            "blocks": 2
+          },
+          {
+            "file": "x509_lu.c",
+            "bytes": 160,
+            "blocks": 1
+          },
+          {
+            "file": "x509_vpm.c",
+            "bytes": 224,
+            "blocks": 2
+          },
+          {
+            "file": "ct_log.c",
+            "bytes": 24,
+            "blocks": 1
+          },
+          {
+            "file": "provider_ctx.c",
+            "bytes": 32,
+            "blocks": 1
+          },
+          {
+            "file": "bio_meth.c",
+            "bytes": 131,
+            "blocks": 2
+          },
+          {
+            "file": "evp_enc.c",
+            "bytes": 40208,
+            "blocks": 139
+          },
+          {
+            "file": "core_algorithm.c",
+            "bytes": 4154,
+            "blocks": 344
+          },
+          {
+            "file": "property_parse.c",
+            "bytes": 9304,
+            "blocks": 92
+          },
+          {
+            "file": "defn_cache.c",
+            "bytes": 1187,
+            "blocks": 16
+          },
+          {
+            "file": "digest.c",
+            "bytes": 6696,
+            "blocks": 27
+          },
+          {
+            "file": "signature.c",
+            "bytes": 17464,
+            "blocks": 59
+          },
+          {
+            "file": "exchange.c",
+            "bytes": 896,
+            "blocks": 7
+          },
+          {
+            "file": "t1_lib.c",
+            "bytes": 8862,
+            "blocks": 194
+          },
+          {
+            "file": "keymgmt_meth.c",
+            "bytes": 10240,
+            "blocks": 40
+          },
+          {
+            "file": "p_lib.c",
+            "bytes": 304,
+            "blocks": 2
+          },
+          {
+            "file": "ssl_cert.c",
+            "bytes": 664,
+            "blocks": 2
+          },
+          {
+            "file": "evp_rand.c",
+            "bytes": 1160,
+            "blocks": 9
+          },
+          {
+            "file": "seed_src.c",
+            "bytes": 16,
+            "blocks": 1
+          },
+          {
+            "file": "drbg_ctr.c",
+            "bytes": 528,
+            "blocks": 3
+          },
+          {
+            "file": "cipher_aes.c",
+            "bytes": 4032,
+            "blocks": 9
+          },
+          {
+            "file": "tasn_new.c",
+            "bytes": 584,
+            "blocks": 8
+          },
+          {
+            "file": "x_name.c",
+            "bytes": 120,
+            "blocks": 4
+          },
+          {
+            "file": "asn1_lib.c",
+            "bytes": 269,
+            "blocks": 15
+          },
+          {
+            "file": "x_pubkey.c",
+            "bytes": 48,
+            "blocks": 1
+          },
+          {
+            "file": "a_bitstr.c",
+            "bytes": 136,
+            "blocks": 2
+          },
+          {
+            "file": "decoder_meth.c",
+            "bytes": 9344,
+            "blocks": 78
+          },
+          {
+            "file": "decode_der2key.c",
+            "bytes": 10640,
+            "blocks": 38
+          },
+          {
+            "file": "decoder_lib.c",
+            "bytes": 2112,
+            "blocks": 44
+          },
+          {
+            "file": "decode_spki2typespki.c",
+            "bytes": 528,
+            "blocks": 2
+          },
+          {
+            "file": "decode_pem2der.c",
+            "bytes": 592,
+            "blocks": 2
+          },
+          {
+            "file": "decode_epki2pki.c",
+            "bytes": 528,
+            "blocks": 2
+          },
+          {
+            "file": "ec_kmeth.c",
+            "bytes": 209,
+            "blocks": 3
+          },
+          {
+            "file": "ec_lib.c",
+            "bytes": 601,
+            "blocks": 9
+          },
+          {
+            "file": "bn_lib.c",
+            "bytes": 1608,
+            "blocks": 58
+          },
+          {
+            "file": "bn_mont.c",
+            "bytes": 384,
+            "blocks": 4
+          },
+          {
+            "file": "tasn_utl.c",
+            "bytes": 295,
+            "blocks": 1
+          },
+          {
+            "file": "err.c",
+            "bytes": 243,
+            "blocks": 3
+          }
+        ],
+        "kernel_sockets": 8,
+        "kernel_receive_mbuf_bytes": 0,
+        "kernel_send_mbuf_bytes": 0,
+        "kernel_receive_capacity": 1048576,
+        "kernel_send_capacity": 1048576,
+        "task_frames": 16
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 1009147904,
+          "physical_footprint": 1005805568,
+          "compressed": 0,
+          "allocator_live": 2069257936,
+          "allocator_reserved": 1227505664,
+          "openssl_live": 630289631,
+          "openssl_blocks": 548991,
+          "openssl_accounting": "requested-profile",
+          "openssl_profile_headers": 8783856,
+          "openssl_owners": [
+            {
+              "file": "threads_pthread.c",
+              "bytes": 8008544,
+              "blocks": 40043
+            },
+            {
+              "file": "threads_common.c",
+              "bytes": 576,
+              "blocks": 9
+            },
+            {
+              "file": "sparse_array.c",
+              "bytes": 113408,
+              "blocks": 910
+            },
+            {
+              "file": "unknown",
+              "bytes": 8136,
+              "blocks": 9
+            },
+            {
+              "file": "initthread.c",
+              "bytes": 696,
+              "blocks": 29
+            },
+            {
+              "file": "stack.c",
+              "bytes": 2931208,
+              "blocks": 41270
+            },
+            {
+              "file": "lhash.c",
+              "bytes": 142568,
+              "blocks": 2922
+            },
+            {
+              "file": "o_names.c",
+              "bytes": 5688,
+              "blocks": 237
+            },
+            {
+              "file": "property.c",
+              "bytes": 26240,
+              "blocks": 779
+            },
+            {
+              "file": "provider_conf.c",
+              "bytes": 16,
+              "blocks": 1
+            },
+            {
+              "file": "rand_lib.c",
+              "bytes": 93,
+              "blocks": 2
+            },
+            {
+              "file": "decoder_pkey.c",
+              "bytes": 268,
+              "blocks": 9
+            },
+            {
+              "file": "provider_core.c",
+              "bytes": 323,
+              "blocks": 4
+            },
+            {
+              "file": "property_string.c",
+              "bytes": 549,
+              "blocks": 23
+            },
+            {
+              "file": "core_namemap.c",
+              "bytes": 9844,
+              "blocks": 626
+            },
+            {
+              "file": "hashtable.c",
+              "bytes": 97944,
+              "blocks": 628
+            },
+            {
+              "file": "bss_core.c",
+              "bytes": 56,
+              "blocks": 1
+            },
+            {
+              "file": "drbg.c",
+              "bytes": 5488,
+              "blocks": 20
+            },
+            {
+              "file": "self_test_core.c",
+              "bytes": 16,
+              "blocks": 1
+            },
+            {
+              "file": "indicator_core.c",
+              "bytes": 8,
+              "blocks": 1
+            },
+            {
+              "file": "internal.c",
+              "bytes": 32,
+              "blocks": 1
+            },
+            {
+              "file": "thread_posix.c",
+              "bytes": 112,
+              "blocks": 2
+            },
+            {
+              "file": "provider_child.c",
+              "bytes": 88,
+              "blocks": 1
+            },
+            {
+              "file": "conf_mod.c",
+              "bytes": 471,
+              "blocks": 17
+            },
+            {
+              "file": "bio_lib.c",
+              "bytes": 3840000,
+              "blocks": 30000
+            },
+            {
+              "file": "buffer.c",
+              "bytes": 320128,
+              "blocks": 10004
+            },
+            {
+              "file": "eng_lib.c",
+              "bytes": 456,
+              "blocks": 3
+            },
+            {
+              "file": "ex_data.c",
+              "bytes": 48,
+              "blocks": 1
+            },
+            {
+              "file": "ssl_lib.c",
+              "bytes": 56201832,
+              "blocks": 40002
+            },
+            {
+              "file": "x509_lu.c",
+              "bytes": 160,
+              "blocks": 1
+            },
+            {
+              "file": "x509_vpm.c",
+              "bytes": 1120224,
+              "blocks": 10002
+            },
+            {
+              "file": "ct_log.c",
+              "bytes": 24,
+              "blocks": 1
+            },
+            {
+              "file": "provider_ctx.c",
+              "bytes": 32,
+              "blocks": 1
+            },
+            {
+              "file": "bio_meth.c",
+              "bytes": 131,
+              "blocks": 2
+            },
+            {
+              "file": "evp_enc.c",
+              "bytes": 3889424,
+              "blocks": 20187
+            },
+            {
+              "file": "core_algorithm.c",
+              "bytes": 4516,
+              "blocks": 383
+            },
+            {
+              "file": "property_parse.c",
+              "bytes": 9304,
+              "blocks": 92
+            },
+            {
+              "file": "defn_cache.c",
+              "bytes": 1187,
+              "blocks": 16
+            },
+            {
+              "file": "digest.c",
+              "bytes": 1446696,
+              "blocks": 20027
+            },
+            {
+              "file": "signature.c",
+              "bytes": 17464,
+              "blocks": 59
+            },
+            {
+              "file": "exchange.c",
+              "bytes": 896,
+              "blocks": 7
+            },
+            {
+              "file": "t1_lib.c",
+              "bytes": 3248862,
+              "blocks": 40194
+            },
+            {
+              "file": "keymgmt_meth.c",
+              "bytes": 10240,
+              "blocks": 40
+            },
+            {
+              "file": "p_lib.c",
+              "bytes": 4560304,
+              "blocks": 30002
+            },
+            {
+              "file": "ssl_cert.c",
+              "bytes": 6640664,
+              "blocks": 20002
+            },
+            {
+              "file": "evp_rand.c",
+              "bytes": 1800,
+              "blocks": 25
+            },
+            {
+              "file": "seed_src.c",
+              "bytes": 16,
+              "blocks": 1
+            },
+            {
+              "file": "drbg_ctr.c",
+              "bytes": 3344,
+              "blocks": 19
+            },
+            {
+              "file": "cipher_aes.c",
+              "bytes": 25536,
+              "blocks": 57
+            },
+            {
+              "file": "tasn_new.c",
+              "bytes": 608,
+              "blocks": 9
+            },
+            {
+              "file": "x_name.c",
+              "bytes": 120,
+              "blocks": 4
+            },
+            {
+              "file": "asn1_lib.c",
+              "bytes": 359,
+              "blocks": 19
+            },
+            {
+              "file": "x_pubkey.c",
+              "bytes": 48,
+              "blocks": 1
+            },
+            {
+              "file": "bss_mem.c",
+              "bytes": 480000,
+              "blocks": 20000
+            },
+            {
+              "file": "a_bitstr.c",
+              "bytes": 136,
+              "blocks": 2
+            },
+            {
+              "file": "decoder_meth.c",
+              "bytes": 9344,
+              "blocks": 78
+            },
+            {
+              "file": "decode_der2key.c",
+              "bytes": 10640,
+              "blocks": 38
+            },
+            {
+              "file": "decoder_lib.c",
+              "bytes": 2112,
+              "blocks": 44
+            },
+            {
+              "file": "decode_spki2typespki.c",
+              "bytes": 528,
+              "blocks": 2
+            },
+            {
+              "file": "decode_pem2der.c",
+              "bytes": 592,
+              "blocks": 2
+            },
+            {
+              "file": "decode_epki2pki.c",
+              "bytes": 528,
+              "blocks": 2
+            },
+            {
+              "file": "ec_kmeth.c",
+              "bytes": 209,
+              "blocks": 3
+            },
+            {
+              "file": "ec_lib.c",
+              "bytes": 601,
+              "blocks": 9
+            },
+            {
+              "file": "bn_lib.c",
+              "bytes": 1608,
+              "blocks": 58
+            },
+            {
+              "file": "bn_mont.c",
+              "bytes": 384,
+              "blocks": 4
+            },
+            {
+              "file": "tasn_utl.c",
+              "bytes": 295,
+              "blocks": 1
+            },
+            {
+              "file": "err.c",
+              "bytes": 243,
+              "blocks": 3
+            },
+            {
+              "file": "tls_common.c",
+              "bytes": 88480000,
+              "blocks": 20000
+            },
+            {
+              "file": "bss_bio.c",
+              "bytes": 349280000,
+              "blocks": 40000
+            },
+            {
+              "file": "packet.h",
+              "bytes": 440000,
+              "blocks": 20000
+            },
+            {
+              "file": "ssl_sess.c",
+              "bytes": 9280000,
+              "blocks": 10000
+            },
+            {
+              "file": "mlx_kmgmt.c",
+              "bytes": 560000,
+              "blocks": 10000
+            },
+            {
+              "file": "ml_kem.c",
+              "bytes": 63360000,
+              "blocks": 20000
+            },
+            {
+              "file": "ecx_key.c",
+              "bytes": 1040000,
+              "blocks": 10000
+            },
+            {
+              "file": "sha2_prov.c",
+              "bytes": 4320000,
+              "blocks": 20000
+            },
+            {
+              "file": "kem.c",
+              "bytes": 1584,
+              "blocks": 11
+            },
+            {
+              "file": "s3_lib.c",
+              "bytes": 640000,
+              "blocks": 10000
+            },
+            {
+              "file": "kdf_meth.c",
+              "bytes": 2736,
+              "blocks": 19
+            },
+            {
+              "file": "mac_meth.c",
+              "bytes": 1296,
+              "blocks": 9
+            },
+            {
+              "file": "tls13_meth.c",
+              "bytes": 480000,
+              "blocks": 40000
+            },
+            {
+              "file": "cipher_aes_gcm.c",
+              "bytes": 19200000,
+              "blocks": 20000
+            }
+          ],
+          "kernel_sockets": 10008,
+          "kernel_receive_mbuf_bytes": 0,
+          "kernel_send_mbuf_bytes": 0,
+          "kernel_receive_capacity": 4068248576,
+          "kernel_send_capacity": 1470928576,
+          "task_frames": 50016
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 1009254400,
+          "physical_footprint": 1005912064,
+          "compressed": 0,
+          "allocator_live": 2069389008,
+          "allocator_reserved": 1227505664,
+          "openssl_live": 630289631,
+          "openssl_blocks": 548991,
+          "openssl_accounting": "requested-profile",
+          "openssl_profile_headers": 8783856,
+          "openssl_owners": [
+            {
+              "file": "threads_pthread.c",
+              "bytes": 8008544,
+              "blocks": 40043
+            },
+            {
+              "file": "threads_common.c",
+              "bytes": 576,
+              "blocks": 9
+            },
+            {
+              "file": "sparse_array.c",
+              "bytes": 113408,
+              "blocks": 910
+            },
+            {
+              "file": "unknown",
+              "bytes": 8136,
+              "blocks": 9
+            },
+            {
+              "file": "initthread.c",
+              "bytes": 696,
+              "blocks": 29
+            },
+            {
+              "file": "stack.c",
+              "bytes": 2931208,
+              "blocks": 41270
+            },
+            {
+              "file": "lhash.c",
+              "bytes": 142568,
+              "blocks": 2922
+            },
+            {
+              "file": "o_names.c",
+              "bytes": 5688,
+              "blocks": 237
+            },
+            {
+              "file": "property.c",
+              "bytes": 26240,
+              "blocks": 779
+            },
+            {
+              "file": "provider_conf.c",
+              "bytes": 16,
+              "blocks": 1
+            },
+            {
+              "file": "rand_lib.c",
+              "bytes": 93,
+              "blocks": 2
+            },
+            {
+              "file": "decoder_pkey.c",
+              "bytes": 268,
+              "blocks": 9
+            },
+            {
+              "file": "provider_core.c",
+              "bytes": 323,
+              "blocks": 4
+            },
+            {
+              "file": "property_string.c",
+              "bytes": 549,
+              "blocks": 23
+            },
+            {
+              "file": "core_namemap.c",
+              "bytes": 9844,
+              "blocks": 626
+            },
+            {
+              "file": "hashtable.c",
+              "bytes": 97944,
+              "blocks": 628
+            },
+            {
+              "file": "bss_core.c",
+              "bytes": 56,
+              "blocks": 1
+            },
+            {
+              "file": "drbg.c",
+              "bytes": 5488,
+              "blocks": 20
+            },
+            {
+              "file": "self_test_core.c",
+              "bytes": 16,
+              "blocks": 1
+            },
+            {
+              "file": "indicator_core.c",
+              "bytes": 8,
+              "blocks": 1
+            },
+            {
+              "file": "internal.c",
+              "bytes": 32,
+              "blocks": 1
+            },
+            {
+              "file": "thread_posix.c",
+              "bytes": 112,
+              "blocks": 2
+            },
+            {
+              "file": "provider_child.c",
+              "bytes": 88,
+              "blocks": 1
+            },
+            {
+              "file": "conf_mod.c",
+              "bytes": 471,
+              "blocks": 17
+            },
+            {
+              "file": "bio_lib.c",
+              "bytes": 3840000,
+              "blocks": 30000
+            },
+            {
+              "file": "buffer.c",
+              "bytes": 320128,
+              "blocks": 10004
+            },
+            {
+              "file": "eng_lib.c",
+              "bytes": 456,
+              "blocks": 3
+            },
+            {
+              "file": "ex_data.c",
+              "bytes": 48,
+              "blocks": 1
+            },
+            {
+              "file": "ssl_lib.c",
+              "bytes": 56201832,
+              "blocks": 40002
+            },
+            {
+              "file": "x509_lu.c",
+              "bytes": 160,
+              "blocks": 1
+            },
+            {
+              "file": "x509_vpm.c",
+              "bytes": 1120224,
+              "blocks": 10002
+            },
+            {
+              "file": "ct_log.c",
+              "bytes": 24,
+              "blocks": 1
+            },
+            {
+              "file": "provider_ctx.c",
+              "bytes": 32,
+              "blocks": 1
+            },
+            {
+              "file": "bio_meth.c",
+              "bytes": 131,
+              "blocks": 2
+            },
+            {
+              "file": "evp_enc.c",
+              "bytes": 3889424,
+              "blocks": 20187
+            },
+            {
+              "file": "core_algorithm.c",
+              "bytes": 4516,
+              "blocks": 383
+            },
+            {
+              "file": "property_parse.c",
+              "bytes": 9304,
+              "blocks": 92
+            },
+            {
+              "file": "defn_cache.c",
+              "bytes": 1187,
+              "blocks": 16
+            },
+            {
+              "file": "digest.c",
+              "bytes": 1446696,
+              "blocks": 20027
+            },
+            {
+              "file": "signature.c",
+              "bytes": 17464,
+              "blocks": 59
+            },
+            {
+              "file": "exchange.c",
+              "bytes": 896,
+              "blocks": 7
+            },
+            {
+              "file": "t1_lib.c",
+              "bytes": 3248862,
+              "blocks": 40194
+            },
+            {
+              "file": "keymgmt_meth.c",
+              "bytes": 10240,
+              "blocks": 40
+            },
+            {
+              "file": "p_lib.c",
+              "bytes": 4560304,
+              "blocks": 30002
+            },
+            {
+              "file": "ssl_cert.c",
+              "bytes": 6640664,
+              "blocks": 20002
+            },
+            {
+              "file": "evp_rand.c",
+              "bytes": 1800,
+              "blocks": 25
+            },
+            {
+              "file": "seed_src.c",
+              "bytes": 16,
+              "blocks": 1
+            },
+            {
+              "file": "drbg_ctr.c",
+              "bytes": 3344,
+              "blocks": 19
+            },
+            {
+              "file": "cipher_aes.c",
+              "bytes": 25536,
+              "blocks": 57
+            },
+            {
+              "file": "tasn_new.c",
+              "bytes": 608,
+              "blocks": 9
+            },
+            {
+              "file": "x_name.c",
+              "bytes": 120,
+              "blocks": 4
+            },
+            {
+              "file": "asn1_lib.c",
+              "bytes": 359,
+              "blocks": 19
+            },
+            {
+              "file": "x_pubkey.c",
+              "bytes": 48,
+              "blocks": 1
+            },
+            {
+              "file": "bss_mem.c",
+              "bytes": 480000,
+              "blocks": 20000
+            },
+            {
+              "file": "a_bitstr.c",
+              "bytes": 136,
+              "blocks": 2
+            },
+            {
+              "file": "decoder_meth.c",
+              "bytes": 9344,
+              "blocks": 78
+            },
+            {
+              "file": "decode_der2key.c",
+              "bytes": 10640,
+              "blocks": 38
+            },
+            {
+              "file": "decoder_lib.c",
+              "bytes": 2112,
+              "blocks": 44
+            },
+            {
+              "file": "decode_spki2typespki.c",
+              "bytes": 528,
+              "blocks": 2
+            },
+            {
+              "file": "decode_pem2der.c",
+              "bytes": 592,
+              "blocks": 2
+            },
+            {
+              "file": "decode_epki2pki.c",
+              "bytes": 528,
+              "blocks": 2
+            },
+            {
+              "file": "ec_kmeth.c",
+              "bytes": 209,
+              "blocks": 3
+            },
+            {
+              "file": "ec_lib.c",
+              "bytes": 601,
+              "blocks": 9
+            },
+            {
+              "file": "bn_lib.c",
+              "bytes": 1608,
+              "blocks": 58
+            },
+            {
+              "file": "bn_mont.c",
+              "bytes": 384,
+              "blocks": 4
+            },
+            {
+              "file": "tasn_utl.c",
+              "bytes": 295,
+              "blocks": 1
+            },
+            {
+              "file": "err.c",
+              "bytes": 243,
+              "blocks": 3
+            },
+            {
+              "file": "tls_common.c",
+              "bytes": 88480000,
+              "blocks": 20000
+            },
+            {
+              "file": "bss_bio.c",
+              "bytes": 349280000,
+              "blocks": 40000
+            },
+            {
+              "file": "packet.h",
+              "bytes": 440000,
+              "blocks": 20000
+            },
+            {
+              "file": "ssl_sess.c",
+              "bytes": 9280000,
+              "blocks": 10000
+            },
+            {
+              "file": "mlx_kmgmt.c",
+              "bytes": 560000,
+              "blocks": 10000
+            },
+            {
+              "file": "ml_kem.c",
+              "bytes": 63360000,
+              "blocks": 20000
+            },
+            {
+              "file": "ecx_key.c",
+              "bytes": 1040000,
+              "blocks": 10000
+            },
+            {
+              "file": "sha2_prov.c",
+              "bytes": 4320000,
+              "blocks": 20000
+            },
+            {
+              "file": "kem.c",
+              "bytes": 1584,
+              "blocks": 11
+            },
+            {
+              "file": "s3_lib.c",
+              "bytes": 640000,
+              "blocks": 10000
+            },
+            {
+              "file": "kdf_meth.c",
+              "bytes": 2736,
+              "blocks": 19
+            },
+            {
+              "file": "mac_meth.c",
+              "bytes": 1296,
+              "blocks": 9
+            },
+            {
+              "file": "tls13_meth.c",
+              "bytes": 480000,
+              "blocks": 40000
+            },
+            {
+              "file": "cipher_aes_gcm.c",
+              "bytes": 19200000,
+              "blocks": 20000
+            }
+          ],
+          "kernel_sockets": 10008,
+          "kernel_receive_mbuf_bytes": 0,
+          "kernel_send_mbuf_bytes": 0,
+          "kernel_receive_capacity": 4068248576,
+          "kernel_send_capacity": 1470928576,
+          "task_frames": 50016
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 1009254400,
+          "physical_footprint": 1005912064,
+          "compressed": 0,
+          "allocator_live": 2069389008,
+          "allocator_reserved": 1227505664,
+          "openssl_live": 630289631,
+          "openssl_blocks": 548991,
+          "openssl_accounting": "requested-profile",
+          "openssl_profile_headers": 8783856,
+          "openssl_owners": [
+            {
+              "file": "threads_pthread.c",
+              "bytes": 8008544,
+              "blocks": 40043
+            },
+            {
+              "file": "threads_common.c",
+              "bytes": 576,
+              "blocks": 9
+            },
+            {
+              "file": "sparse_array.c",
+              "bytes": 113408,
+              "blocks": 910
+            },
+            {
+              "file": "unknown",
+              "bytes": 8136,
+              "blocks": 9
+            },
+            {
+              "file": "initthread.c",
+              "bytes": 696,
+              "blocks": 29
+            },
+            {
+              "file": "stack.c",
+              "bytes": 2931208,
+              "blocks": 41270
+            },
+            {
+              "file": "lhash.c",
+              "bytes": 142568,
+              "blocks": 2922
+            },
+            {
+              "file": "o_names.c",
+              "bytes": 5688,
+              "blocks": 237
+            },
+            {
+              "file": "property.c",
+              "bytes": 26240,
+              "blocks": 779
+            },
+            {
+              "file": "provider_conf.c",
+              "bytes": 16,
+              "blocks": 1
+            },
+            {
+              "file": "rand_lib.c",
+              "bytes": 93,
+              "blocks": 2
+            },
+            {
+              "file": "decoder_pkey.c",
+              "bytes": 268,
+              "blocks": 9
+            },
+            {
+              "file": "provider_core.c",
+              "bytes": 323,
+              "blocks": 4
+            },
+            {
+              "file": "property_string.c",
+              "bytes": 549,
+              "blocks": 23
+            },
+            {
+              "file": "core_namemap.c",
+              "bytes": 9844,
+              "blocks": 626
+            },
+            {
+              "file": "hashtable.c",
+              "bytes": 97944,
+              "blocks": 628
+            },
+            {
+              "file": "bss_core.c",
+              "bytes": 56,
+              "blocks": 1
+            },
+            {
+              "file": "drbg.c",
+              "bytes": 5488,
+              "blocks": 20
+            },
+            {
+              "file": "self_test_core.c",
+              "bytes": 16,
+              "blocks": 1
+            },
+            {
+              "file": "indicator_core.c",
+              "bytes": 8,
+              "blocks": 1
+            },
+            {
+              "file": "internal.c",
+              "bytes": 32,
+              "blocks": 1
+            },
+            {
+              "file": "thread_posix.c",
+              "bytes": 112,
+              "blocks": 2
+            },
+            {
+              "file": "provider_child.c",
+              "bytes": 88,
+              "blocks": 1
+            },
+            {
+              "file": "conf_mod.c",
+              "bytes": 471,
+              "blocks": 17
+            },
+            {
+              "file": "bio_lib.c",
+              "bytes": 3840000,
+              "blocks": 30000
+            },
+            {
+              "file": "buffer.c",
+              "bytes": 320128,
+              "blocks": 10004
+            },
+            {
+              "file": "eng_lib.c",
+              "bytes": 456,
+              "blocks": 3
+            },
+            {
+              "file": "ex_data.c",
+              "bytes": 48,
+              "blocks": 1
+            },
+            {
+              "file": "ssl_lib.c",
+              "bytes": 56201832,
+              "blocks": 40002
+            },
+            {
+              "file": "x509_lu.c",
+              "bytes": 160,
+              "blocks": 1
+            },
+            {
+              "file": "x509_vpm.c",
+              "bytes": 1120224,
+              "blocks": 10002
+            },
+            {
+              "file": "ct_log.c",
+              "bytes": 24,
+              "blocks": 1
+            },
+            {
+              "file": "provider_ctx.c",
+              "bytes": 32,
+              "blocks": 1
+            },
+            {
+              "file": "bio_meth.c",
+              "bytes": 131,
+              "blocks": 2
+            },
+            {
+              "file": "evp_enc.c",
+              "bytes": 3889424,
+              "blocks": 20187
+            },
+            {
+              "file": "core_algorithm.c",
+              "bytes": 4516,
+              "blocks": 383
+            },
+            {
+              "file": "property_parse.c",
+              "bytes": 9304,
+              "blocks": 92
+            },
+            {
+              "file": "defn_cache.c",
+              "bytes": 1187,
+              "blocks": 16
+            },
+            {
+              "file": "digest.c",
+              "bytes": 1446696,
+              "blocks": 20027
+            },
+            {
+              "file": "signature.c",
+              "bytes": 17464,
+              "blocks": 59
+            },
+            {
+              "file": "exchange.c",
+              "bytes": 896,
+              "blocks": 7
+            },
+            {
+              "file": "t1_lib.c",
+              "bytes": 3248862,
+              "blocks": 40194
+            },
+            {
+              "file": "keymgmt_meth.c",
+              "bytes": 10240,
+              "blocks": 40
+            },
+            {
+              "file": "p_lib.c",
+              "bytes": 4560304,
+              "blocks": 30002
+            },
+            {
+              "file": "ssl_cert.c",
+              "bytes": 6640664,
+              "blocks": 20002
+            },
+            {
+              "file": "evp_rand.c",
+              "bytes": 1800,
+              "blocks": 25
+            },
+            {
+              "file": "seed_src.c",
+              "bytes": 16,
+              "blocks": 1
+            },
+            {
+              "file": "drbg_ctr.c",
+              "bytes": 3344,
+              "blocks": 19
+            },
+            {
+              "file": "cipher_aes.c",
+              "bytes": 25536,
+              "blocks": 57
+            },
+            {
+              "file": "tasn_new.c",
+              "bytes": 608,
+              "blocks": 9
+            },
+            {
+              "file": "x_name.c",
+              "bytes": 120,
+              "blocks": 4
+            },
+            {
+              "file": "asn1_lib.c",
+              "bytes": 359,
+              "blocks": 19
+            },
+            {
+              "file": "x_pubkey.c",
+              "bytes": 48,
+              "blocks": 1
+            },
+            {
+              "file": "bss_mem.c",
+              "bytes": 480000,
+              "blocks": 20000
+            },
+            {
+              "file": "a_bitstr.c",
+              "bytes": 136,
+              "blocks": 2
+            },
+            {
+              "file": "decoder_meth.c",
+              "bytes": 9344,
+              "blocks": 78
+            },
+            {
+              "file": "decode_der2key.c",
+              "bytes": 10640,
+              "blocks": 38
+            },
+            {
+              "file": "decoder_lib.c",
+              "bytes": 2112,
+              "blocks": 44
+            },
+            {
+              "file": "decode_spki2typespki.c",
+              "bytes": 528,
+              "blocks": 2
+            },
+            {
+              "file": "decode_pem2der.c",
+              "bytes": 592,
+              "blocks": 2
+            },
+            {
+              "file": "decode_epki2pki.c",
+              "bytes": 528,
+              "blocks": 2
+            },
+            {
+              "file": "ec_kmeth.c",
+              "bytes": 209,
+              "blocks": 3
+            },
+            {
+              "file": "ec_lib.c",
+              "bytes": 601,
+              "blocks": 9
+            },
+            {
+              "file": "bn_lib.c",
+              "bytes": 1608,
+              "blocks": 58
+            },
+            {
+              "file": "bn_mont.c",
+              "bytes": 384,
+              "blocks": 4
+            },
+            {
+              "file": "tasn_utl.c",
+              "bytes": 295,
+              "blocks": 1
+            },
+            {
+              "file": "err.c",
+              "bytes": 243,
+              "blocks": 3
+            },
+            {
+              "file": "tls_common.c",
+              "bytes": 88480000,
+              "blocks": 20000
+            },
+            {
+              "file": "bss_bio.c",
+              "bytes": 349280000,
+              "blocks": 40000
+            },
+            {
+              "file": "packet.h",
+              "bytes": 440000,
+              "blocks": 20000
+            },
+            {
+              "file": "ssl_sess.c",
+              "bytes": 9280000,
+              "blocks": 10000
+            },
+            {
+              "file": "mlx_kmgmt.c",
+              "bytes": 560000,
+              "blocks": 10000
+            },
+            {
+              "file": "ml_kem.c",
+              "bytes": 63360000,
+              "blocks": 20000
+            },
+            {
+              "file": "ecx_key.c",
+              "bytes": 1040000,
+              "blocks": 10000
+            },
+            {
+              "file": "sha2_prov.c",
+              "bytes": 4320000,
+              "blocks": 20000
+            },
+            {
+              "file": "kem.c",
+              "bytes": 1584,
+              "blocks": 11
+            },
+            {
+              "file": "s3_lib.c",
+              "bytes": 640000,
+              "blocks": 10000
+            },
+            {
+              "file": "kdf_meth.c",
+              "bytes": 2736,
+              "blocks": 19
+            },
+            {
+              "file": "mac_meth.c",
+              "bytes": 1296,
+              "blocks": 9
+            },
+            {
+              "file": "tls13_meth.c",
+              "bytes": 480000,
+              "blocks": 40000
+            },
+            {
+              "file": "cipher_aes_gcm.c",
+              "bytes": 19200000,
+              "blocks": 20000
+            }
+          ],
+          "kernel_sockets": 10008,
+          "kernel_receive_mbuf_bytes": 0,
+          "kernel_send_mbuf_bytes": 0,
+          "kernel_receive_capacity": 4068248576,
+          "kernel_send_capacity": 1470928576,
+          "task_frames": 50016
+        }
+      ],
+      "completed": {
+        "elapsed_s": 17.679355807136744,
+        "connections": 10000
+      },
+      "capture": "owner-tls.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_owners_small_tls",
+        "binary_sha256": "b97b75edd306879f7e9dc2ffc5ea2ed4efe1fbd42babe6ea1fc0bdba126978e2",
+        "driver_sha256": "0c09615d3be0e4fddbef57999f8685cbbbcc844fc9d906c4b484de04e1ee8fcb",
+        "counts": [
+          10000
+        ],
+        "tls": true,
+        "base_port": 28968
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 28968,
+        "socket_object": 88,
+        "tls_staging_buffer": 2048,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {
+        "server_pid": 77506,
+        "source_port_base": 47500
+      },
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 4792320,
+        "physical_footprint": 2347008,
+        "compressed": 0,
+        "allocator_live": 834160,
+        "allocator_reserved": 48496640,
+        "openssl_live": 533021,
+        "openssl_blocks": 8006,
+        "openssl_accounting": "requested-profile",
+        "openssl_profile_headers": 128096,
+        "openssl_owners": [
+          {
+            "file": "threads_pthread.c",
+            "bytes": 8544,
+            "blocks": 43
+          },
+          {
+            "file": "threads_common.c",
+            "bytes": 64,
+            "blocks": 1
+          },
+          {
+            "file": "sparse_array.c",
+            "bytes": 70912,
+            "blocks": 560
+          },
+          {
+            "file": "unknown",
+            "bytes": 904,
+            "blocks": 1
+          },
+          {
+            "file": "initthread.c",
+            "bytes": 120,
+            "blocks": 5
+          },
+          {
+            "file": "stack.c",
+            "bytes": 46848,
+            "blocks": 1150
+          },
+          {
+            "file": "lhash.c",
+            "bytes": 133304,
+            "blocks": 2835
+          },
+          {
+            "file": "o_names.c",
+            "bytes": 5688,
+            "blocks": 237
+          },
+          {
+            "file": "property.c",
+            "bytes": 23312,
+            "blocks": 692
+          },
+          {
+            "file": "provider_conf.c",
+            "bytes": 16,
+            "blocks": 1
+          },
+          {
+            "file": "rand_lib.c",
+            "bytes": 93,
+            "blocks": 2
+          },
+          {
+            "file": "decoder_pkey.c",
+            "bytes": 268,
+            "blocks": 9
+          },
+          {
+            "file": "provider_core.c",
+            "bytes": 323,
+            "blocks": 4
+          },
+          {
+            "file": "property_string.c",
+            "bytes": 549,
+            "blocks": 23
+          },
+          {
+            "file": "core_namemap.c",
+            "bytes": 9326,
+            "blocks": 589
+          },
+          {
+            "file": "hashtable.c",
+            "bytes": 94096,
+            "blocks": 591
+          },
+          {
+            "file": "bss_core.c",
+            "bytes": 56,
+            "blocks": 1
+          },
+          {
+            "file": "drbg.c",
+            "bytes": 880,
+            "blocks": 4
+          },
+          {
+            "file": "self_test_core.c",
+            "bytes": 16,
+            "blocks": 1
+          },
+          {
+            "file": "indicator_core.c",
+            "bytes": 8,
+            "blocks": 1
+          },
+          {
+            "file": "internal.c",
+            "bytes": 32,
+            "blocks": 1
+          },
+          {
+            "file": "thread_posix.c",
+            "bytes": 112,
+            "blocks": 2
+          },
+          {
+            "file": "provider_child.c",
+            "bytes": 88,
+            "blocks": 1
+          },
+          {
+            "file": "conf_mod.c",
+            "bytes": 471,
+            "blocks": 17
+          },
+          {
+            "file": "buffer.c",
+            "bytes": 128,
+            "blocks": 4
+          },
+          {
+            "file": "eng_lib.c",
+            "bytes": 456,
+            "blocks": 3
+          },
+          {
+            "file": "ex_data.c",
+            "bytes": 48,
+            "blocks": 1
+          },
+          {
+            "file": "ssl_lib.c",
+            "bytes": 1832,
+            "blocks": 2
+          },
+          {
+            "file": "x509_lu.c",
+            "bytes": 160,
+            "blocks": 1
+          },
+          {
+            "file": "x509_vpm.c",
+            "bytes": 224,
+            "blocks": 2
+          },
+          {
+            "file": "ct_log.c",
+            "bytes": 24,
+            "blocks": 1
+          },
+          {
+            "file": "provider_ctx.c",
+            "bytes": 32,
+            "blocks": 1
+          },
+          {
+            "file": "bio_meth.c",
+            "bytes": 131,
+            "blocks": 2
+          },
+          {
+            "file": "evp_enc.c",
+            "bytes": 40208,
+            "blocks": 139
+          },
+          {
+            "file": "core_algorithm.c",
+            "bytes": 4154,
+            "blocks": 344
+          },
+          {
+            "file": "property_parse.c",
+            "bytes": 9304,
+            "blocks": 92
+          },
+          {
+            "file": "defn_cache.c",
+            "bytes": 1187,
+            "blocks": 16
+          },
+          {
+            "file": "digest.c",
+            "bytes": 6696,
+            "blocks": 27
+          },
+          {
+            "file": "signature.c",
+            "bytes": 17464,
+            "blocks": 59
+          },
+          {
+            "file": "exchange.c",
+            "bytes": 896,
+            "blocks": 7
+          },
+          {
+            "file": "t1_lib.c",
+            "bytes": 8862,
+            "blocks": 194
+          },
+          {
+            "file": "keymgmt_meth.c",
+            "bytes": 10240,
+            "blocks": 40
+          },
+          {
+            "file": "p_lib.c",
+            "bytes": 304,
+            "blocks": 2
+          },
+          {
+            "file": "ssl_cert.c",
+            "bytes": 664,
+            "blocks": 2
+          },
+          {
+            "file": "evp_rand.c",
+            "bytes": 1160,
+            "blocks": 9
+          },
+          {
+            "file": "seed_src.c",
+            "bytes": 16,
+            "blocks": 1
+          },
+          {
+            "file": "drbg_ctr.c",
+            "bytes": 528,
+            "blocks": 3
+          },
+          {
+            "file": "cipher_aes.c",
+            "bytes": 4032,
+            "blocks": 9
+          },
+          {
+            "file": "tasn_new.c",
+            "bytes": 584,
+            "blocks": 8
+          },
+          {
+            "file": "x_name.c",
+            "bytes": 120,
+            "blocks": 4
+          },
+          {
+            "file": "asn1_lib.c",
+            "bytes": 269,
+            "blocks": 15
+          },
+          {
+            "file": "x_pubkey.c",
+            "bytes": 48,
+            "blocks": 1
+          },
+          {
+            "file": "a_bitstr.c",
+            "bytes": 136,
+            "blocks": 2
+          },
+          {
+            "file": "decoder_meth.c",
+            "bytes": 9344,
+            "blocks": 78
+          },
+          {
+            "file": "decode_der2key.c",
+            "bytes": 10640,
+            "blocks": 38
+          },
+          {
+            "file": "decoder_lib.c",
+            "bytes": 2112,
+            "blocks": 44
+          },
+          {
+            "file": "decode_spki2typespki.c",
+            "bytes": 528,
+            "blocks": 2
+          },
+          {
+            "file": "decode_pem2der.c",
+            "bytes": 592,
+            "blocks": 2
+          },
+          {
+            "file": "decode_epki2pki.c",
+            "bytes": 528,
+            "blocks": 2
+          },
+          {
+            "file": "ec_kmeth.c",
+            "bytes": 209,
+            "blocks": 3
+          },
+          {
+            "file": "ec_lib.c",
+            "bytes": 601,
+            "blocks": 9
+          },
+          {
+            "file": "bn_lib.c",
+            "bytes": 1608,
+            "blocks": 58
+          },
+          {
+            "file": "bn_mont.c",
+            "bytes": 384,
+            "blocks": 4
+          },
+          {
+            "file": "tasn_utl.c",
+            "bytes": 295,
+            "blocks": 1
+          },
+          {
+            "file": "err.c",
+            "bytes": 243,
+            "blocks": 3
+          }
+        ],
+        "kernel_sockets": 8,
+        "kernel_receive_mbuf_bytes": 0,
+        "kernel_send_mbuf_bytes": 0,
+        "kernel_receive_capacity": 1048576,
+        "kernel_send_capacity": 1048576,
+        "task_frames": 16
+      },
+      "idle_snapshots": [
+        {
+          "stage": "idle-10000-0",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 570163200,
+          "physical_footprint": 566824960,
+          "compressed": 0,
+          "allocator_live": 1454857936,
+          "allocator_reserved": 596328448,
+          "openssl_live": 323089631,
+          "openssl_blocks": 548991,
+          "openssl_accounting": "requested-profile",
+          "openssl_profile_headers": 8783856,
+          "openssl_owners": [
+            {
+              "file": "threads_pthread.c",
+              "bytes": 8008544,
+              "blocks": 40043
+            },
+            {
+              "file": "threads_common.c",
+              "bytes": 576,
+              "blocks": 9
+            },
+            {
+              "file": "sparse_array.c",
+              "bytes": 113408,
+              "blocks": 910
+            },
+            {
+              "file": "unknown",
+              "bytes": 8136,
+              "blocks": 9
+            },
+            {
+              "file": "initthread.c",
+              "bytes": 696,
+              "blocks": 29
+            },
+            {
+              "file": "stack.c",
+              "bytes": 2931208,
+              "blocks": 41270
+            },
+            {
+              "file": "lhash.c",
+              "bytes": 142568,
+              "blocks": 2922
+            },
+            {
+              "file": "o_names.c",
+              "bytes": 5688,
+              "blocks": 237
+            },
+            {
+              "file": "property.c",
+              "bytes": 26240,
+              "blocks": 779
+            },
+            {
+              "file": "provider_conf.c",
+              "bytes": 16,
+              "blocks": 1
+            },
+            {
+              "file": "rand_lib.c",
+              "bytes": 93,
+              "blocks": 2
+            },
+            {
+              "file": "decoder_pkey.c",
+              "bytes": 268,
+              "blocks": 9
+            },
+            {
+              "file": "provider_core.c",
+              "bytes": 323,
+              "blocks": 4
+            },
+            {
+              "file": "property_string.c",
+              "bytes": 549,
+              "blocks": 23
+            },
+            {
+              "file": "core_namemap.c",
+              "bytes": 9844,
+              "blocks": 626
+            },
+            {
+              "file": "hashtable.c",
+              "bytes": 97944,
+              "blocks": 628
+            },
+            {
+              "file": "bss_core.c",
+              "bytes": 56,
+              "blocks": 1
+            },
+            {
+              "file": "drbg.c",
+              "bytes": 5488,
+              "blocks": 20
+            },
+            {
+              "file": "self_test_core.c",
+              "bytes": 16,
+              "blocks": 1
+            },
+            {
+              "file": "indicator_core.c",
+              "bytes": 8,
+              "blocks": 1
+            },
+            {
+              "file": "internal.c",
+              "bytes": 32,
+              "blocks": 1
+            },
+            {
+              "file": "thread_posix.c",
+              "bytes": 112,
+              "blocks": 2
+            },
+            {
+              "file": "provider_child.c",
+              "bytes": 88,
+              "blocks": 1
+            },
+            {
+              "file": "conf_mod.c",
+              "bytes": 471,
+              "blocks": 17
+            },
+            {
+              "file": "bio_lib.c",
+              "bytes": 3840000,
+              "blocks": 30000
+            },
+            {
+              "file": "buffer.c",
+              "bytes": 320128,
+              "blocks": 10004
+            },
+            {
+              "file": "eng_lib.c",
+              "bytes": 456,
+              "blocks": 3
+            },
+            {
+              "file": "ex_data.c",
+              "bytes": 48,
+              "blocks": 1
+            },
+            {
+              "file": "ssl_lib.c",
+              "bytes": 56201832,
+              "blocks": 40002
+            },
+            {
+              "file": "x509_lu.c",
+              "bytes": 160,
+              "blocks": 1
+            },
+            {
+              "file": "x509_vpm.c",
+              "bytes": 1120224,
+              "blocks": 10002
+            },
+            {
+              "file": "ct_log.c",
+              "bytes": 24,
+              "blocks": 1
+            },
+            {
+              "file": "provider_ctx.c",
+              "bytes": 32,
+              "blocks": 1
+            },
+            {
+              "file": "bio_meth.c",
+              "bytes": 131,
+              "blocks": 2
+            },
+            {
+              "file": "evp_enc.c",
+              "bytes": 3889424,
+              "blocks": 20187
+            },
+            {
+              "file": "core_algorithm.c",
+              "bytes": 4516,
+              "blocks": 383
+            },
+            {
+              "file": "property_parse.c",
+              "bytes": 9304,
+              "blocks": 92
+            },
+            {
+              "file": "defn_cache.c",
+              "bytes": 1187,
+              "blocks": 16
+            },
+            {
+              "file": "digest.c",
+              "bytes": 1446696,
+              "blocks": 20027
+            },
+            {
+              "file": "signature.c",
+              "bytes": 17464,
+              "blocks": 59
+            },
+            {
+              "file": "exchange.c",
+              "bytes": 896,
+              "blocks": 7
+            },
+            {
+              "file": "t1_lib.c",
+              "bytes": 3248862,
+              "blocks": 40194
+            },
+            {
+              "file": "keymgmt_meth.c",
+              "bytes": 10240,
+              "blocks": 40
+            },
+            {
+              "file": "p_lib.c",
+              "bytes": 4560304,
+              "blocks": 30002
+            },
+            {
+              "file": "ssl_cert.c",
+              "bytes": 6640664,
+              "blocks": 20002
+            },
+            {
+              "file": "evp_rand.c",
+              "bytes": 1800,
+              "blocks": 25
+            },
+            {
+              "file": "seed_src.c",
+              "bytes": 16,
+              "blocks": 1
+            },
+            {
+              "file": "drbg_ctr.c",
+              "bytes": 3344,
+              "blocks": 19
+            },
+            {
+              "file": "cipher_aes.c",
+              "bytes": 25536,
+              "blocks": 57
+            },
+            {
+              "file": "tasn_new.c",
+              "bytes": 608,
+              "blocks": 9
+            },
+            {
+              "file": "x_name.c",
+              "bytes": 120,
+              "blocks": 4
+            },
+            {
+              "file": "asn1_lib.c",
+              "bytes": 359,
+              "blocks": 19
+            },
+            {
+              "file": "x_pubkey.c",
+              "bytes": 48,
+              "blocks": 1
+            },
+            {
+              "file": "bss_mem.c",
+              "bytes": 480000,
+              "blocks": 20000
+            },
+            {
+              "file": "a_bitstr.c",
+              "bytes": 136,
+              "blocks": 2
+            },
+            {
+              "file": "decoder_meth.c",
+              "bytes": 9344,
+              "blocks": 78
+            },
+            {
+              "file": "decode_der2key.c",
+              "bytes": 10640,
+              "blocks": 38
+            },
+            {
+              "file": "decoder_lib.c",
+              "bytes": 2112,
+              "blocks": 44
+            },
+            {
+              "file": "decode_spki2typespki.c",
+              "bytes": 528,
+              "blocks": 2
+            },
+            {
+              "file": "decode_pem2der.c",
+              "bytes": 592,
+              "blocks": 2
+            },
+            {
+              "file": "decode_epki2pki.c",
+              "bytes": 528,
+              "blocks": 2
+            },
+            {
+              "file": "ec_kmeth.c",
+              "bytes": 209,
+              "blocks": 3
+            },
+            {
+              "file": "ec_lib.c",
+              "bytes": 601,
+              "blocks": 9
+            },
+            {
+              "file": "bn_lib.c",
+              "bytes": 1608,
+              "blocks": 58
+            },
+            {
+              "file": "bn_mont.c",
+              "bytes": 384,
+              "blocks": 4
+            },
+            {
+              "file": "tasn_utl.c",
+              "bytes": 295,
+              "blocks": 1
+            },
+            {
+              "file": "err.c",
+              "bytes": 243,
+              "blocks": 3
+            },
+            {
+              "file": "tls_common.c",
+              "bytes": 88480000,
+              "blocks": 20000
+            },
+            {
+              "file": "bss_bio.c",
+              "bytes": 42080000,
+              "blocks": 40000
+            },
+            {
+              "file": "packet.h",
+              "bytes": 440000,
+              "blocks": 20000
+            },
+            {
+              "file": "ssl_sess.c",
+              "bytes": 9280000,
+              "blocks": 10000
+            },
+            {
+              "file": "mlx_kmgmt.c",
+              "bytes": 560000,
+              "blocks": 10000
+            },
+            {
+              "file": "ml_kem.c",
+              "bytes": 63360000,
+              "blocks": 20000
+            },
+            {
+              "file": "ecx_key.c",
+              "bytes": 1040000,
+              "blocks": 10000
+            },
+            {
+              "file": "sha2_prov.c",
+              "bytes": 4320000,
+              "blocks": 20000
+            },
+            {
+              "file": "kem.c",
+              "bytes": 1584,
+              "blocks": 11
+            },
+            {
+              "file": "s3_lib.c",
+              "bytes": 640000,
+              "blocks": 10000
+            },
+            {
+              "file": "kdf_meth.c",
+              "bytes": 2736,
+              "blocks": 19
+            },
+            {
+              "file": "mac_meth.c",
+              "bytes": 1296,
+              "blocks": 9
+            },
+            {
+              "file": "tls13_meth.c",
+              "bytes": 480000,
+              "blocks": 40000
+            },
+            {
+              "file": "cipher_aes_gcm.c",
+              "bytes": 19200000,
+              "blocks": 20000
+            }
+          ],
+          "kernel_sockets": 10008,
+          "kernel_receive_mbuf_bytes": 0,
+          "kernel_send_mbuf_bytes": 0,
+          "kernel_receive_capacity": 4068234432,
+          "kernel_send_capacity": 1470912660,
+          "task_frames": 50016
+        },
+        {
+          "stage": "idle-10000-1",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 570269696,
+          "physical_footprint": 566931456,
+          "compressed": 0,
+          "allocator_live": 1454989008,
+          "allocator_reserved": 596328448,
+          "openssl_live": 323089631,
+          "openssl_blocks": 548991,
+          "openssl_accounting": "requested-profile",
+          "openssl_profile_headers": 8783856,
+          "openssl_owners": [
+            {
+              "file": "threads_pthread.c",
+              "bytes": 8008544,
+              "blocks": 40043
+            },
+            {
+              "file": "threads_common.c",
+              "bytes": 576,
+              "blocks": 9
+            },
+            {
+              "file": "sparse_array.c",
+              "bytes": 113408,
+              "blocks": 910
+            },
+            {
+              "file": "unknown",
+              "bytes": 8136,
+              "blocks": 9
+            },
+            {
+              "file": "initthread.c",
+              "bytes": 696,
+              "blocks": 29
+            },
+            {
+              "file": "stack.c",
+              "bytes": 2931208,
+              "blocks": 41270
+            },
+            {
+              "file": "lhash.c",
+              "bytes": 142568,
+              "blocks": 2922
+            },
+            {
+              "file": "o_names.c",
+              "bytes": 5688,
+              "blocks": 237
+            },
+            {
+              "file": "property.c",
+              "bytes": 26240,
+              "blocks": 779
+            },
+            {
+              "file": "provider_conf.c",
+              "bytes": 16,
+              "blocks": 1
+            },
+            {
+              "file": "rand_lib.c",
+              "bytes": 93,
+              "blocks": 2
+            },
+            {
+              "file": "decoder_pkey.c",
+              "bytes": 268,
+              "blocks": 9
+            },
+            {
+              "file": "provider_core.c",
+              "bytes": 323,
+              "blocks": 4
+            },
+            {
+              "file": "property_string.c",
+              "bytes": 549,
+              "blocks": 23
+            },
+            {
+              "file": "core_namemap.c",
+              "bytes": 9844,
+              "blocks": 626
+            },
+            {
+              "file": "hashtable.c",
+              "bytes": 97944,
+              "blocks": 628
+            },
+            {
+              "file": "bss_core.c",
+              "bytes": 56,
+              "blocks": 1
+            },
+            {
+              "file": "drbg.c",
+              "bytes": 5488,
+              "blocks": 20
+            },
+            {
+              "file": "self_test_core.c",
+              "bytes": 16,
+              "blocks": 1
+            },
+            {
+              "file": "indicator_core.c",
+              "bytes": 8,
+              "blocks": 1
+            },
+            {
+              "file": "internal.c",
+              "bytes": 32,
+              "blocks": 1
+            },
+            {
+              "file": "thread_posix.c",
+              "bytes": 112,
+              "blocks": 2
+            },
+            {
+              "file": "provider_child.c",
+              "bytes": 88,
+              "blocks": 1
+            },
+            {
+              "file": "conf_mod.c",
+              "bytes": 471,
+              "blocks": 17
+            },
+            {
+              "file": "bio_lib.c",
+              "bytes": 3840000,
+              "blocks": 30000
+            },
+            {
+              "file": "buffer.c",
+              "bytes": 320128,
+              "blocks": 10004
+            },
+            {
+              "file": "eng_lib.c",
+              "bytes": 456,
+              "blocks": 3
+            },
+            {
+              "file": "ex_data.c",
+              "bytes": 48,
+              "blocks": 1
+            },
+            {
+              "file": "ssl_lib.c",
+              "bytes": 56201832,
+              "blocks": 40002
+            },
+            {
+              "file": "x509_lu.c",
+              "bytes": 160,
+              "blocks": 1
+            },
+            {
+              "file": "x509_vpm.c",
+              "bytes": 1120224,
+              "blocks": 10002
+            },
+            {
+              "file": "ct_log.c",
+              "bytes": 24,
+              "blocks": 1
+            },
+            {
+              "file": "provider_ctx.c",
+              "bytes": 32,
+              "blocks": 1
+            },
+            {
+              "file": "bio_meth.c",
+              "bytes": 131,
+              "blocks": 2
+            },
+            {
+              "file": "evp_enc.c",
+              "bytes": 3889424,
+              "blocks": 20187
+            },
+            {
+              "file": "core_algorithm.c",
+              "bytes": 4516,
+              "blocks": 383
+            },
+            {
+              "file": "property_parse.c",
+              "bytes": 9304,
+              "blocks": 92
+            },
+            {
+              "file": "defn_cache.c",
+              "bytes": 1187,
+              "blocks": 16
+            },
+            {
+              "file": "digest.c",
+              "bytes": 1446696,
+              "blocks": 20027
+            },
+            {
+              "file": "signature.c",
+              "bytes": 17464,
+              "blocks": 59
+            },
+            {
+              "file": "exchange.c",
+              "bytes": 896,
+              "blocks": 7
+            },
+            {
+              "file": "t1_lib.c",
+              "bytes": 3248862,
+              "blocks": 40194
+            },
+            {
+              "file": "keymgmt_meth.c",
+              "bytes": 10240,
+              "blocks": 40
+            },
+            {
+              "file": "p_lib.c",
+              "bytes": 4560304,
+              "blocks": 30002
+            },
+            {
+              "file": "ssl_cert.c",
+              "bytes": 6640664,
+              "blocks": 20002
+            },
+            {
+              "file": "evp_rand.c",
+              "bytes": 1800,
+              "blocks": 25
+            },
+            {
+              "file": "seed_src.c",
+              "bytes": 16,
+              "blocks": 1
+            },
+            {
+              "file": "drbg_ctr.c",
+              "bytes": 3344,
+              "blocks": 19
+            },
+            {
+              "file": "cipher_aes.c",
+              "bytes": 25536,
+              "blocks": 57
+            },
+            {
+              "file": "tasn_new.c",
+              "bytes": 608,
+              "blocks": 9
+            },
+            {
+              "file": "x_name.c",
+              "bytes": 120,
+              "blocks": 4
+            },
+            {
+              "file": "asn1_lib.c",
+              "bytes": 359,
+              "blocks": 19
+            },
+            {
+              "file": "x_pubkey.c",
+              "bytes": 48,
+              "blocks": 1
+            },
+            {
+              "file": "bss_mem.c",
+              "bytes": 480000,
+              "blocks": 20000
+            },
+            {
+              "file": "a_bitstr.c",
+              "bytes": 136,
+              "blocks": 2
+            },
+            {
+              "file": "decoder_meth.c",
+              "bytes": 9344,
+              "blocks": 78
+            },
+            {
+              "file": "decode_der2key.c",
+              "bytes": 10640,
+              "blocks": 38
+            },
+            {
+              "file": "decoder_lib.c",
+              "bytes": 2112,
+              "blocks": 44
+            },
+            {
+              "file": "decode_spki2typespki.c",
+              "bytes": 528,
+              "blocks": 2
+            },
+            {
+              "file": "decode_pem2der.c",
+              "bytes": 592,
+              "blocks": 2
+            },
+            {
+              "file": "decode_epki2pki.c",
+              "bytes": 528,
+              "blocks": 2
+            },
+            {
+              "file": "ec_kmeth.c",
+              "bytes": 209,
+              "blocks": 3
+            },
+            {
+              "file": "ec_lib.c",
+              "bytes": 601,
+              "blocks": 9
+            },
+            {
+              "file": "bn_lib.c",
+              "bytes": 1608,
+              "blocks": 58
+            },
+            {
+              "file": "bn_mont.c",
+              "bytes": 384,
+              "blocks": 4
+            },
+            {
+              "file": "tasn_utl.c",
+              "bytes": 295,
+              "blocks": 1
+            },
+            {
+              "file": "err.c",
+              "bytes": 243,
+              "blocks": 3
+            },
+            {
+              "file": "tls_common.c",
+              "bytes": 88480000,
+              "blocks": 20000
+            },
+            {
+              "file": "bss_bio.c",
+              "bytes": 42080000,
+              "blocks": 40000
+            },
+            {
+              "file": "packet.h",
+              "bytes": 440000,
+              "blocks": 20000
+            },
+            {
+              "file": "ssl_sess.c",
+              "bytes": 9280000,
+              "blocks": 10000
+            },
+            {
+              "file": "mlx_kmgmt.c",
+              "bytes": 560000,
+              "blocks": 10000
+            },
+            {
+              "file": "ml_kem.c",
+              "bytes": 63360000,
+              "blocks": 20000
+            },
+            {
+              "file": "ecx_key.c",
+              "bytes": 1040000,
+              "blocks": 10000
+            },
+            {
+              "file": "sha2_prov.c",
+              "bytes": 4320000,
+              "blocks": 20000
+            },
+            {
+              "file": "kem.c",
+              "bytes": 1584,
+              "blocks": 11
+            },
+            {
+              "file": "s3_lib.c",
+              "bytes": 640000,
+              "blocks": 10000
+            },
+            {
+              "file": "kdf_meth.c",
+              "bytes": 2736,
+              "blocks": 19
+            },
+            {
+              "file": "mac_meth.c",
+              "bytes": 1296,
+              "blocks": 9
+            },
+            {
+              "file": "tls13_meth.c",
+              "bytes": 480000,
+              "blocks": 40000
+            },
+            {
+              "file": "cipher_aes_gcm.c",
+              "bytes": 19200000,
+              "blocks": 20000
+            }
+          ],
+          "kernel_sockets": 10008,
+          "kernel_receive_mbuf_bytes": 0,
+          "kernel_send_mbuf_bytes": 0,
+          "kernel_receive_capacity": 4068234432,
+          "kernel_send_capacity": 1470912660,
+          "task_frames": 50016
+        },
+        {
+          "stage": "idle-10000-2",
+          "served": 10000,
+          "active": 10000,
+          "rejected": 0,
+          "bio_write_capacity": 2048,
+          "ssl_modes": 23,
+          "release_connections": 10000,
+          "tls_failures": 0,
+          "rss": 570376192,
+          "physical_footprint": 567037952,
+          "compressed": 0,
+          "allocator_live": 1455120080,
+          "allocator_reserved": 596328448,
+          "openssl_live": 323089631,
+          "openssl_blocks": 548991,
+          "openssl_accounting": "requested-profile",
+          "openssl_profile_headers": 8783856,
+          "openssl_owners": [
+            {
+              "file": "threads_pthread.c",
+              "bytes": 8008544,
+              "blocks": 40043
+            },
+            {
+              "file": "threads_common.c",
+              "bytes": 576,
+              "blocks": 9
+            },
+            {
+              "file": "sparse_array.c",
+              "bytes": 113408,
+              "blocks": 910
+            },
+            {
+              "file": "unknown",
+              "bytes": 8136,
+              "blocks": 9
+            },
+            {
+              "file": "initthread.c",
+              "bytes": 696,
+              "blocks": 29
+            },
+            {
+              "file": "stack.c",
+              "bytes": 2931208,
+              "blocks": 41270
+            },
+            {
+              "file": "lhash.c",
+              "bytes": 142568,
+              "blocks": 2922
+            },
+            {
+              "file": "o_names.c",
+              "bytes": 5688,
+              "blocks": 237
+            },
+            {
+              "file": "property.c",
+              "bytes": 26240,
+              "blocks": 779
+            },
+            {
+              "file": "provider_conf.c",
+              "bytes": 16,
+              "blocks": 1
+            },
+            {
+              "file": "rand_lib.c",
+              "bytes": 93,
+              "blocks": 2
+            },
+            {
+              "file": "decoder_pkey.c",
+              "bytes": 268,
+              "blocks": 9
+            },
+            {
+              "file": "provider_core.c",
+              "bytes": 323,
+              "blocks": 4
+            },
+            {
+              "file": "property_string.c",
+              "bytes": 549,
+              "blocks": 23
+            },
+            {
+              "file": "core_namemap.c",
+              "bytes": 9844,
+              "blocks": 626
+            },
+            {
+              "file": "hashtable.c",
+              "bytes": 97944,
+              "blocks": 628
+            },
+            {
+              "file": "bss_core.c",
+              "bytes": 56,
+              "blocks": 1
+            },
+            {
+              "file": "drbg.c",
+              "bytes": 5488,
+              "blocks": 20
+            },
+            {
+              "file": "self_test_core.c",
+              "bytes": 16,
+              "blocks": 1
+            },
+            {
+              "file": "indicator_core.c",
+              "bytes": 8,
+              "blocks": 1
+            },
+            {
+              "file": "internal.c",
+              "bytes": 32,
+              "blocks": 1
+            },
+            {
+              "file": "thread_posix.c",
+              "bytes": 112,
+              "blocks": 2
+            },
+            {
+              "file": "provider_child.c",
+              "bytes": 88,
+              "blocks": 1
+            },
+            {
+              "file": "conf_mod.c",
+              "bytes": 471,
+              "blocks": 17
+            },
+            {
+              "file": "bio_lib.c",
+              "bytes": 3840000,
+              "blocks": 30000
+            },
+            {
+              "file": "buffer.c",
+              "bytes": 320128,
+              "blocks": 10004
+            },
+            {
+              "file": "eng_lib.c",
+              "bytes": 456,
+              "blocks": 3
+            },
+            {
+              "file": "ex_data.c",
+              "bytes": 48,
+              "blocks": 1
+            },
+            {
+              "file": "ssl_lib.c",
+              "bytes": 56201832,
+              "blocks": 40002
+            },
+            {
+              "file": "x509_lu.c",
+              "bytes": 160,
+              "blocks": 1
+            },
+            {
+              "file": "x509_vpm.c",
+              "bytes": 1120224,
+              "blocks": 10002
+            },
+            {
+              "file": "ct_log.c",
+              "bytes": 24,
+              "blocks": 1
+            },
+            {
+              "file": "provider_ctx.c",
+              "bytes": 32,
+              "blocks": 1
+            },
+            {
+              "file": "bio_meth.c",
+              "bytes": 131,
+              "blocks": 2
+            },
+            {
+              "file": "evp_enc.c",
+              "bytes": 3889424,
+              "blocks": 20187
+            },
+            {
+              "file": "core_algorithm.c",
+              "bytes": 4516,
+              "blocks": 383
+            },
+            {
+              "file": "property_parse.c",
+              "bytes": 9304,
+              "blocks": 92
+            },
+            {
+              "file": "defn_cache.c",
+              "bytes": 1187,
+              "blocks": 16
+            },
+            {
+              "file": "digest.c",
+              "bytes": 1446696,
+              "blocks": 20027
+            },
+            {
+              "file": "signature.c",
+              "bytes": 17464,
+              "blocks": 59
+            },
+            {
+              "file": "exchange.c",
+              "bytes": 896,
+              "blocks": 7
+            },
+            {
+              "file": "t1_lib.c",
+              "bytes": 3248862,
+              "blocks": 40194
+            },
+            {
+              "file": "keymgmt_meth.c",
+              "bytes": 10240,
+              "blocks": 40
+            },
+            {
+              "file": "p_lib.c",
+              "bytes": 4560304,
+              "blocks": 30002
+            },
+            {
+              "file": "ssl_cert.c",
+              "bytes": 6640664,
+              "blocks": 20002
+            },
+            {
+              "file": "evp_rand.c",
+              "bytes": 1800,
+              "blocks": 25
+            },
+            {
+              "file": "seed_src.c",
+              "bytes": 16,
+              "blocks": 1
+            },
+            {
+              "file": "drbg_ctr.c",
+              "bytes": 3344,
+              "blocks": 19
+            },
+            {
+              "file": "cipher_aes.c",
+              "bytes": 25536,
+              "blocks": 57
+            },
+            {
+              "file": "tasn_new.c",
+              "bytes": 608,
+              "blocks": 9
+            },
+            {
+              "file": "x_name.c",
+              "bytes": 120,
+              "blocks": 4
+            },
+            {
+              "file": "asn1_lib.c",
+              "bytes": 359,
+              "blocks": 19
+            },
+            {
+              "file": "x_pubkey.c",
+              "bytes": 48,
+              "blocks": 1
+            },
+            {
+              "file": "bss_mem.c",
+              "bytes": 480000,
+              "blocks": 20000
+            },
+            {
+              "file": "a_bitstr.c",
+              "bytes": 136,
+              "blocks": 2
+            },
+            {
+              "file": "decoder_meth.c",
+              "bytes": 9344,
+              "blocks": 78
+            },
+            {
+              "file": "decode_der2key.c",
+              "bytes": 10640,
+              "blocks": 38
+            },
+            {
+              "file": "decoder_lib.c",
+              "bytes": 2112,
+              "blocks": 44
+            },
+            {
+              "file": "decode_spki2typespki.c",
+              "bytes": 528,
+              "blocks": 2
+            },
+            {
+              "file": "decode_pem2der.c",
+              "bytes": 592,
+              "blocks": 2
+            },
+            {
+              "file": "decode_epki2pki.c",
+              "bytes": 528,
+              "blocks": 2
+            },
+            {
+              "file": "ec_kmeth.c",
+              "bytes": 209,
+              "blocks": 3
+            },
+            {
+              "file": "ec_lib.c",
+              "bytes": 601,
+              "blocks": 9
+            },
+            {
+              "file": "bn_lib.c",
+              "bytes": 1608,
+              "blocks": 58
+            },
+            {
+              "file": "bn_mont.c",
+              "bytes": 384,
+              "blocks": 4
+            },
+            {
+              "file": "tasn_utl.c",
+              "bytes": 295,
+              "blocks": 1
+            },
+            {
+              "file": "err.c",
+              "bytes": 243,
+              "blocks": 3
+            },
+            {
+              "file": "tls_common.c",
+              "bytes": 88480000,
+              "blocks": 20000
+            },
+            {
+              "file": "bss_bio.c",
+              "bytes": 42080000,
+              "blocks": 40000
+            },
+            {
+              "file": "packet.h",
+              "bytes": 440000,
+              "blocks": 20000
+            },
+            {
+              "file": "ssl_sess.c",
+              "bytes": 9280000,
+              "blocks": 10000
+            },
+            {
+              "file": "mlx_kmgmt.c",
+              "bytes": 560000,
+              "blocks": 10000
+            },
+            {
+              "file": "ml_kem.c",
+              "bytes": 63360000,
+              "blocks": 20000
+            },
+            {
+              "file": "ecx_key.c",
+              "bytes": 1040000,
+              "blocks": 10000
+            },
+            {
+              "file": "sha2_prov.c",
+              "bytes": 4320000,
+              "blocks": 20000
+            },
+            {
+              "file": "kem.c",
+              "bytes": 1584,
+              "blocks": 11
+            },
+            {
+              "file": "s3_lib.c",
+              "bytes": 640000,
+              "blocks": 10000
+            },
+            {
+              "file": "kdf_meth.c",
+              "bytes": 2736,
+              "blocks": 19
+            },
+            {
+              "file": "mac_meth.c",
+              "bytes": 1296,
+              "blocks": 9
+            },
+            {
+              "file": "tls13_meth.c",
+              "bytes": 480000,
+              "blocks": 40000
+            },
+            {
+              "file": "cipher_aes_gcm.c",
+              "bytes": 19200000,
+              "blocks": 20000
+            }
+          ],
+          "kernel_sockets": 10008,
+          "kernel_receive_mbuf_bytes": 0,
+          "kernel_send_mbuf_bytes": 0,
+          "kernel_receive_capacity": 4068234432,
+          "kernel_send_capacity": 1470912660,
+          "task_frames": 50016
+        }
+      ],
+      "completed": {
+        "elapsed_s": 26.840102433227003,
+        "connections": 10000
+      },
+      "capture": "owner-tls.log"
+    }
+  ],
+  "failed_setups": [
+    {
+      "connect_failure": "[Errno 60] Operation timed out",
+      "local": [
+        "127.0.0.1",
+        13750
+      ],
+      "remote": [
+        "127.0.0.1",
+        28824
+      ],
+      "server_pid": 72890,
+      "server_exit": null
+    },
+    {
+      "connect_failure": "[Errno 60] Operation timed out",
+      "local": [
+        "127.0.0.1",
+        12500
+      ],
+      "remote": [
+        "127.0.0.1",
+        28408
+      ],
+      "server_pid": 75823,
+      "server_exit": null
+    }
+  ]
+}
