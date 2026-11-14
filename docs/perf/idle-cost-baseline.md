@@ -15,18 +15,18 @@ Bytes per connection are the run median of `(idle - fresh zero-connection baseli
 | TLS | 10,000 | 96,598.426 | 161.382 | 204,536.434 | 7.526 | 63,611.915 |
 | TLS | 100,000 | Not yet accepted | — | Not yet accepted | — | Not yet accepted |
 
-OpenSSL's A/A spread at 10K is zero. TLS adds 100,150.642 allocated bytes per connection over plain at 10K (about 95.8 KiB); 63,611.915 B is inside OpenSSL and 36,538.726 B remains outside that allocator subset. That remainder includes Asio TLS engine storage, wrapper frames, and runtime ownership; it is not attributed to a single owner.
+OpenSSL's A/A spread at 10K is zero. TLS adds 100,150.642 allocated bytes per connection over plain at 10K (about 97.8 KiB); 63,611.915 B is inside OpenSSL and 36,538.726 B remains outside that allocator subset. That remainder includes Asio TLS engine storage, wrapper frames, and runtime ownership; it is not attributed to a single owner.
 
 Raw accepted runs, bytes after subtracting each run's baseline:
 
 | Row/run | RSS delta | Allocator live delta | OpenSSL live delta |
 |---|---:|---:|---:|
-| Plain 10K/A | 143,609,856 | 1,043,857,920 | 0 |
-| Plain 10K/B | 143,663,104 | 1,043,857,920 | 0 |
-| Plain 10K/A | 143,585,280 | 1,043,857,920 | 0 |
-| TLS 10K/A | 965,681,152 | 2,045,303,920 | 636,119,152 |
-| TLS 10K/B | 967,294,976 | 2,045,379,184 | 636,119,152 |
-| TLS 10K/A | 965,984,256 | 2,045,364,336 | 636,119,152 |
+| Plain 10K/1 | 143,609,856 | 1,043,857,920 | 0 |
+| Plain 10K/2 | 143,663,104 | 1,043,857,920 | 0 |
+| Plain 10K/3 | 143,585,280 | 1,043,857,920 | 0 |
+| TLS 10K/1 | 965,681,152 | 2,045,303,920 | 636,119,152 |
+| TLS 10K/2 | 967,294,976 | 2,045,379,184 | 636,119,152 |
+| TLS 10K/3 | 965,984,256 | 2,045,364,336 | 636,119,152 |
 
 Evidence: `261113-192215-1205cc` and `261113-192220-de33ab`, both exit 0. The raw baseline and all three idle snapshots for every run are in each job's log. The 100K TLS failed-cleanup job `261113-192222-9bd3a8` reported 20,445,698,672 additional allocated bytes but only 616,157,184 additional RSS bytes at its completed snapshot. That large allocation/RSS gap motivates the added compressed/physical-footprint counters; do not extrapolate RSS linearly across scales or use the failed-cleanup row as an accepted A/A baseline.
 

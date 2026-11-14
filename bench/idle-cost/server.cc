@@ -1,6 +1,9 @@
 #include "http_asio_tls.h"
 #include <atomic>
 #include <cstdio>
+#include <cstring>
+#include <limits>
+#include <mutex>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
@@ -24,6 +27,7 @@ std::size_t usable(void* p) {
     return p ? malloc_usable_size(p) : 0;
 #endif
 }
+#ifndef HTTP_IDLE_SSL_OWNERS
 void* ssl_malloc(std::size_t bytes, const char*, int) {
     auto* p = std::malloc(bytes);
     if (p) { ssl_bytes += usable(p); ++ssl_blocks; }
@@ -41,6 +45,9 @@ void* ssl_realloc(void* p, std::size_t bytes, const char* file, int line) {
     if (result) { ssl_bytes -= before; ssl_bytes += usable(result); }
     return result;
 }
+#else
+#include "ssl_owners.inc"
+#endif
 std::size_t rss() {
 #ifdef __APPLE__
     mach_task_basic_info info{};
@@ -90,7 +97,11 @@ void snapshot(const std::string& stage, const std::vector<std::unique_ptr<http::
               << ",\"physical_footprint\":" << physical << ",\"compressed\":" << compressed
               << ",\"allocator_live\":" << live << ",\"allocator_reserved\":" << reserved
               << ",\"openssl_live\":" << ssl_bytes.load()
-              << ",\"openssl_blocks\":" << ssl_blocks.load() << "}" << std::endl;
+              << ",\"openssl_blocks\":" << ssl_blocks.load();
+#ifdef HTTP_IDLE_SSL_OWNERS
+    ssl_owners_json();
+#endif
+    std::cout << "}" << std::endl;
 }
 struct Handler : http::HttpHandler {
     task::task<void> handle(http::Request&, http::ResponseWriter& writer) override {
