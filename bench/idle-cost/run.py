@@ -92,6 +92,10 @@ def main() -> None:
     )
     clients: list[socket.socket] = []
     assert server.stdout and server.stdin
+    print(
+        json.dumps({"server_pid": server.pid, "source_port_base": args.source_port}),
+        flush=True,
+    )
     started = time.monotonic()
     try:
         print(server.stdout.readline(), end="", flush=True)
@@ -104,7 +108,31 @@ def main() -> None:
                 try:
                     peer.bind(("127.0.0.1", args.source_port + len(clients) // 8))
                     peer.connect(("127.0.0.1", args.base_port + len(clients) % 8))
-                except BaseException:
+                except BaseException as error:
+                    listener = subprocess.run(
+                        ["lsof", "-nP", "-a", "-p", str(server.pid), "-iTCP"],
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                        timeout=10,
+                    )
+                    print(
+                        json.dumps(
+                            {
+                                "connect_failure": str(error),
+                                "local": peer.getsockname(),
+                                "remote": [
+                                    "127.0.0.1",
+                                    args.base_port + len(clients) % 8,
+                                ],
+                                "server_pid": server.pid,
+                                "server_exit": server.poll(),
+                                "server_listeners": listener.stdout,
+                                "listener_error": listener.stderr,
+                            }
+                        ),
+                        flush=True,
+                    )
                     peer.close()
                     raise
                 if args.tls:
