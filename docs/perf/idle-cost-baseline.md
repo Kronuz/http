@@ -1,8 +1,8 @@
 # Idle connection cost baseline
 
-Status: partial. The Release benchmark builds and its plain/TLS smoke cases complete with eight active connections each. The required exclusive 10K/100K measurements have **not run**: other campaign light holds occupy the host. A five-second exclusive acquisition attempt was canceled before it started. No RSS slope, allocator slope, TLS buffer cost, A/A spread or measured saving is claimed.
+Status: partial. The Release benchmark builds and its plain/TLS smoke cases complete with eight active connections each. The required exclusive 10K/100K A/A rows have **not completed successfully**. The first four jobs ran but failed with macOS source-port exhaustion (`errno 49`); a corrected benchmark has passed its reuse smoke and replacement rows are queued behind other campaign light holds. No RSS slope, allocator slope, TLS buffer cost, A/A spread or measured saving is claimed.
 
-Product baseline: `http:09b644d`; benchmark: `http:e2dbc35`, with active-connection checks and RSS budgeting through `http:c89db09`. Host: native x86_64 macOS 15.8.1 (Darwin 24.6.0); Apple clang 17, Release `-O3 -DNDEBUG`, OpenSSL 3.6.5. `file .scratch/build/http_idle_cost` reports a Mach-O 64-bit x86_64 executable. No product header changes.
+Product baseline: `http:09b644d`; benchmark: `http:e2dbc35`, with active-connection checks and RSS budgeting through `http:c89db09`; explicit source-port reuse and independent listener ranges at `http:6b90898`. Host: native x86_64 macOS 15.8.1 (Darwin 24.6.0); Apple clang 17, Release `-O3 -DNDEBUG`, OpenSSL 3.6.5. `file .scratch/build/http_idle_cost` reports a Mach-O 64-bit x86_64 executable. No product header changes.
 
 ## Measurement rows
 
@@ -52,7 +52,7 @@ quiet exclusive codex-http-idle-tls 10 'TLS 10K and 100K idle' -- python3 bench/
 
 Run each exclusive command three times with a fresh server for run-level A/A spread; the three snapshots per connection count only test within-run stability. No product change exists, so the before/after comparison is the same named product commit. Any future cut needs its own commit and interleaved A/B runs.
 
-The client lives in a separate process; only server memory is sampled. Eight listeners (18920–18927, one reactor each) avoid the single-destination ephemeral-port ceiling at 100K connections. The driver completes one request per connection, asserts cumulative responses **and active server connections** equal the requested count, rejects any TLS/admission failure, waits two seconds and collects three snapshots. It keeps all connections open through both rows. The server reports RSS, allocator live/reserved bytes and rounded OpenSSL live bytes/blocks. Subtract each fresh server's zero-connection baseline, then divide by the exact active count. A failed/timed-out row is invalid, not a lower connection count result.
+The client lives in a separate process; only server memory is sampled. Eight listeners (default 24000–24007, one reactor each) share explicit client source ports (default 30000–42499 for 100K connections), with `SO_REUSEADDR` set before bind. Every A/A run selects a fresh listener range to avoid TIME_WAIT tuple reuse. Simply spreading implicit connects across listeners was insufficient on macOS: its implicit source-port allocator still exhausted the range on the original jobs. The driver completes one request per connection, asserts cumulative responses **and active server connections** equal the requested count, rejects any TLS/admission failure, waits two seconds and collects three snapshots. It keeps all connections open through both rows. The server reports RSS, allocator live/reserved bytes and rounded OpenSSL live bytes/blocks. Subtract each fresh server's zero-connection baseline, then divide by the exact active count. A failed/timed-out row is invalid, not a lower connection count result.
 
 Remaining attribution requires allocation stacks/frame-pool accounting and a kernel socket estimate from host network-memory counters under the same exclusive hold. RSS and allocator-live numbers describe different ownership layers; never sum them. OpenSSL allocations are a subset of allocator live bytes. This benchmark currently aggregates SSL/BIO/record allocations, so it cannot satisfy the full owner-breakdown requirement by itself.
 
@@ -60,7 +60,7 @@ Validation: Release build; eight plain and eight TLS active-connection smoke cas
 
 ## Queued exact-commit evidence
 
-The global campaign queue holds the following jobs at `http:c89db09`; no quest or campaign-state file changes. Measurements wait for the machine and run with `quiet exclusive`, at most ten minutes per job. Each row uses three fresh-server A/A runs. The branch remains partial until their actual output is collected and the missing ownership attribution is supplied.
+The global campaign queue holds the following jobs at `http:c89db09`; no quest or campaign-state file changes. Measurements wait for the machine and run with `quiet exclusive`, at most ten minutes per job. Each row uses three fresh-server A/A runs. The branch remains partial until successful row output is collected and the missing ownership attribution is supplied. The first four measurement jobs below failed with `errno 49`; their incomplete A/A sets do not establish a baseline.
 
 | Job | Purpose | Dependency |
 |---|---|---|
@@ -72,3 +72,17 @@ The global campaign queue holds the following jobs at `http:c89db09`; no quest o
 | `261113-171203-e73448` | TLS 100K, three runs | Smoke |
 
 Use `campaign -C Detent job show JOB` to read the command, state and output. The retained slot is `codex-http-idle-baseline`. The driver checks combined client/server RSS every 1,000 connections and aborts above `--max-total-rss-gib` (default 16 GiB) to leave headroom on this shared 32 GiB host. An aborted 100K row remains an invalid/missing 100K result; do not relabel it as a smaller successful row. Kernel socket allocations are outside that process-RSS budget and still require independent attribution.
+
+## Source-port correction and replacement jobs
+
+`http:6b90898` binds client sockets with `SO_REUSEADDR`, reuses each source port across the eight different destinations, and exposes `--base-port`/`--source-port`. The client source range is outside this host's implicit ephemeral range. The explicit source-port bound also rejects impossible requested connection counts before starting. Raw baseline output prints the effective listener base.
+
+| Job | Purpose | Result |
+|---|---|---|
+| `261113-191959-d6aa99` | Release build; three 1K plain runs on fresh listener ranges; 1K TLS | Passed, exit 0, 85.9 s |
+| `261113-192215-1205cc` | Plain 10K, three A/A runs | Queued |
+| `261113-192217-78e811` | Plain 100K, three A/A runs | Queued |
+| `261113-192220-de33ab` | TLS 10K, three A/A runs | Queued |
+| `261113-192222-9bd3a8` | TLS 100K, three A/A runs | Queued |
+
+The measurement jobs use listener bases `25000 + 32*row + offset`, where row is 0..3 in table order and offset is 0, 8, 16 across repeats. For example, plain 10K uses bases 25000, 25008 and 25016. Reproduce a repeat with `python3 bench/idle-cost/run.py .scratch/build/http_idle_cost --counts 10000 --base-port 25000`; retain `quiet exclusive` around the full three-run row. The last observed competing light holds include ccache working-set builds through 20:23 UTC on 2026-11-13, so these jobs intentionally wait rather than measuring beside them.
