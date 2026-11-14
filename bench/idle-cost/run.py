@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import resource
 import socket
 import ssl
@@ -18,10 +19,19 @@ def main() -> None:
     parser.add_argument("binary", type=Path)
     parser.add_argument("--tls", nargs=2, metavar=("CERT", "KEY"))
     parser.add_argument("--counts", nargs="+", type=int, default=[10000, 100000])
+    parser.add_argument("--base-port", type=int, default=24000)
+    parser.add_argument("--source-port", type=int, default=30000)
     parser.add_argument("--max-total-rss-gib", type=float, default=16)
     args = parser.parse_args()
     if args.max_total_rss_gib <= 0:
         parser.error("--max-total-rss-gib must be positive")
+    if not 1024 <= args.base_port <= 65527 or not 1024 <= args.source_port <= 65535:
+        parser.error("listener/source ports must be unprivileged and in range")
+    if any(
+        count <= 0 or (count - 1) // 8 + args.source_port > 65535
+        for count in args.counts
+    ):
+        parser.error("connection counts exceed the explicit source-port range")
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
@@ -29,7 +39,11 @@ def main() -> None:
     if args.tls:
         command = [str(args.binary.resolve()), "tls", *args.tls]
     server = subprocess.Popen(
-        command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+        env={**os.environ, "HTTP_IDLE_BASE_PORT": str(args.base_port)},
     )
     clients: list[socket.socket] = []
     assert server.stdout and server.stdin
@@ -39,9 +53,15 @@ def main() -> None:
         print(server.stdout.readline(), end="", flush=True)
         for count in args.counts:
             while len(clients) < count:
-                peer = socket.create_connection(
-                    ("127.0.0.1", 18920 + len(clients) % 8), timeout=10
-                )
+                peer = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                peer.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                peer.settimeout(10)
+                try:
+                    peer.bind(("127.0.0.1", args.source_port + len(clients) // 8))
+                    peer.connect(("127.0.0.1", args.base_port + len(clients) % 8))
+                except BaseException:
+                    peer.close()
+                    raise
                 if args.tls:
                     peer = context.wrap_socket(peer, server_hostname="localhost")
                 peer.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")

@@ -97,9 +97,12 @@ int main(int argc, char** argv) {
         context->use_certificate_chain_file(argv[2]);
         context->use_private_key_file(argv[3], asio::ssl::context::pem);
     }
+    const char* configured_port = std::getenv("HTTP_IDLE_BASE_PORT");
+    const unsigned long base_port = configured_port ? std::strtoul(configured_port, nullptr, 10) : 24000;
+    if (base_port < 1024 || base_port > 65527) return 2;
     Handler handler;
     std::vector<std::unique_ptr<http::HttpAsioService>> services;
-    for (unsigned port = 18920; port < 18928; ++port) {
+    for (unsigned long port = base_port; port < base_port + 8; ++port) {
         http::HttpAsioService::ConnectionFactory factory;
         if (tls) factory = http::tls_connection_factory(context, std::chrono::seconds(30), 100000, 100000,
             [](http::TlsFailure) { ++failures; });
@@ -107,7 +110,7 @@ int main(int argc, char** argv) {
         service->start(static_cast<unsigned short>(port));
         services.push_back(std::move(service));
     }
-    std::cout << "{\"socket_object\":" << sizeof(asio::ip::tcp::socket)
+    std::cout << "{\"listener_base\":" << base_port << ",\"socket_object\":" << sizeof(asio::ip::tcp::socket)
               << ",\"parser_object\":" << sizeof(http::RequestParser)
               << ",\"plain_input_object\":" << sizeof(http::detail::ConnectionInput<asio::ip::tcp::socket>)
               << ",\"timer_object\":" << sizeof(asio::steady_timer)
