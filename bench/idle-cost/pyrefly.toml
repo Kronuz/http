@@ -1,0 +1,2 @@
+preset = "strict"
+project-includes = ["run.py"]

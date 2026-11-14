@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.20)
+project(http_idle_cost LANGUAGES C CXX)
+add_subdirectory(../.. http-deps)
+find_package(OpenSSL 3 REQUIRED)
+add_executable(http_idle_cost server.cc)
+target_link_libraries(http_idle_cost PRIVATE http OpenSSL::SSL)
