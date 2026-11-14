@@ -112,8 +112,13 @@ void snapshot(const std::string& stage, const std::vector<std::unique_ptr<http::
     std::cout << "}" << std::endl;
 }
 struct Handler : http::HttpHandler {
-    task::task<void> handle(http::Request&, http::ResponseWriter& writer) override {
-        writer.send(200, "ok"); ++served; co_return;
+    task::task<void> handle(http::Request& request, http::ResponseWriter& writer) override {
+        if (request.path == "/verify") {
+            std::uint64_t digest = 14695981039346656037ULL;
+            for (unsigned char byte : request.body) { digest ^= byte; digest *= 1099511628211ULL; }
+            writer.send(200, std::to_string(request.body.size()) + ":" + std::to_string(digest));
+        } else { writer.send(200, "ok"); }
+        ++served; co_return;
     }
 };
 }

@@ -23,6 +23,7 @@ def main() -> None:
     parser.add_argument("--source-port", type=int, default=30000)
     parser.add_argument("--socket-timeout", type=float, default=60)
     parser.add_argument("--shutdown-timeout", type=float, default=120)
+    parser.add_argument("--payload-bytes", type=int, default=0)
     parser.add_argument("--max-total-rss-gib", type=float, default=16)
     args = parser.parse_args()
     if args.socket_timeout <= 0 or args.shutdown_timeout <= 0:
@@ -36,6 +37,19 @@ def main() -> None:
         for count in args.counts
     ):
         parser.error("connection counts exceed the explicit source-port range")
+    if not 0 <= args.payload_bytes <= 16 * 1024 * 1024 or (
+        args.payload_bytes and args.counts != [1]
+    ):
+        parser.error("payload validation requires --counts 1 and at most16MiB")
+    payload = (bytes(range(256)) * ((args.payload_bytes + 255) // 256))[
+        : args.payload_bytes
+    ]
+    expected = b"ok"
+    if payload:
+        digest = 14695981039346656037
+        for byte in payload:
+            digest = ((digest ^ byte) * 1099511628211) & ((1 << 64) - 1)
+        expected = f"{len(payload)}:{digest}".encode()
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
@@ -68,7 +82,13 @@ def main() -> None:
                     raise
                 if args.tls:
                     peer = context.wrap_socket(peer, server_hostname="localhost")
-                peer.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                if payload:
+                    peer.sendall(
+                        f"POST /verify HTTP/1.1\r\nHost: localhost\r\nContent-Length: {len(payload)}\r\n\r\n".encode()
+                    )
+                    peer.sendall(payload)
+                else:
+                    peer.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
                 response = b""
                 while b"\r\n\r\n" not in response:
                     chunk = peer.recv(4096)
@@ -78,11 +98,15 @@ def main() -> None:
                 head, body = response.split(b"\r\n\r\n", 1)
                 if not head.startswith(b"HTTP/1.1 200"):
                     raise RuntimeError(f"unexpected response: {head!r}")
-                while len(body) < 2:
-                    chunk = peer.recv(2 - len(body))
+                while len(body) < len(expected):
+                    chunk = peer.recv(len(expected) - len(body))
                     if not chunk:
                         raise RuntimeError("connection closed in response body")
                     body += chunk
+                if body != expected:
+                    raise RuntimeError(
+                        f"response payload mismatch: {body!r} != {expected!r}"
+                    )
                 clients.append(peer)
                 if len(clients) % 1000 == 0:
                     server.stdin.write("memory-check\n")
