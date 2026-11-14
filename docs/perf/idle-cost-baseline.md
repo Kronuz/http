@@ -2,7 +2,7 @@
 
 Status: partial. The Release benchmark builds and its plain/TLS smoke cases complete with eight active connections each. The required exclusive 10K/100K measurements have **not run**: other campaign light holds occupy the host. A five-second exclusive acquisition attempt was canceled before it started. No RSS slope, allocator slope, TLS buffer cost, A/A spread or measured saving is claimed.
 
-Product baseline: `http:09b644d`; benchmark: `http:e2dbc35`. Host: native x86_64 macOS 15.8.1 (Darwin 24.6.0); Apple clang 17, Release `-O3 -DNDEBUG`, OpenSSL 3.6.5. `file .scratch/build/http_idle_cost` reports a Mach-O 64-bit x86_64 executable. No product header changes.
+Product baseline: `http:09b644d`; benchmark: `http:e2dbc35`, with active-connection checks and RSS budgeting through `http:c89db09`. Host: native x86_64 macOS 15.8.1 (Darwin 24.6.0); Apple clang 17, Release `-O3 -DNDEBUG`, OpenSSL 3.6.5. `file .scratch/build/http_idle_cost` reports a Mach-O 64-bit x86_64 executable. No product header changes.
 
 ## Measurement rows
 
@@ -57,3 +57,18 @@ The client lives in a separate process; only server memory is sampled. Eight lis
 Remaining attribution requires allocation stacks/frame-pool accounting and a kernel socket estimate from host network-memory counters under the same exclusive hold. RSS and allocator-live numbers describe different ownership layers; never sum them. OpenSSL allocations are a subset of allocator live bytes. This benchmark currently aggregates SSL/BIO/record allocations, so it cannot satisfy the full owner-breakdown requirement by itself.
 
 Validation: Release build; eight plain and eight TLS active-connection smoke cases; `ruff format`, `ruff check`, and `pyrefly check --config bench/idle-cost/pyrefly.toml --python-interpreter-path /usr/local/bin/python3` (strict, zero errors).
+
+## Queued exact-commit evidence
+
+The global campaign queue holds the following jobs at `http:c89db09`; no quest or campaign-state file changes. Measurements wait for the machine and run with `quiet exclusive`, at most ten minutes per job. Each row uses three fresh-server A/A runs. The branch remains partial until their actual output is collected and the missing ownership attribution is supplied.
+
+| Job | Purpose | Dependency |
+|---|---|---|
+| `261113-170955-a13003` | Initial Release build at `http:de4fadf` | None |
+| `261113-171110-9fcfc2` | Build and 1,000-connection plain/TLS correctness smoke with RSS budget | Initial build |
+| `261113-171146-9e2dfc` | Plain 10K, three runs | Smoke |
+| `261113-171152-409f9b` | Plain 100K, three runs | Smoke |
+| `261113-171157-e6b63b` | TLS 10K, three runs | Smoke |
+| `261113-171203-e73448` | TLS 100K, three runs | Smoke |
+
+Use `campaign -C Detent job show JOB` to read the command, state and output. The retained slot is `codex-http-idle-baseline`. The driver checks combined client/server RSS every 1,000 connections and aborts above `--max-total-rss-gib` (default 16 GiB) to leave headroom on this shared 32 GiB host. An aborted 100K row remains an invalid/missing 100K result; do not relabel it as a smaller successful row. Kernel socket allocations are outside that process-RSS budget and still require independent attribution.
