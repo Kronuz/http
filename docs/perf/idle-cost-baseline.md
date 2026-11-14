@@ -1,17 +1,34 @@
 # Idle connection cost baseline
 
-Status: partial. The Release benchmark builds and its plain/TLS smoke cases complete with eight active connections each. The required exclusive 10K/100K A/A rows have **not completed successfully**. The first four jobs ran but failed with macOS source-port exhaustion (`errno 49`); a corrected benchmark has passed its reuse smoke and replacement rows are queued behind other campaign light holds. No RSS slope, allocator slope, TLS buffer cost, A/A spread or measured saving is claimed.
+Status: partial. Both 10K connection rows have three successful exclusive A/A runs. The 100K plain row timed out during setup; the 100K TLS row reached all connections and captured snapshots but exceeded the driver's 15 s teardown allowance. Neither failed job supplies an accepted 100K A/A baseline. `http:2e8aeb3` gives large rows bounded 120 s cleanup, reports setup progress on failure, and records macOS physical footprint/compressed memory alongside RSS; replacement 100K runs use separate ten-minute holds.
 
 Product baseline: `http:09b644d`; benchmark: `http:e2dbc35`, with active-connection checks and RSS budgeting through `http:c89db09`; explicit source-port reuse and independent listener ranges at `http:6b90898`. Host: native x86_64 macOS 15.8.1 (Darwin 24.6.0); Apple clang 17, Release `-O3 -DNDEBUG`, OpenSSL 3.6.5. `file .scratch/build/http_idle_cost` reports a Mach-O 64-bit x86_64 executable. No product header changes.
 
 ## Measurement rows
 
-| Transport | Active connections | Server RSS delta | Allocator live delta | OpenSSL live delta | Bytes/connection | A/A spread |
-|---|---:|---|---|---|---|---|
-| Plain | 10,000 | Pending exclusive run | Pending | N/A | Unmeasured | Unmeasured |
-| Plain | 100,000 | Pending exclusive run | Pending | N/A | Unmeasured | Unmeasured |
-| TLS | 10,000 | Pending exclusive run | Pending | Pending | Unmeasured | Unmeasured |
-| TLS | 100,000 | Pending exclusive run | Pending | Pending | Unmeasured | Unmeasured |
+Bytes per connection are the run median of `(idle - fresh zero-connection baseline) / active connections`; A/A spread is max minus min across three run medians. Source commit is `http:6b90898` for both accepted rows; product remains `http:09b644d`. OpenSSL is a subset of allocator live bytes, and RSS describes resident pages rather than allocated capacity.
+
+| Transport | Active connections | RSS B/connection | RSS A/A spread | Allocator live B/connection | Allocator A/A spread | OpenSSL B/connection |
+|---|---:|---:|---:|---:|---:|---:|
+| Plain | 10,000 | 14,360.986 | 7.782 | 104,385.792 | 0.000 | 0 |
+| Plain | 100,000 | Not yet accepted | — | Not yet accepted | — | 0 |
+| TLS | 10,000 | 96,598.426 | 161.382 | 204,536.434 | 7.526 | 63,611.915 |
+| TLS | 100,000 | Not yet accepted | — | Not yet accepted | — | Not yet accepted |
+
+OpenSSL's A/A spread at 10K is zero. TLS adds 100,150.642 allocated bytes per connection over plain at 10K (about 95.8 KiB); 63,611.915 B is inside OpenSSL and 36,538.726 B remains outside that allocator subset. That remainder includes Asio TLS engine storage, wrapper frames, and runtime ownership; it is not attributed to a single owner.
+
+Raw accepted runs, bytes after subtracting each run's baseline:
+
+| Row/run | RSS delta | Allocator live delta | OpenSSL live delta |
+|---|---:|---:|---:|
+| Plain 10K/A | 143,609,856 | 1,043,857,920 | 0 |
+| Plain 10K/B | 143,663,104 | 1,043,857,920 | 0 |
+| Plain 10K/A | 143,585,280 | 1,043,857,920 | 0 |
+| TLS 10K/A | 965,681,152 | 2,045,303,920 | 636,119,152 |
+| TLS 10K/B | 967,294,976 | 2,045,379,184 | 636,119,152 |
+| TLS 10K/A | 965,984,256 | 2,045,364,336 | 636,119,152 |
+
+Evidence: `261113-192215-1205cc` and `261113-192220-de33ab`, both exit 0. The raw baseline and all three idle snapshots for every run are in each job's log. The 100K TLS failed-cleanup job `261113-192222-9bd3a8` reported 20,445,698,672 additional allocated bytes but only 616,157,184 additional RSS bytes at its completed snapshot. That large allocation/RSS gap motivates the added compressed/physical-footprint counters; do not extrapolate RSS linearly across scales or use the failed-cleanup row as an accepted A/A baseline.
 
 The smoke output is `.scratch/smoke.log` in this worktree. It is correctness evidence, collected under `quiet light`, and is deliberately excluded from cost estimates. The blocked acquisition and contemporaneous hold list are `.scratch/exclusive-attempt.log` (2026-11-13, about 17:01 UTC): x7-gate had light holds ending at 18:25, 18:50 and 22:20 UTC. The benchmark leaves no server/client running after completion or a normal exception.
 
@@ -85,4 +102,4 @@ Use `campaign -C Detent job show JOB` to read the command, state and output. The
 | `261113-192220-de33ab` | TLS 10K, three A/A runs | Queued |
 | `261113-192222-9bd3a8` | TLS 100K, three A/A runs | Queued |
 
-The measurement jobs use listener bases `25000 + 32*row + offset`, where row is 0..3 in table order and offset is 0, 8, 16 across repeats. For example, plain 10K uses bases 25000, 25008 and 25016. Reproduce a repeat with `python3 bench/idle-cost/run.py .scratch/build/http_idle_cost --counts 10000 --base-port 25000`; retain `quiet exclusive` around the full three-run row. The last observed competing light holds include ccache working-set builds through 20:23 UTC on 2026-11-13, so these jobs intentionally wait rather than measuring beside them.
+The measurement jobs use listener bases `25000 + 32*row + offset`, where row is 0..3 in table order and offset is 0, 8, 16 across repeats. For example, plain 10K uses bases 25000, 25008 and 25016. Reproduce a repeat with `python3 bench/idle-cost/run.py .scratch/build/http_idle_cost --counts 10000 --base-port 25000`; retain `quiet exclusive` around the full three-run row. The 10K jobs passed; both 100K jobs failed as described above. Their complete logs preserve the actual commands. Subsequent 100K reruns use one run per hold because the original TLS setup alone took 335 s, so three runs cannot reliably fit one ten-minute job.
