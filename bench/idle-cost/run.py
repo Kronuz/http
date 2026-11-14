@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import resource
 import socket
 import ssl
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -16,7 +18,10 @@ def main() -> None:
     parser.add_argument("binary", type=Path)
     parser.add_argument("--tls", nargs=2, metavar=("CERT", "KEY"))
     parser.add_argument("--counts", nargs="+", type=int, default=[10000, 100000])
+    parser.add_argument("--max-total-rss-gib", type=float, default=16)
     args = parser.parse_args()
+    if args.max_total_rss_gib <= 0:
+        parser.error("--max-total-rss-gib must be positive")
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
@@ -55,6 +60,19 @@ def main() -> None:
                         raise RuntimeError("connection closed in response body")
                     body += chunk
                 clients.append(peer)
+                if len(clients) % 1000 == 0:
+                    server.stdin.write("memory-check\n")
+                    server.stdin.flush()
+                    memory = json.loads(server.stdout.readline())
+                    client_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+                    if sys.platform != "darwin":
+                        client_rss *= 1024
+                    combined = memory["rss"] + client_rss
+                    if combined > args.max_total_rss_gib * 1024**3:
+                        raise RuntimeError(
+                            f"invalid row: combined process RSS {combined} exceeds "
+                            f"{args.max_total_rss_gib} GiB at {len(clients)} connections"
+                        )
             time.sleep(2)
             for repeat in range(3):
                 server.stdin.write(f"idle-{count}-{repeat}\n")
