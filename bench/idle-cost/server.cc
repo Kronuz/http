@@ -168,7 +168,7 @@ int main(int argc, char** argv) {
         service->start(static_cast<unsigned short>(port));
         services.push_back(std::move(service));
     }
-    std::cout << "{\"listener_base\":" << base_port << ",\"socket_object\":" << sizeof(asio::ip::tcp::socket)
+    std::cout << "{\"source_commit\":\"" << HTTP_IDLE_BUILD_COMMIT << "\",\"listener_base\":" << base_port << ",\"socket_object\":" << sizeof(asio::ip::tcp::socket)
               << ",\"tls_staging_buffer\":" << asio::ssl::detail::stream_core::max_tls_record_size
               << ",\"parser_object\":" << sizeof(http::RequestParser)
               << ",\"plain_input_object\":" << sizeof(http::detail::ConnectionInput<asio::ip::tcp::socket>)

@@ -63,3 +63,8 @@ target_link_libraries(http_idle_owners_small_tls PRIVATE http OpenSSL::SSL)
 if(APPLE)
   target_link_libraries(http_idle_owners_small_tls PRIVATE proc)
 endif()
+execute_process(COMMAND git -C "${CMAKE_CURRENT_SOURCE_DIR}/../.." rev-parse HEAD
+  OUTPUT_VARIABLE idle_source_commit OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+foreach(target http_idle_cost http_idle_owners http_idle_small_read http_idle_small_tls http_idle_small_both http_idle_owners_small_tls)
+  target_compile_definitions(${target} PRIVATE HTTP_IDLE_BUILD_COMMIT="${idle_source_commit}")
+endforeach()

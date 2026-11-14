@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import resource
@@ -67,6 +68,21 @@ def main() -> None:
     command = [str(args.binary.resolve()), "plain"]
     if args.tls:
         command = [str(args.binary.resolve()), "tls", *args.tls]
+    print(
+        json.dumps(
+            {
+                "binary_name": args.binary.name,
+                "binary_sha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(),
+                "driver_sha256": hashlib.sha256(
+                    Path(__file__).read_bytes()
+                ).hexdigest(),
+                "counts": args.counts,
+                "tls": bool(args.tls),
+                "base_port": args.base_port,
+            }
+        ),
+        flush=True,
+    )
     server = subprocess.Popen(
         command,
         stdin=subprocess.PIPE,
