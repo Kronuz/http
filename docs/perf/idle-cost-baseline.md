@@ -24,7 +24,7 @@ These are source/storage estimates, not a measured owner decomposition. Object s
 | Socket | Asio socket object | 88 B in userspace | Kernel socket, send/receive queue and protocol control-block memory; these are outside process RSS |
 | Read buffer | `http_asio.h:854`, `serve_connection_body` | `char tmp[64*1024]`: 65,536 B per suspended connection | Actual coroutine allocation size and how many buffer pages become resident |
 | Read-ahead input | `http_asio.h:437,663,1112` | Input object 4,272 B including 4,096-byte inline buffer | Shared-owner allocation overhead and retained asynchronous read handlers |
-| Parser/request | `http_asio.h:835`; `http_request_parser.h` | Parser 544 B; Request 280 B (may be nested/overlap) | Retained dynamic strings/maps after first response |
+| Parser/request | `http_asio.h:834`; `http_request_parser.h` | Parser 544 B; Request 280 B (may be nested/overlap) | Retained dynamic strings/maps after first response |
 | Coroutine frames | `serve_connection`, `serve_connection_body`, TLS wrapper, awaitable reads | Includes the above local read buffer/parser and suspended await state | Allocator stack attribution/frame-pool capacities and cached blocks |
 | Timers | `asio::steady_timer` object | 120 B per actual timer instance | Live deadline/control count; baseline service uses default disabled request/idle/header/inactivity timeouts |
 | TLS | `http_asio_tls.h:96`; Asio SSL engine and OpenSSL | Benchmark hooks report rounded live OpenSSL allocations separately | Split SSL/context/session/BIO/read/write buffers by allocation stack; OpenSSL hooks alone aggregate them |
