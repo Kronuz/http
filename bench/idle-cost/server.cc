@@ -1,6 +1,8 @@
 #include "http_asio_tls.h"
 #include <atomic>
 #include <cstdio>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <mutex>
