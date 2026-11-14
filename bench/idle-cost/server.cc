@@ -24,7 +24,8 @@
 #endif
 
 namespace {
-std::atomic<std::size_t> ssl_bytes{0}, ssl_blocks{0}, served{0}, failures{0};
+std::atomic<std::size_t> ssl_bytes{0}, ssl_blocks{0}, served{0}, failures{0}, release_connections{0};
+std::atomic<long> ssl_modes{0};
 std::size_t usable(void* p) {
 #ifdef __APPLE__
     return p ? malloc_size(p) : 0;
@@ -98,6 +99,7 @@ void snapshot(const std::string& stage, const std::vector<std::unique_ptr<http::
     const auto [physical, compressed] = footprint();
     std::cout << "{\"stage\":\"" << stage << "\",\"served\":" << served.load()
               << ",\"active\":" << active << ",\"rejected\":" << rejected
+              << ",\"ssl_modes\":" << ssl_modes.load() << ",\"release_connections\":" << release_connections.load()
               << ",\"tls_failures\":" << failures.load() << ",\"rss\":" << rss()
               << ",\"physical_footprint\":" << physical << ",\"compressed\":" << compressed
               << ",\"allocator_live\":" << live << ",\"allocator_reserved\":" << reserved
@@ -117,6 +119,14 @@ struct Handler : http::HttpHandler {
             std::uint64_t digest = 14695981039346656037ULL;
             for (unsigned char byte : request.body) { digest ^= byte; digest *= 1099511628211ULL; }
             writer.send(200, std::to_string(request.body.size()) + ":" + std::to_string(digest));
+        } else if (request.path.starts_with("/download/")) {
+            const auto bytes = std::strtoull(request.path.c_str() + 10, nullptr, 10);
+            if (bytes > 16 * 1024 * 1024) { writer.send(413, "too large"); }
+            else {
+                std::string body(bytes, '\0');
+                for (std::size_t i = 0; i < body.size(); ++i) body[i] = static_cast<char>(i % 256);
+                writer.send(200, body);
+            }
         } else { writer.send(200, "ok"); }
         ++served; co_return;
     }
@@ -132,6 +142,13 @@ int main(int argc, char** argv) {
     if (tls) {
         if (argc != 4) return 2;
         context = std::make_shared<asio::ssl::context>(asio::ssl::context::tls_server);
+        SSL_CTX_set_info_callback(context->native_handle(), [](const SSL* value, int where, int) {
+            if (where & SSL_CB_HANDSHAKE_DONE) {
+                const auto modes = SSL_get_mode(const_cast<SSL*>(value));
+                ssl_modes.fetch_or(modes);
+                if (modes & SSL_MODE_RELEASE_BUFFERS) ++release_connections;
+            }
+        });
         context->use_certificate_chain_file(argv[2]);
         context->use_private_key_file(argv[3], asio::ssl::context::pem);
     }

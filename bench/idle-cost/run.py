@@ -24,6 +24,7 @@ def main() -> None:
     parser.add_argument("--socket-timeout", type=float, default=60)
     parser.add_argument("--shutdown-timeout", type=float, default=120)
     parser.add_argument("--payload-bytes", type=int, default=0)
+    parser.add_argument("--download-bytes", type=int, default=0)
     parser.add_argument("--max-total-rss-gib", type=float, default=16)
     args = parser.parse_args()
     if args.socket_timeout <= 0 or args.shutdown_timeout <= 0:
@@ -50,6 +51,16 @@ def main() -> None:
         for byte in payload:
             digest = ((digest ^ byte) * 1099511628211) & ((1 << 64) - 1)
         expected = f"{len(payload)}:{digest}".encode()
+    if not 0 <= args.download_bytes <= 16 * 1024 * 1024 or (
+        args.download_bytes and (args.counts != [1] or args.payload_bytes)
+    ):
+        parser.error(
+            "download validation requires --counts 1, at most16MiB and no request payload"
+        )
+    if args.download_bytes:
+        expected = (bytes(range(256)) * ((args.download_bytes + 255) // 256))[
+            : args.download_bytes
+        ]
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
@@ -87,6 +98,10 @@ def main() -> None:
                         f"POST /verify HTTP/1.1\r\nHost: localhost\r\nContent-Length: {len(payload)}\r\n\r\n".encode()
                     )
                     peer.sendall(payload)
+                elif args.download_bytes:
+                    peer.sendall(
+                        f"GET /download/{args.download_bytes} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode()
+                    )
                 else:
                     peer.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
                 response = b""
