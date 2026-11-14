@@ -2,7 +2,7 @@
 
 At 10K idle TLS connections, private buffer experiments reduce allocated bytes by **74.60%** and macOS charged footprint by **44.82%**. The TLS staging/BIO change alone gives **43.89%** lower charged footprint; shrinking only the HTTP scratch gives **0.94%**. These are measured memory results, not throughput claims or a landed product change.
 
-All six 10K arms have three independent completed samples. The 100K plain baseline completes; the 100K TLS baseline is in progress. The task remains partial until the large-scale evidence and remaining attribution limits are resolved.
+All six 10K arms have three independent completed samples. The 100K plain baseline completes. The 100K TLS baseline reaches its ten-minute deadline with no valid idle snapshot (exit 124); its result is invalid. C7 remains partial: the TLS scale row and some owner-size attribution are missing. The measurement batch is closed, with no further retries or holds.
 
 ## Configuration and evidence
 
@@ -33,7 +33,7 @@ The HTTP-only allocation reduction exceeds the literal 60 KiB array change becau
 |---|---:|---:|---:|---:|---:|
 | Plain baseline | 1 | 104,384.189 | 14,328.136 | 14,329.651 | 0.000 |
 
-A single large-scale sample has no A/A spread and is not an optimization acceptance result. Each 100K run uses its own ten-minute hold; an earlier TLS setup took 335 s, so putting three runs in one hold cannot reliably meet the deadline. An earlier completed TLS snapshot ended with signal 9 during cleanup; its old driver had a 15 s hard-kill branch, but the log cannot distinguish that branch from an OS kill. It is excluded from accepted scale results. The current driver allows bounded 120 s cleanup and logs its own kill explicitly.
+The plain scale row has one sample and no A/A spread; it is not an optimization acceptance result. The TLS scale row is a stated miss, not a pass or a capacity estimate. A read-only progress observation at 13:40:39 UTC finds 73,512 established server sockets (PID 79595, elapsed 7:51); that is not a validated idle/served count. No 100K TLS snapshot finishes before the ten-minute deadline, so no memory number is published for that attempt. The server is gone and the hold is released after exit 124. This does not establish a host-capacity limit. Each 100K run uses its own ten-minute hold; an earlier TLS setup took 335 s, so putting three runs in one hold cannot reliably meet the deadline. An earlier completed TLS snapshot ended with signal 9 during cleanup; its old driver had a 15 s hard-kill branch, but the log cannot distinguish that branch from an OS kill. It is excluded from accepted scale results. The current driver allows bounded 120 s cleanup and logs its own kill explicitly.
 
 ## Owner attribution
 

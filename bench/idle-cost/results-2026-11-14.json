@@ -5413,5 +5413,22 @@
       "server_pid": 75823,
       "server_exit": null
     }
+  ],
+  "scale_misses": [
+    {
+      "transport": "TLS",
+      "requested_connections": 100000,
+      "exit_code": 124,
+      "deadline_seconds": 600,
+      "state": "invalid_deadline",
+      "capture": "final-tls100k.log",
+      "last_readonly_progress": {
+        "server_pid": 79595,
+        "established_sockets": 73512,
+        "observed_utc": "2026-11-14T13:40:39Z",
+        "method": "lsof -nP -a -p 79595 -iTCP -sTCP:ESTABLISHED -F f; count f records",
+        "is_valid_idle_sample": false
+      }
+    }
   ]
 }
