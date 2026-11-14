@@ -103,3 +103,22 @@ Use `campaign -C Detent job show JOB` to read the command, state and output. The
 | `261113-192222-9bd3a8` | TLS 100K, three A/A runs | Queued |
 
 The measurement jobs use listener bases `25000 + 32*row + offset`, where row is 0..3 in table order and offset is 0, 8, 16 across repeats. For example, plain 10K uses bases 25000, 25008 and 25016. Reproduce a repeat with `python3 bench/idle-cost/run.py .scratch/build/http_idle_cost --counts 10000 --base-port 25000`; retain `quiet exclusive` around the full three-run row. The 10K jobs passed; both 100K jobs failed as described above. Their complete logs preserve the actual commands. Subsequent 100K reruns use one run per hold because the original TLS setup alone took 335 s, so three runs cannot reliably fit one ten-minute job.
+
+## Concrete controls and private reduction experiments
+
+`SSL_MODE_RELEASE_BUFFERS` is already set on each SSL instance by pinned Asio's `asio/ssl/detail/impl/engine.ipp:47-51`. Setting it again on the HTTP TLS context is not a reduction. The benchmark handshake observer records the actual per-instance mode and counts instances with that bit. `BIO_get_write_buf_size(SSL_get_wbio(ssl), 0)` observes the real BIO write capacity through its public getter.
+
+| Owner/control | Current source | Private experiment | Capacity difference before allocator rounding |
+|---|---|---|---:|
+| HTTP coroutine read scratch | `http_asio.h:854`, 64 KiB inline local | Generated private HTTP header changes this one local to 4 KiB; `http_idle_small_read` | 60 KiB/connection, plain and TLS |
+| Asio encrypted input/output staging | `asio/ssl/detail/stream_core.hpp:35,41,43`, two eager 17 KiB vectors | Generated private Asio copy sets staging to 2 KiB; `http_idle_small_tls` | 30 KiB/TLS connection |
+| BIO pair buffers | `asio/ssl/detail/impl/engine.ipp:55,72`, `BIO_new_bio_pair(...,0,...,0)` | Same private copy constructs both BIO halves with 2,048-byte write buffers | About 30 KiB/TLS connection if the observed default is 17 KiB/half |
+| Both changes | Above | `http_idle_small_both` combines private HTTP and Asio copies | Expected 120 KiB/TLS connection before rounding; not yet measured |
+
+These are generated build-directory copies; the product headers and fetched dependency trees remain unchanged. CMake refuses to configure an experiment when its expected source statement is absent. Source capacities are hypotheses for measured allocation changes, not measured RSS savings.
+
+Asio's `engine::put_input` returns the unconsumed suffix after a partial BIO write; `get_output` drains whatever output buffer space is available. The reduced staging size therefore does not impose a smaller TLS protocol-record limit. The experiment must still pass real transfers using records larger than 2 KiB: `run.py --counts 1 --payload-bytes 8388608` verifies upload length and FNV-1a digest; `--counts 1 --download-bytes 8388608` verifies every returned byte. Both run over plain and TLS as applicable. Smaller buffers can increase read/write/parse iterations, so passing these checks establishes payload correctness only, not a throughput or CPU-cost verdict.
+
+`http_idle_owners` is a separate instrumented target. Its OpenSSL hooks attach a small allocation header and track **live requested bytes** by OpenSSL allocation source filename. `http_idle_owners_small_tls` applies the same tracking to the small-TLS variant. Profile output also reports instrumentation header bytes, live task frames and native per-socket mbuf allocations and configured queue capacities. Those profiles are not interchangeable with the ordinary baseline's rounded allocator numbers; their purpose is owner attribution. Kernel queue capacity is a limit, not allocated resident memory, and the process socket API does not expose socket/PCB object allocation sizes.
+
+A readiness-first TLS read is a further proposal, not this experiment: delay calling `SSL_read` while idle until buffered plaintext/encrypted input exists or the underlying socket is readable. Merely wrapping the public stream with a socket-readiness wait is insufficient because Asio can retain unconsumed encrypted bytes in `stream_core::input_`. The decision belongs beside that engine state and must preserve buffered plaintext, control records, close-notify/truncation, and cancellation. The native-SSL socket adapter alternative changes a larger transport/security surface and needs its own design review.
