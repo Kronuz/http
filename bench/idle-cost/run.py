@@ -21,8 +21,12 @@ def main() -> None:
     parser.add_argument("--counts", nargs="+", type=int, default=[10000, 100000])
     parser.add_argument("--base-port", type=int, default=24000)
     parser.add_argument("--source-port", type=int, default=30000)
+    parser.add_argument("--socket-timeout", type=float, default=60)
+    parser.add_argument("--shutdown-timeout", type=float, default=120)
     parser.add_argument("--max-total-rss-gib", type=float, default=16)
     args = parser.parse_args()
+    if args.socket_timeout <= 0 or args.shutdown_timeout <= 0:
+        parser.error("socket/shutdown timeouts must be positive")
     if args.max_total_rss_gib <= 0:
         parser.error("--max-total-rss-gib must be positive")
     if not 1024 <= args.base_port <= 65527 or not 1024 <= args.source_port <= 65535:
@@ -55,7 +59,7 @@ def main() -> None:
             while len(clients) < count:
                 peer = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 peer.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                peer.settimeout(10)
+                peer.settimeout(args.socket_timeout)
                 try:
                     peer.bind(("127.0.0.1", args.source_port + len(clients) // 8))
                     peer.connect(("127.0.0.1", args.base_port + len(clients) % 8))
@@ -112,6 +116,9 @@ def main() -> None:
                 ),
                 flush=True,
             )
+    except BaseException:
+        print(json.dumps({"invalid_row_connections": len(clients)}), flush=True)
+        raise
     finally:
         for peer in clients:
             peer.close()
@@ -119,7 +126,7 @@ def main() -> None:
             server.stdin.write("quit\n")
             server.stdin.flush()
             try:
-                server.wait(timeout=15)
+                server.wait(timeout=args.shutdown_timeout)
             except subprocess.TimeoutExpired:
                 server.kill()
                 server.wait()

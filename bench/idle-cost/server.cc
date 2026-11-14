@@ -56,6 +56,18 @@ std::size_t rss() {
     return resident * static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
 #endif
 }
+std::pair<std::size_t, std::size_t> footprint() {
+#ifdef __APPLE__
+    task_vm_info_data_t info{};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO,
+                  reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS)
+        throw std::runtime_error("task_vm_info failed");
+    return {info.phys_footprint, info.compressed};
+#else
+    return {0, 0};
+#endif
+}
 void snapshot(const std::string& stage, const std::vector<std::unique_ptr<http::HttpAsioService>>& services) {
     std::size_t active = 0, rejected = 0;
     for (const auto& service : services) {
@@ -71,9 +83,11 @@ void snapshot(const std::string& stage, const std::vector<std::unique_ptr<http::
     const auto stats = mallinfo2();
     live = stats.uordblks; reserved = stats.arena + stats.hblkhd;
 #endif
+    const auto [physical, compressed] = footprint();
     std::cout << "{\"stage\":\"" << stage << "\",\"served\":" << served.load()
               << ",\"active\":" << active << ",\"rejected\":" << rejected
               << ",\"tls_failures\":" << failures.load() << ",\"rss\":" << rss()
+              << ",\"physical_footprint\":" << physical << ",\"compressed\":" << compressed
               << ",\"allocator_live\":" << live << ",\"allocator_reserved\":" << reserved
               << ",\"openssl_live\":" << ssl_bytes.load()
               << ",\"openssl_blocks\":" << ssl_blocks.load() << "}" << std::endl;
