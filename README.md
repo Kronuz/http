@@ -166,6 +166,8 @@ python3 bench/summarize.py < out.txt
 
 ## 📚 Documentation
 
+- [The Seam](https://kronuz.github.io/blog/http/):
+  the Familiars post on why it exists and how it works.
 - [ARCHITECTURE.md](ARCHITECTURE.md): the two layers, the shape of the seam, the request
   lifecycle and the response transforms.
 - [docs/mechanisms/coroutine-handlers.md](docs/mechanisms/coroutine-handlers.md): how a
