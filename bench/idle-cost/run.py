@@ -12,7 +12,9 @@ import ssl
 import subprocess
 import sys
 import time
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from pathlib import Path
+from threading import Event, Lock
 
 
 def main() -> None:
@@ -27,11 +29,14 @@ def main() -> None:
     parser.add_argument("--payload-bytes", type=int, default=0)
     parser.add_argument("--download-bytes", type=int, default=0)
     parser.add_argument("--max-total-rss-gib", type=float, default=16)
+    parser.add_argument("--client-workers", type=int, default=1)
     args = parser.parse_args()
     if args.socket_timeout <= 0 or args.shutdown_timeout <= 0:
         parser.error("socket/shutdown timeouts must be positive")
     if args.max_total_rss_gib <= 0:
         parser.error("--max-total-rss-gib must be positive")
+    if not 1 <= args.client_workers <= 8:
+        parser.error("--client-workers must be between 1 and 8")
     if not 1024 <= args.base_port <= 65527 or not 1024 <= args.source_port <= 65535:
         parser.error("listener/source ports must be unprivileged and in range")
     if any(
@@ -79,6 +84,7 @@ def main() -> None:
                 "counts": args.counts,
                 "tls": bool(args.tls),
                 "base_port": args.base_port,
+                "client_workers": args.client_workers,
             }
         ),
         flush=True,
@@ -91,95 +97,160 @@ def main() -> None:
         env={**os.environ, "HTTP_IDLE_BASE_PORT": str(args.base_port)},
     )
     clients: list[socket.socket] = []
+    clients_lock = Lock()
+    bind_lock = Lock()
+    stop_clients = Event()
     assert server.stdout and server.stdin
     print(
         json.dumps({"server_pid": server.pid, "source_port_base": args.source_port}),
         flush=True,
     )
     started = time.monotonic()
+    progress_reported = 0
     try:
         print(server.stdout.readline(), end="", flush=True)
         print(server.stdout.readline(), end="", flush=True)
-        for count in args.counts:
-            while len(clients) < count:
-                peer = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                peer.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                peer.settimeout(args.socket_timeout)
-                try:
-                    peer.bind(("127.0.0.1", args.source_port + len(clients) // 8))
-                    peer.connect(("127.0.0.1", args.base_port + len(clients) % 8))
-                except BaseException as error:
-                    listener = subprocess.run(
-                        ["lsof", "-nP", "-a", "-p", str(server.pid), "-iTCP"],
-                        text=True,
-                        capture_output=True,
-                        check=False,
-                        timeout=10,
-                    )
-                    print(
-                        json.dumps(
-                            {
-                                "connect_failure": str(error),
-                                "local": peer.getsockname(),
-                                "remote": [
-                                    "127.0.0.1",
-                                    args.base_port + len(clients) % 8,
-                                ],
-                                "server_pid": server.pid,
-                                "server_exit": server.poll(),
-                                "server_listeners": listener.stdout,
-                                "listener_error": listener.stderr,
-                            }
-                        ),
-                        flush=True,
-                    )
-                    peer.close()
-                    raise
-                if args.tls:
-                    peer = context.wrap_socket(peer, server_hostname="localhost")
-                if payload:
-                    peer.sendall(
-                        f"POST /verify HTTP/1.1\r\nHost: localhost\r\nContent-Length: {len(payload)}\r\n\r\n".encode()
-                    )
-                    peer.sendall(payload)
-                elif args.download_bytes:
-                    peer.sendall(
-                        f"GET /download/{args.download_bytes} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode()
-                    )
-                else:
-                    peer.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
-                response = b""
-                while b"\r\n\r\n" not in response:
-                    chunk = peer.recv(4096)
-                    if not chunk:
-                        raise RuntimeError("connection closed before response")
-                    response += chunk
-                head, body = response.split(b"\r\n\r\n", 1)
-                if not head.startswith(b"HTTP/1.1 200"):
-                    raise RuntimeError(f"unexpected response: {head!r}")
-                while len(body) < len(expected):
-                    chunk = peer.recv(len(expected) - len(body))
-                    if not chunk:
-                        raise RuntimeError("connection closed in response body")
-                    body += chunk
-                if body != expected:
-                    raise RuntimeError(
-                        f"response payload mismatch: {body!r} != {expected!r}"
-                    )
+
+        def connect_one(index: int) -> None:
+            peer = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            peer.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            peer.settimeout(args.socket_timeout)
+            local_port = args.source_port + index // 8
+            try:
+                with bind_lock:
+                    peer.bind(("127.0.0.1", local_port))
+                    peer.connect(("127.0.0.1", args.base_port + index % 8))
+            except BaseException as error:
+                listener = subprocess.run(
+                    ["lsof", "-nP", "-a", "-p", str(server.pid), "-iTCP"],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=10,
+                )
+                print(
+                    json.dumps(
+                        {
+                            "connect_failure": str(error),
+                            "local": peer.getsockname(),
+                            "remote": [
+                                "127.0.0.1",
+                                args.base_port + index % 8,
+                            ],
+                            "server_pid": server.pid,
+                            "server_exit": server.poll(),
+                            "server_listeners": "\n".join(
+                                listener.stdout.splitlines()[:9]
+                            ),
+                            "listener_error": listener.stderr,
+                        }
+                    ),
+                    flush=True,
+                )
+                peer.close()
+                raise
+            if args.tls:
+                peer = context.wrap_socket(peer, server_hostname="localhost")
+            if payload:
+                peer.sendall(
+                    f"POST /verify HTTP/1.1\r\nHost: localhost\r\nContent-Length: {len(payload)}\r\n\r\n".encode()
+                )
+                peer.sendall(payload)
+            elif args.download_bytes:
+                peer.sendall(
+                    f"GET /download/{args.download_bytes} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode()
+                )
+            else:
+                peer.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            response = b""
+            while b"\r\n\r\n" not in response:
+                chunk = peer.recv(4096)
+                if not chunk:
+                    raise RuntimeError("connection closed before response")
+                response += chunk
+            head, body = response.split(b"\r\n\r\n", 1)
+            if not head.startswith(b"HTTP/1.1 200"):
+                raise RuntimeError(f"unexpected response: {head!r}")
+            while len(body) < len(expected):
+                chunk = peer.recv(len(expected) - len(body))
+                if not chunk:
+                    raise RuntimeError("connection closed in response body")
+                body += chunk
+            if body != expected:
+                raise RuntimeError(
+                    f"response payload mismatch: {body!r} != {expected!r}"
+                )
+            with clients_lock:
                 clients.append(peer)
-                if len(clients) % 1000 == 0:
-                    server.stdin.write("memory-check\n")
-                    server.stdin.flush()
-                    memory = json.loads(server.stdout.readline())
-                    client_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-                    if sys.platform != "darwin":
-                        client_rss *= 1024
-                    combined = memory["rss"] + client_rss
-                    if combined > args.max_total_rss_gib * 1024**3:
-                        raise RuntimeError(
-                            f"invalid row: combined process RSS {combined} exceeds "
-                            f"{args.max_total_rss_gib} GiB at {len(clients)} connections"
-                        )
+
+        def memory_check() -> None:
+            nonlocal progress_reported
+            server.stdin.write("memory-check\n")
+            server.stdin.flush()
+            memory = json.loads(server.stdout.readline())
+            client_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            if sys.platform != "darwin":
+                client_rss *= 1024
+            combined = memory["rss"] + client_rss
+            if len(clients) - progress_reported >= 10000:
+                progress_reported = len(clients)
+                print(
+                    json.dumps(
+                        {
+                            "setup_connections": len(clients),
+                            "elapsed_s": time.monotonic() - started,
+                            "combined_rss": combined,
+                        }
+                    ),
+                    flush=True,
+                )
+            if combined > args.max_total_rss_gib * 1024**3:
+                stop_clients.set()
+                raise RuntimeError(
+                    f"invalid row: combined process RSS {combined} exceeds "
+                    f"{args.max_total_rss_gib} GiB at {len(clients)} connections"
+                )
+
+        for count in args.counts:
+            if args.client_workers == 1:
+                while len(clients) < count:
+                    connect_one(len(clients))
+                    if len(clients) % 1000 == 0:
+                        memory_check()
+            else:
+                start_count = len(clients)
+
+                def worker(
+                    lane: int, start: int = start_count, target: int = count
+                ) -> None:
+                    try:
+                        for index in range(start + lane, target, args.client_workers):
+                            if stop_clients.is_set():
+                                return
+                            connect_one(index)
+                    except BaseException:
+                        stop_clients.set()
+                        raise
+
+                with ThreadPoolExecutor(max_workers=args.client_workers) as pool:
+                    futures = [
+                        pool.submit(worker, lane) for lane in range(args.client_workers)
+                    ]
+                    last_checked = start_count
+                    while True:
+                        done, _ = wait(futures, timeout=1, return_when=FIRST_EXCEPTION)
+                        if len(clients) - last_checked >= 1000:
+                            memory_check()
+                            last_checked = len(clients)
+                        for future in done:
+                            future.result()
+                        if len(done) == len(futures):
+                            break
+                if len(clients) != count:
+                    raise RuntimeError(
+                        f"client setup stopped at {len(clients)} of {count}"
+                    )
+                memory_check()
             time.sleep(2)
             for repeat in range(3):
                 server.stdin.write(f"idle-{count}-{repeat}\n")

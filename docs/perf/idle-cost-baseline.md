@@ -2,13 +2,13 @@
 
 At 10K idle TLS connections, private buffer experiments reduce allocated bytes by **74.60%** and macOS charged footprint by **44.82%**. The TLS staging/BIO change alone gives **43.89%** lower charged footprint; shrinking only the HTTP scratch gives **0.94%**. These are measured memory results, not throughput claims or a landed product change.
 
-All six 10K arms have three independent completed samples. The 100K plain baseline completes. The 100K TLS baseline reaches its ten-minute deadline with no valid idle snapshot (exit 124); its result is invalid. C7 remains partial: the TLS scale row and some owner-size attribution are missing. The measurement batch is closed, with no further retries or holds.
+All six 10K arms have three independent completed samples. Both 100K baselines now complete, one sample each. C7 remains partial because exact kernel socket/PCB and smaller coroutine-frame allocation sizes are unavailable; the 100K owner detail is extrapolated from 10K profiles, not measured independently. No additional 100K runs are planned on this host because their teardown leaves a large kernel socket backlog.
 
 ## Configuration and evidence
 
 Product baseline: `http:09b644d`. All compared binaries embed `http:ff8cc93`; executable and driver SHA-256 digests are retained in [the raw results](../../bench/idle-cost/results-2026-11-14.json). Native x86_64 macOS 15.8.1, 32 GiB RAM, Apple clang 17, Release `-O3 -DNDEBUG`, runtime OpenSSL 3.6.5, pinned Asio 1.36. The existing transitive include order selects `/usr/local/include/openssl` headers (4.1.0) while linking the 3.6.5 library. All arms hold that same configuration; these local results are not a cross-version portability claim.
 
-The server runs eight listeners/reactors. A separate client process establishes every connection, completes one GET/`ok` response, holds the connections open, waits two seconds and takes three snapshots. Every accepted sample asserts the exact requested active/served count, no admission/TLS failure, and `SSL_MODE_RELEASE_BUFFERS` observed on every TLS connection. Defaults disable HTTP idle/header/inactivity/request timeouts. All measurements use `quiet exclusive`; builds and payload checks use `quiet light`, at most four build jobs. No product header or fetched dependency checkout changes.
+The server runs eight listeners/reactors. A separate client process establishes every connection, completes one GET/`ok` response, holds the connections open, waits two seconds and takes three snapshots. The 100K TLS run uses eight client threads with a lock around bind/connect; TLS handshakes and responses overlap. Every accepted sample asserts the exact requested active/served count, no admission/TLS failure, and `SSL_MODE_RELEASE_BUFFERS` observed on every TLS connection. Defaults disable HTTP idle/header/inactivity/request timeouts. All measurements use `quiet exclusive`; builds and payload checks use `quiet light`, at most four build jobs. No product header or fetched dependency checkout changes.
 
 ## Measured 10K costs
 
@@ -32,8 +32,11 @@ The HTTP-only allocation reduction exceeds the literal 60 KiB array change becau
 | Arm | Samples | Allocator B/conn | Footprint B/conn | RSS B/conn | OpenSSL B/conn |
 |---|---:|---:|---:|---:|---:|
 | Plain baseline | 1 | 104,384.189 | 14,328.136 | 14,329.651 | 0.000 |
+| TLS baseline | 1 | 204,456.593 | 96,504.259 | 19,552.215 | 63,601.192 |
 
-The plain scale row has one sample and no A/A spread; it is not an optimization acceptance result. The TLS scale row is a stated miss, not a pass or a capacity estimate. A read-only progress observation at 13:40:39 UTC finds 73,512 established server sockets (PID 79595, elapsed 7:51); that is not a validated idle/served count. No 100K TLS snapshot finishes before the ten-minute deadline, so no memory number is published for that attempt. The server is gone and the hold is released after exit 124. This does not establish a host-capacity limit. Each 100K run uses its own ten-minute hold; an earlier TLS setup took 335 s, so putting three runs in one hold cannot reliably meet the deadline. An earlier completed TLS snapshot ended with signal 9 during cleanup; its old driver had a 15 s hard-kill branch, but the log cannot distinguish that branch from an OS kill. It is excluded from accepted scale results. The current driver allows bounded 120 s cleanup and logs its own kill explicitly.
+Each scale row has one independent sample and no A/A spread, so neither is an optimization acceptance result. The TLS row's three idle snapshots agree exactly and assert 100,000 served/active connections, 100,000 release-buffer observations, and zero rejects or TLS failures. Setup and snapshots finish in 89.574 s using eight client workers; the exclusive hold exits 0 after clean process shutdown. The TLS server has 7,696,121,856 compressed bytes at capture. Charged footprint is 9,652,690,944 bytes and RSS is only 1,959,890,944 bytes: compression makes RSS unsuitable as a stand-alone cost number. The 20,446,365,520-byte live allocator count is allocated capacity, not additional resident memory.
+
+The previous serial 100K TLS setup reached only 73,512 established sockets at 7:51, then exited 124 at the ten-minute deadline without a valid snapshot. That miss remains in the raw results. An earlier completed TLS snapshot ended with signal 9 during cleanup; its old driver had a 15 s hard-kill branch, but the log cannot distinguish that branch from an OS kill. It is excluded from accepted scale results. The current driver permits 120 s for shutdown and logs its own kill explicitly.
 
 ## Owner attribution
 
@@ -67,6 +70,8 @@ The BIO file drops exactly 30,720 requested bytes per connection; other major ow
 
 Configured socket queue capacities are approximately 407 KB receive and 147 KB send per connection in these profiles; they are limits, **not allocated idle memory**. Do not add them to RSS or allocator bytes. `allocator_reserved` in raw output is the native `malloc_statistics_t.size_allocated` counter; it is not a process-wide reserved-VM measurement.
 
+At 100K TLS, the measured OpenSSL total is 63,601.192 B/conn. The allocation-file distribution above, the two 17,408-byte Asio staging vectors, the 65,536-byte HTTP scratch, and the object sizes are **10K-derived owner estimates** at this scale. No allocation-file or coroutine-size profile was taken at 100K, and their projected sums must not be presented as exact 100K accounting.
+
 ## Concrete controls and prototypes
 
 1. OpenSSL release-buffers mode is already enabled by pinned Asio `engine.ipp:47-50`. Runtime mode is 23 (`0x17`) and every measured TLS connection includes the release bit. Setting the same flag on the context again provides no reduction.
@@ -82,6 +87,8 @@ Recommendation: prioritize configurable smaller Asio staging/BIO capacity. It ac
 ## Setup failures and limits
 
 The original implicit client-port allocator exhausted its range (`errno 49`). Explicit source binding with `SO_REUSEADDR` and separate destination ranges permits successful 100K setup. Later runs also encounter a distinct **first-connection timeout** despite live IPv4 listeners. Fresh source ranges do not consistently remove it, so TCP reuse is not an established cause.
+
+The eight-worker driver first failed at 146 connections because macOS rejects concurrent binds of one source port (`errno 48`). Binding to `127.0.0.2` and later loopback addresses failed with `errno 49` because those aliases are not configured on this host. Serializing only bind/connect permits concurrent handshakes and completes the 100K TLS sample. Immediately after both processes exited, `netstat` showed 183,795 FIN_WAIT_1 and 2,789 CLOSING sockets on the benchmark ports; the exclusive hold had exited 0. This large kernel teardown backlog violates the task's near-zero cleanup criterion even though the memory snapshot is valid. No further 100K runs should use this macOS setup; configure multiple loopback aliases with bounded staggered teardown, or use the existing Linux VM. Verify the states have decayed before other network-sensitive work.
 
 Captured examples: `127.0.0.1:13750 → 127.0.0.1:28824`, server PID 72890, and `127.0.0.1:12500 → 127.0.0.1:28408`, server PID 75823. In both, `lsof` confirms all eight expected IPv4 listeners while the server remains alive; no connection has completed. Exact errors and endpoint/PID evidence are retained in the raw results and local capture logs. These are setup failures, not evidence of a 100K capacity limit. Failed cases are excluded. Completed independent cases preceding a later batch setup failure are retained; no accepted case comes from an expired hold.
 
@@ -99,9 +106,10 @@ quiet light c7-payload 2 'Verify8MiB TLS download' -- python3 bench/idle-cost/ru
 quiet exclusive c7-tls10k 5 'TLS10K baseline' -- python3 bench/idle-cost/run.py .scratch/build/http_idle_cost --counts 10000 --base-port 28000 --source-port 30000 --tls .scratch/cert.pem .scratch/key.pem
 quiet exclusive c7-tls10k-small 5 'TLS10K private small buffers' -- python3 bench/idle-cost/run.py .scratch/build/http_idle_small_both --counts 10000 --base-port 28008 --source-port 40000 --tls .scratch/cert.pem .scratch/key.pem
 quiet exclusive c7-tls100k 10 'TLS100K baseline' -- python3 bench/idle-cost/run.py .scratch/build/http_idle_cost --counts 100000 --base-port 19032 --source-port 20000 --tls .scratch/cert.pem .scratch/key.pem
+quiet exclusive c7-tls100k-parallel 10 'TLS100K baseline with concurrent client handshakes' -- python3 bench/idle-cost/run.py .scratch/build/http_idle_cost --counts 100000 --client-workers 8 --base-port 19100 --source-port 21000 --tls .scratch/cert.pem .scratch/key.pem
 quiet exclusive c7-tls-owners 5 'TLS allocation files' -- python3 bench/idle-cost/run.py .scratch/build/http_idle_owners --counts 10000 --base-port 28960 --source-port 45000 --tls .scratch/cert.pem .scratch/key.pem
 ```
 
 For plain transport omit `--tls CERT KEY`. Repeat each comparison three times, reversing arm order in the middle round; use unused listener ranges and record source ranges. Exact ports, binary/driver digests, source stamps, raw baseline/snapshots and elapsed setup times are in the committed JSON. The driver rejects wrong response contents, wrong active counts, TLS/admission failures, impossible source-port bounds and a combined client/server RSS above 16 GiB. It logs and fails a shutdown exceeding 120 s. A failed/shortened run never becomes a smaller successful row.
 
-Local captures are under `.scratch/`: `variant-validation.log`, `memory-round1.log`, `memory-round2.log`, `memory-round3.log`, `memory-missing.log`, `memory-last2.log`, `owner-profiles.log`, `owner-tls.log` and `final-plain100k.log`/`final-tls100k.log`. Validation also passes Ruff formatting/checks and strict Pyrefly for the driver.
+Local captures are under `.scratch/`: `variant-validation.log`, `memory-round1.log`, `memory-round2.log`, `memory-round3.log`, `memory-missing.log`, `memory-last2.log`, `owner-profiles.log`, `owner-tls.log`, `final-plain100k.log`, `final-tls100k.log` and `parallel-tls100k.log`. Validation also passes Ruff formatting/checks and strict Pyrefly for the driver.

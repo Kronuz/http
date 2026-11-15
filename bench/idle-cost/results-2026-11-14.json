@@ -1883,6 +1883,156 @@
         "connections": 100000
       },
       "capture": "final-plain100k.log"
+    },
+    {
+      "input": {
+        "binary_name": "http_idle_cost",
+        "binary_sha256": "943f5cbcc169fdbeee82bedfd2f3e75f785b30442ac24cf0544018b3b9616462",
+        "driver_sha256": "e6046db78c4a8d767a5b4efff150206db5d7f149466da9512367396e56654e31",
+        "counts": [
+          100000
+        ],
+        "tls": true,
+        "base_port": 19100,
+        "client_workers": 8
+      },
+      "binary_configuration": {
+        "source_commit": "http:ff8cc93cd72053f819319e459fb1df8e3e28d3f0",
+        "listener_base": 19100,
+        "socket_object": 88,
+        "tls_staging_buffer": 17408,
+        "parser_object": 544,
+        "plain_input_object": 4272,
+        "timer_object": 120,
+        "request_object": 280
+      },
+      "process": {
+        "server_pid": 21808,
+        "source_port_base": 21000
+      },
+      "baseline": {
+        "stage": "baseline",
+        "served": 0,
+        "active": 0,
+        "rejected": 0,
+        "bio_write_capacity": 0,
+        "ssl_modes": 0,
+        "release_connections": 0,
+        "tls_failures": 0,
+        "rss": 4669440,
+        "physical_footprint": 2265088,
+        "compressed": 0,
+        "allocator_live": 706176,
+        "allocator_reserved": 57950208,
+        "openssl_live": 617440,
+        "openssl_blocks": 8006
+      },
+      "setup_progress": [
+        {
+          "setup_connections": 10980,
+          "elapsed_s": 4.0395708959549665,
+          "combined_rss": 1509146624
+        },
+        {
+          "setup_connections": 23044,
+          "elapsed_s": 9.057450633030385,
+          "combined_rss": 3129524224
+        },
+        {
+          "setup_connections": 34012,
+          "elapsed_s": 15.07853046618402,
+          "combined_rss": 3504300032
+        },
+        {
+          "setup_connections": 44861,
+          "elapsed_s": 24.112874849233776,
+          "combined_rss": 3581308928
+        },
+        {
+          "setup_connections": 56349,
+          "elapsed_s": 37.15966663695872,
+          "combined_rss": 3373920256
+        },
+        {
+          "setup_connections": 68025,
+          "elapsed_s": 50.21108153229579,
+          "combined_rss": 2769444864
+        },
+        {
+          "setup_connections": 79360,
+          "elapsed_s": 57.23922615731135,
+          "combined_rss": 3281895424
+        },
+        {
+          "setup_connections": 89692,
+          "elapsed_s": 64.2718379762955,
+          "combined_rss": 3391995904
+        },
+        {
+          "setup_connections": 99779,
+          "elapsed_s": 87.36192106828094,
+          "combined_rss": 3744591872
+        }
+      ],
+      "idle_snapshots": [
+        {
+          "stage": "idle-100000-0",
+          "served": 100000,
+          "active": 100000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 100000,
+          "tls_failures": 0,
+          "rss": 1959890944,
+          "physical_footprint": 9652690944,
+          "compressed": 7696121856,
+          "allocator_live": 20446365520,
+          "allocator_reserved": 10814980096,
+          "openssl_live": 6360736688,
+          "openssl_blocks": 5408991
+        },
+        {
+          "stage": "idle-100000-1",
+          "served": 100000,
+          "active": 100000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 100000,
+          "tls_failures": 0,
+          "rss": 1959890944,
+          "physical_footprint": 9652690944,
+          "compressed": 7696121856,
+          "allocator_live": 20446365520,
+          "allocator_reserved": 10814980096,
+          "openssl_live": 6360736688,
+          "openssl_blocks": 5408991
+        },
+        {
+          "stage": "idle-100000-2",
+          "served": 100000,
+          "active": 100000,
+          "rejected": 0,
+          "bio_write_capacity": 17408,
+          "ssl_modes": 23,
+          "release_connections": 100000,
+          "tls_failures": 0,
+          "rss": 1959890944,
+          "physical_footprint": 9652690944,
+          "compressed": 7696121856,
+          "allocator_live": 20446365520,
+          "allocator_reserved": 10814980096,
+          "openssl_live": 6360736688,
+          "openssl_blocks": 5408991
+        }
+      ],
+      "completed": {
+        "elapsed_s": 89.57350883400068,
+        "connections": 100000
+      },
+      "hold_exit_code": 0,
+      "capture": "parallel-tls100k.log"
     }
   ],
   "owner_profiles": [
