@@ -87,9 +87,13 @@ Recommendation: prioritize configurable smaller Asio staging/BIO capacity. It ac
 ## Adoption path for the owning quest
 
 The library controls the 65,536-byte HTTP coroutine scratch directly. The TLS buffers live in
-the pinned Asio implementation, so a production change needs one supported stream-capacity
-setting at that dependency seam. The private header copies prove the buffer-size mechanism on
-this workload; they are an experiment, not a configuration API to ship.
+upstream Asio 1.36, fetched from `chriskohlhoff/asio` by this repository. Its `ssl::stream`
+constructors take a context or native SSL handle, and its internal `stream_core` allocates two
+fixed 17 KiB vectors; the BIO pair also uses internal defaults. The HTTP call site cannot set
+these capacities through that interface. A production 2 KiB setting needs an upstream Asio
+change or a maintained fork, followed by a pin update here. Replacing the TLS transport is a
+larger alternative. The private header copies prove the buffer-size mechanism on this workload;
+they are an experiment, not a configuration API to ship.
 
 1. Expose one TLS staging/BIO capacity on Asio stream construction and use 2,048 bytes for HTTP idle connections. Keep the two staging vectors and both BIO halves in sync through that setting. Preserve partial-write and drain behavior for records larger than the capacity; the 8 MiB transfers already exercise it functionally.
 2. Evaluate replacing the HTTP coroutine's 64 KiB scratch with 4 KiB. The 10K prototype saves about 91.6 KiB of allocator capacity per plain connection but only 1.55 KiB of charged footprint; throughput and CPU determine whether this cut earns a product change.
