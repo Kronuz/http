@@ -84,6 +84,22 @@ All four binaries pass 8 MiB uploads (length plus FNV-1a digest) and exact 8 MiB
 
 Recommendation: prioritize configurable smaller Asio staging/BIO capacity. It accounts for almost all measured TLS physical-footprint improvement without changing cryptographic policy. Treat the HTTP scratch change as an allocation-budget tradeoff until bulk CPU/throughput is measured. A readiness-first TLS read remains a separate hypothesis: Asio may retain encrypted bytes in `stream_core::input_`, so a public socket-readiness wrapper alone can stall buffered data. Its memory benefit is not established by this experiment.
 
+## Adoption path for the owning quest
+
+The library controls the 65,536-byte HTTP coroutine scratch directly. The TLS buffers live in
+the pinned Asio implementation, so a production change needs one supported stream-capacity
+setting at that dependency seam. The private header copies prove the buffer-size mechanism on
+this workload; they are an experiment, not a configuration API to ship.
+
+1. Expose one TLS staging/BIO capacity on Asio stream construction and use 2,048 bytes for HTTP idle connections. Keep the two staging vectors and both BIO halves in sync through that setting. Preserve partial-write and drain behavior for records larger than the capacity; the 8 MiB transfers already exercise it functionally.
+2. Evaluate replacing the HTTP coroutine's 64 KiB scratch with 4 KiB. The 10K prototype saves about 91.6 KiB of allocator capacity per plain connection but only 1.55 KiB of charged footprint; throughput and CPU determine whether this cut earns a product change.
+3. Measure both changes against the same baseline for sustained bulk traffic, handshakes, idle 10K A/A and a 100K Linux scale run with owner profiling. The 10K TLS charged-footprint delta would project to about 4.03 GiB at 100K if it scaled linearly; this is a sizing hypothesis, not a measured 100K saving. Report CPU per request and host power or cost only when those are measured.
+
+The 4,272-byte read-ahead object is a later candidate. Socket/PCB memory is under the kernel's
+control; this code can change connection count, socket options and lifetime, but the native
+socket profile here does not expose allocated PCB bytes. A smaller userspace buffer therefore
+does not establish a kernel-memory reduction.
+
 ## Setup failures and limits
 
 The original implicit client-port allocator exhausted its range (`errno 49`). Explicit source binding with `SO_REUSEADDR` and separate destination ranges permits successful 100K setup. Later runs also encounter a distinct **first-connection timeout** despite live IPv4 listeners. Fresh source ranges do not consistently remove it, so TCP reuse is not an established cause.
