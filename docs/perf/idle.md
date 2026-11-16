@@ -49,10 +49,66 @@ while idle. B/conn is (idle - fresh baseline) / N, the median of the three snaps
 median over rounds; the spread is max - min over rounds (the A/A band). Footprint is macOS
 `phys_footprint`, what the system charges the process; RSS undercounts it under compression.
 
-Pending: jobs 261115-214321-2a3f2c (10K plain), 261115-214324-a3838f (10K TLS),
-261115-214329-4d7b79 (100K TLS), 261115-214335-6ff7f4 (100K plain), 261115-214340-d15502 (100K
-owners), 261115-214345-65ed84 (after a 64 KiB POST), 261115-214349-d25963 (wrk load) and
-261115-214354-19da72 (watch_ab).
+The arms are http:a17b197 (before), http:d92104d (TlsStream alone) and http:f1e173f (after, both
+changes). The bench is http:f1e173f's in every arm.
+
+### 10K idle connections
+
+Exclusive jobs 261115-214324-a3838f (TLS) and 261115-214321-2a3f2c (plain), three interleaved
+rounds per arm.
+
+| transport | arm | footprint B/conn | spread | OpenSSL B/conn | idle connections per GiB |
+|---|---|---:|---:|---:|---:|
+| TLS | before (a17b197) | 96,727 | 50 | 63,612 | 11,101 |
+| TLS | TlsStream (d92104d) | 45,801 | 31 | 28,540 | 23,444 |
+| TLS | after (f1e173f) | 39,941 | 33 | 28,540 | 26,883 |
+| plain | before (a17b197) | 14,376 | 8 | 0 | 74,689 |
+| plain | TlsStream (d92104d) | 14,365 | 28 | 0 | 74,745 |
+| plain | after (f1e173f) | 8,668 | 9 | 0 | 123,869 |
+
+An idle TLS connection costs 58.7% less (56,786 B fewer, 2.42x as many per GiB); TlsStream takes
+50,926 B of that and the idle read buffer 5,860 B. A plain one costs 39.7% less (5,708 B fewer,
+1.66x per GiB). Every difference is over 600 times its spread. The plain TlsStream arm
+does not change the plain path and lands 11 B from the before arm, inside its 28 B spread: the
+A/A control.
+
+After each connection POSTs 64 KiB before it idles (job 261115-214345-65ed84, two rounds), the
+before arm keeps the pages the body touched and the after arm does not:
+
+| transport | before B/conn | spread | after B/conn | spread | change |
+|---|---:|---:|---:|---:|---|
+| plain | 135,301 | 1,210 | 9,149 | 10 | 14.8x smaller |
+| TLS | 169,046 | 336 | 40,348 | 38 | 4.19x smaller; 6,352 to 26,612 per GiB |
+
+### By owner, 10K
+
+From the owners profile (live operator-new blocks by usable size; OpenSSL's requested bytes by
+allocating file), in the same jobs. Heap blocks count reserved bytes, so the before arm's
+98,304 B frame shows whole although only its touched pages reach the footprint.
+
+| owner | TLS before | TLS after | plain before | plain after |
+|---|---:|---:|---:|---:|
+| connection coroutine frame | 98,304 | 2,560 | 98,304 | 2,560 |
+| Asio `ssl::stream` staging (2 x 17,408) | 34,816 | 0 | | |
+| `ConnectionInput` (4 KiB read-ahead) | 4,608 | 4,608 | 4,608 | 4,608 |
+| other heap blocks (socket, timers, parser, request) | 3,056 | 2,336 | 1,408 | 1,360 |
+| OpenSSL `bss_bio.c` (the BIO pair) | 34,928 | 0 | | |
+| OpenSSL session state (`tls_common.c` 8,848, `ml_kem.c` 6,336, `ssl_lib.c` 5,620, the rest) | 28,048 | 27,920 | | |
+| kernel socket (receive and send mbufs) | 0 | 0 | 0 | 0 |
+
+Task frames are five per TLS connection and four per plain one in every arm. What is left of an
+idle TLS connection is OpenSSL's: its session state is 70% of the footprint, and the
+X25519MLKEM768 key share (`ml_kem.c`) is 6,336 B of it.
+
+### 100K idle connections
+
+Pending: see the journal.
+
+### Throughput and latency
+
+`bench/watch_ab.sh` (job 261115-214354-19da72, five rounds, http and httpb at 1 and 64
+connections, after against before with an A/A arm): every row of requests per second, p99 and CPU
+per request is noise (geomeans 1.001, 0.983 and 1.009; A/A 1.000, 1.019 and 0.999).
 
 ## Reproduce
 

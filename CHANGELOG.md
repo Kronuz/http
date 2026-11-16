@@ -4,6 +4,26 @@ Newest first. Dates are 2026.
 
 Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://github.com/Kronuz/cpp-libraries/blob/main/docs/UPGRADING-2026-10.md#http) lists what changes for callers, how to find affected inputs, the commits not to pin, and the speedup.
 
+## 2026-11-16: an idle TLS connection costs 58.7% less memory
+
+`bench/idle-cost`, i9-9980HK, 10K idle connections, exclusive jobs 261115-214324-a3838f and
+261115-214321-2a3f2c, http:f1e173f against http:a17b197: an idle TLS connection's footprint goes from
+96,727 to 39,941 B (11,101 to 26,883 per GiB) and a plain one's from 14,376 to 8,668 B (74,689 to
+123,869 per GiB); after a 64 KiB request body, 169,046 to 40,348 B (TLS) and 135,301 to 9,149 B
+(plain). Throughput, latency and CPU per request are inside the noise. Details in `docs/perf/idle.md`.
+
+### Changed
+
+- **TLS runs on `detail::TlsStream`, not `asio::ssl::stream`.** OpenSSL reads and writes the
+  non-blocking socket through a BIO over it, and an operation that would block waits for the
+  socket's readiness. The two 17,408 B staging buffers, the 34,928 B BIO pair and the engine's two
+  timers are gone; OpenSSL's record buffers are still released between records. Errors map as
+  before: `close_notify` is `eof`, a TCP close without it `stream_truncated`.
+- **No read buffer while a connection waits.** The 64 KiB read scratch left the connection's
+  coroutine frame: headers are read through the read-ahead watch's 4 KiB buffer, and a body through
+  a 64 KiB buffer that exists from its first read to the next idle wait. A parse buffer that grew
+  past 8 KiB is released at the idle wait.
+
 ## 2026-11-16: Accept q-values parse without libc
 
 ### Changed
