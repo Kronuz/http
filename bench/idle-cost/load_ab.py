@@ -4,13 +4,16 @@ Each round runs every arm (order alternating by round) through every row: a tran
 a connection count and keep-alive or close. A row's server CPU per request is the server's own
 rusage across the timed run divided by wrk's request count. The summary gives, per row and arm,
 the median over rounds and the median paired ratio against the first arm with its range; the
-"aa" arm (a copy of another arm's binary) gives the A/A band.
+"aa" arm (a copy of another arm's binary) gives the A/A band. With http_idle_count arms, each row
+also carries the server's Asio handler and syscall counts per request ("per_request"); setting
+IDLE_SYSCOUNT_DYLIB inserts that library into the server for the syscall counts.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import statistics
 import subprocess
@@ -25,13 +28,34 @@ def latency_us(text: str, label: str) -> float:
     return float(m.group(1)) * UNITS[m.group(2)] if m else float("nan")
 
 
+def server_env(port: int) -> dict[str, str]:
+    env = {"HTTP_IDLE_BASE_PORT": str(port)}
+    if dylib := os.environ.get("IDLE_SYSCOUNT_DYLIB"):
+        env["DYLD_INSERT_LIBRARIES"] = dylib
+    return env
+
+
+def per_request(before: dict[str, object], after: dict[str, object], requests: int) -> dict[str, float]:
+    counts: dict[str, float] = {}
+    for group in ("asio", "syscalls"):
+        b, a = before.get(group), after.get(group)
+        if not isinstance(a, dict) or not requests:
+            continue
+        b = b if isinstance(b, dict) else {}
+        for key, value in a.items():
+            delta = int(value) - int(b.get(key, 0))
+            if delta:
+                counts[f"{group}: {key}"] = round(delta / requests, 3)
+    return counts
+
+
 def run_row(binary: Path, mode: str, path: str, conns: int, close: bool, seconds: int, port: int) -> dict[str, object]:
     server = subprocess.Popen(
         [str(binary), mode],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         text=True,
-        env={"HTTP_IDLE_BASE_PORT": str(port)},
+        env=server_env(port),
     )
     assert server.stdin and server.stdout
     config = json.loads(server.stdout.readline())
@@ -75,6 +99,7 @@ def run_row(binary: Path, mode: str, path: str, conns: int, close: bool, seconds
         "p99_us": latency_us(out, "99%"),
         "cpu_us_per_req": cpu,
         "errors": errors.group(0) if errors else "",
+        "per_request": per_request(before, after, requests),
     }
 
 

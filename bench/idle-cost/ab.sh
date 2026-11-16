@@ -8,6 +8,8 @@
 #   sh bench/idle-cost/ab.sh run      build what is missing, run, summarize
 #   sh bench/idle-cost/ab.sh load     wrk rows (LOAD_ROWS, LOAD_ROUNDS, LOAD_SECONDS) per arm and an
 #                                     A/A copy of the first, through load_ab.py
+#   sh bench/idle-cost/ab.sh count    the load rows on http_idle_count, syscalls counted: Asio
+#                                     handlers and syscalls per request per arm (not timing)
 #
 # Environment (defaults): ARMS="head=." (e.g. "base=$JOB_REF_BASE head=."), MODES="plain tls",
 #   COUNT=10000, ROUNDS=3, FIRST_ROUND=0 (the first round's number, so rounds split across jobs
@@ -37,7 +39,7 @@ build_arm() {
 	if [ "$(cat "$dir/stamp" 2>/dev/null)" != "$rev $bench" ]; then
 		cmake -S bench/idle-cost -B "$dir" -DCMAKE_BUILD_TYPE=Release -DHTTP_IDLE_PRODUCT_DIR="$src" \
 			-DOPENSSL_ROOT_DIR="$OPENSSL_ROOT" -DFETCHCONTENT_BASE_DIR="$dir/_deps" > /dev/null
-		cmake --build "$dir" -j4 --target http_idle_cost http_idle_owners
+		cmake --build "$dir" -j4 --target http_idle_cost http_idle_owners http_idle_count idle_syscount
 		echo "$rev $bench" > "$dir/stamp"
 	fi
 	echo "# $name: product $rev bench $bench ($(file -b "$dir/http_idle_cost"))"
@@ -97,5 +99,31 @@ load)
 	cat "$OUT/load.txt"
 	if [ -n "${JOB_OUT:-}" ]; then mkdir -p "$JOB_OUT" && cp "$OUT/load.jsonl" "$OUT/load.txt" "$JOB_OUT/"; fi
 	;;
-*) echo "usage: $0 build|run|load" >&2; exit 2 ;;
+count)
+	build_all
+	set --
+	for a in $ARMS; do set -- "$@" --arm "${a%%=*}=$BINS/build-${a%%=*}/http_idle_count"; done
+	rows=${LOAD_ROWS:-tls,/,1,keep tls,/,64,keep}
+	for row in $rows; do set -- "$@" --row "$row"; done
+	mkdir -p "$OUT"
+	first=${ARMS%% *}; first=${first%%=*}
+	IDLE_SYSCOUNT_DYLIB=$(pwd)/$BINS/build-$first/libidle_syscount.dylib \
+		python3 bench/idle-cost/load_ab.py "$@" --rounds "${LOAD_ROUNDS:-2}" --seconds "${LOAD_SECONDS:-3}" --out "$OUT/count.jsonl" > "$OUT/count.txt" ||
+		{ cat "$OUT/count.txt"; exit 1; }
+	python3 - "$OUT/count.jsonl" <<'PY' | tee -a "$OUT/count.txt"
+import json, statistics, sys
+from collections import defaultdict
+rows = defaultdict(list)
+for line in open(sys.argv[1]):
+    r = json.loads(line)
+    rows[(f"{r['mode']} {r['path']} c{r['conns']} {'close' if r['close'] else 'keep'}", r["arm"])].append(r["per_request"])
+for (row, arm), runs in sorted(rows.items()):
+    keys = sorted({k for run in runs for k in run})
+    print(f"\n## {row}, {arm}: per request, median of {len(runs)} runs")
+    for k in keys:
+        print(f"  {statistics.median(run.get(k, 0.0) for run in runs):8.3f}  {k}")
+PY
+	if [ -n "${JOB_OUT:-}" ]; then mkdir -p "$JOB_OUT" && cp "$OUT/count.jsonl" "$OUT/count.txt" "$JOB_OUT/"; fi
+	;;
+*) echo "usage: $0 build|run|load|count" >&2; exit 2 ;;
 esac

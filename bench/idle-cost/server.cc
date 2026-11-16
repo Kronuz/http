@@ -2,6 +2,8 @@
 // run.py opens, and every line on stdin prints one JSON snapshot of this process's memory.
 // HTTP_IDLE_OWNERS builds the profile binary: live heap blocks by size class (operator new) and
 // OpenSSL's requested bytes by allocating file, with task frames sent to operator new.
+// HTTP_IDLE_COUNT builds the counting binary: Asio handlers by operation (count_tracking.h) and,
+// when syscount.c is inserted, socket and reactor syscalls with how many would block.
 #include "http_asio_tls.h"
 
 #include <openssl/crypto.h>
@@ -23,6 +25,9 @@
 #include <vector>
 
 #include <sys/resource.h>
+#if HTTP_IDLE_COUNT
+#include <dlfcn.h>
+#endif
 #ifdef __APPLE__
 #include <libproc.h>
 #include <mach/mach.h>
@@ -236,6 +241,27 @@ void snapshot(const std::string& stage, const std::vector<std::unique_ptr<http::
 			  << ",\"openssl_live\":" << ssl_bytes.load() << ",\"openssl_blocks\":" << ssl_blocks.load()
 			  << ",\"voluntary_switches\":" << usage.ru_nvcsw << ",\"involuntary_switches\":" << usage.ru_nivcsw
 			  << ",\"cpu_us\":" << (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1000000LL + usage.ru_utime.tv_usec + usage.ru_stime.tv_usec;
+#if HTTP_IDLE_COUNT
+	std::cout << ",\"asio\":{";
+	bool first = true;
+	for (std::size_t i = 0; i < count_tracking::kCounters; ++i) {
+		const auto& c = count_tracking::counters()[i];
+		const char* kind = std::atomic_ref(const_cast<const char*&>(c.kind)).load(std::memory_order_acquire);
+		if (!kind) { break; }
+		std::cout << (first ? "" : ",") << '"' << kind << ' ' << c.object << ' ' << c.name << "\":" << c.n.load();
+		first = false;
+	}
+	std::cout << '}';
+	using Syscount = int (*)(const char* const**, std::uint64_t*, std::uint64_t*);
+	if (auto* syscount = reinterpret_cast<Syscount>(dlsym(RTLD_DEFAULT, "idle_syscount"))) {
+		const char* const* names = nullptr;
+		std::uint64_t calls[32], blocked[32];
+		const int n = syscount(&names, calls, blocked);
+		std::cout << ",\"syscalls\":{";
+		for (int i = 0; i < n; ++i) { std::cout << (i ? "," : "") << '"' << names[i] << "\":" << calls[i] << ",\"" << names[i] << " would_block\":" << blocked[i]; }
+		std::cout << '}';
+	}
+#endif
 #if HTTP_IDLE_OWNERS
 	if (stage != "memory-check") {
 		std::cout << ",\"task_frames\":" << task::detail::live_frames() << ",\"heap\":[";
