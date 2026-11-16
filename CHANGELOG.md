@@ -4,24 +4,28 @@ Newest first. Dates are 2026.
 
 Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://github.com/Kronuz/cpp-libraries/blob/main/docs/UPGRADING-2026-10.md#http) lists what changes for callers, how to find affected inputs, the commits not to pin, and the speedup.
 
-## 2026-11-16: an idle TLS connection costs 58.7% less memory
+## 2026-11-16: an idle TLS connection costs 58.5% less memory
 
-`bench/idle-cost`, i9-9980HK, exclusive jobs, http:76f698d against http:a17b197: an idle TLS
-connection's footprint goes from 96,742 to 39,932 B at 10K (11,099 to 26,889 per GiB) and from
-96,527 to 39,788 B at 100K, 5.28 GiB less per 100K idle connections; a plain one's from 14,367 to
-8,661 B (74,736 to 123,980 per GiB); after a 64 KiB request body, 169,046 to 40,348 B (TLS) and
-135,301 to 9,149 B (plain). Small TLS replies on a kept-alive connection are slower: 0.924x
-requests per second at one connection and 0.760x at 64, outside the A/A band; 1 MiB TLS downloads
-are 1.137x. Details in `docs/perf/idle.md`.
+`bench/idle-cost`, i9-9980HK, exclusive jobs against http:a17b197: an idle TLS connection's
+footprint goes from 96,608 to 40,054 B at 10K (11,114 to 26,808 per GiB, 2.41x) and from 96,471 to
+39,797 B at 100K, 5.27 GiB less per 100K idle connections; a plain one's from 14,367 to 8,661 B
+(74,736 to 123,980 per GiB); after a 64 KiB request body, 169,046 to 40,348 B (TLS) and 135,301 to
+9,149 B (plain). Throughput stays inside the A/A band except two cells, accepted for the idle
+saving (D103): small TLS replies on one kept-alive connection cost 1.100x CPU per request (+3.2 us;
+requests per second 0.935x, inside the band), and TLS with a handshake per request serves 0.967x
+requests per second. At 64 connections small TLS replies are 0.920x requests per second, inside
+the band; 1 MiB TLS downloads are 1.138x. Syscalls per request match the old stream. Details in
+`docs/perf/idle.md`.
 
 ### Changed
 
-- **TLS runs on `detail::TlsStream`, not `asio::ssl::stream`.** OpenSSL reads and writes the
-  non-blocking socket through a BIO over it, and an operation that would block waits for the
-  socket's readiness. The two 17,408 B staging buffers, the 34,928 B BIO pair and the engine's two
-  timers are gone; OpenSSL's record buffers are still released between records. Errors map as
-  before: `close_notify` is `eof`, a TCP close without it `stream_truncated`. Up to 8 KiB of small
-  buffers are joined into one record, as `asio::ssl::stream` did, so a reply is one record and one send.
+- **TLS runs on `detail::TlsStream`, not `asio::ssl::stream`.** OpenSSL reads and writes through a
+  small BIO: a read that needs bytes receives them with `async_receive` into the caller's buffer,
+  and writes and the handshake use the non-blocking socket directly, waiting for readiness when it
+  is full. The two 17,408 B staging buffers, the 34,928 B BIO pair and the engine's two timers are
+  gone; OpenSSL reads ahead and releases its record buffers between records. Errors map as before:
+  `close_notify` is `eof`, a TCP close without it `stream_truncated`. Up to 8 KiB of small buffers
+  are joined into one record, as `asio::ssl::stream` did, so a reply is one record and one send.
 - **No read buffer while a connection waits.** The 64 KiB read scratch left the connection's
   coroutine frame: headers are read through the read-ahead watch's 4 KiB buffer, and a body through
   a 64 KiB buffer that exists from its first read to the next idle wait. A parse buffer that grew

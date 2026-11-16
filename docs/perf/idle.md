@@ -23,15 +23,21 @@ such a connection holds, plain and TLS, what changed to make it cheaper, and the
 reads ciphertext into its own staging buffer, writes it into a BIO pair, and lets OpenSSL read
 from the pair. Both the staging and the pair are allocated at construction and live as long as
 the connection, about 70 KiB per connection whether it moves a byte or not. `TlsStream` hands
-OpenSSL the socket itself through a small BIO whose read and write are the socket's own
-non-blocking `read_some` and `write_some`; when OpenSSL says it wants to read or write, the
-operation waits for the socket's readiness (`async_wait`) and calls OpenSSL again. The kernel's
-socket buffer is the staging, so an idle TLS connection holds the SSL object and its session
-state, and OpenSSL's record buffers are released between records. The error mapping is
-asio's (a `close_notify` is `eof`, a TCP close without it `stream_truncated`, OpenSSL errors
-in the ssl category), a result found without waiting is deferred (run after the current handler) rather than delivered inside the
-initiating call, one read and one write may be in flight at once, and a write joins up to 8 KiB
-of small buffers into one record, as before: a reply's head and body leave in one record and one
+OpenSSL a small BIO of its own. A read that needs bytes receives them with Asio's `async_receive`
+into the caller's buffer, which holds nothing until the plaintext lands in it, and the BIO serves
+OpenSSL a copy that is freed once OpenSSL has taken it. The receive is speculative, like the one
+`asio::ssl::stream` makes; a readiness wait (`async_wait`) would cost a `kevent` per request,
+because the kqueue reactor re-arms its filter on every non-speculative start. Writes, the
+handshake and reads under 512 B go straight to the non-blocking socket and wait for readiness
+when it is full or empty. OpenSSL reads ahead, so a record's header and body arrive in one
+`recv`, and its record buffers are released between records. An idle TLS connection holds the SSL
+object and its session state.
+
+The error mapping is asio's (a `close_notify` is `eof`, a TCP close without it `stream_truncated`,
+OpenSSL errors in the ssl category). A result found without waiting is deferred (run after the
+current handler, from the thread's own queue) rather than delivered inside the initiating call.
+One read and one write may be in flight at once, and a write joins up to 8 KiB of small buffers
+into one record, as `asio::ssl::stream` does: a reply's head and body leave in one record and one
 send. The joined copy belongs to the write and is released when it completes.
 
 **Plain and TLS: no read buffer while idle (http_asio.h).** The connection read into a 64 KiB
@@ -52,38 +58,41 @@ median over rounds; the spread is max - min over rounds (the A/A band). Footprin
 `phys_footprint`, what the system charges the process, compressed pages included; RSS undercounts
 it under compression.
 
-The arms are http:a17b197 (before) and http:76f698d (after, both changes and the TLS write join),
-built from http:76f698d's bench. Every job is exclusive. The runs are in `docs/perf/idle/`;
-`python3 bench/idle-cost/summarize.py docs/perf/idle/<row>` prints each table below.
+The before arm is http:a17b197. The after arm is the commit each row names: TLS at 10K is
+http:ad6771f, the final product; TLS at 100K is http:47d6726, whose idle state differs from
+ad6771f's only in the receive's handler blocks (112 B per connection, measured at 10K); plain is
+http:76f698d, since plain connections do not include `http_asio_tls.h`. Every job is exclusive.
+The runs are in `docs/perf/idle/`; `python3 bench/idle-cost/summarize.py docs/perf/idle/<row>`
+prints each table below.
 
 ### 10K and 100K idle connections
 
 | transport | idle | arm | rounds | footprint B/conn | spread | OpenSSL B/conn | idle connections per GiB | wakeups/s |
 |---|---:|---|---:|---:|---:|---:|---:|---:|
-| TLS | 10K | before | 3 | 96,742 | 152 | 63,612 | 11,099 | 0.2 |
-| TLS | 10K | after | 3 | 39,932 | 31 | 28,540 | 26,889 | 0.2 |
-| TLS | 100K | before | 2 | 96,527 | 44 | 63,601 | 11,124 | 0.2 |
-| TLS | 100K | after | 2 | 39,788 | 5 | 28,529 | 26,987 | 0.2 |
+| TLS | 10K | before | 3 | 96,608 | 100 | 63,612 | 11,114 | 0.2 |
+| TLS | 10K | after (ad6771f) | 3 | 40,054 | 20 | 28,540 | 26,808 | 0.2 |
+| TLS | 100K | before | 2 | 96,471 | 47 | 63,601 | 11,130 | 0.5 |
+| TLS | 100K | after (47d6726) | 2 | 39,797 | 13 | 28,529 | 26,981 | 0.2 |
 | plain | 10K | before | 3 | 14,367 | 8 | 0 | 74,736 | 0.2 |
-| plain | 10K | after | 3 | 8,661 | 8 | 0 | 123,980 | 0.2 |
+| plain | 10K | after (76f698d) | 3 | 8,661 | 8 | 0 | 123,980 | 0.2 |
 | plain | 100K | before | 2 | 14,327 | 1 | 0 | 74,945 | 0.2 |
-| plain | 100K | after | 2 | 8,637 | 0 | 0 | 124,318 | 0.3 |
+| plain | 100K | after (76f698d) | 2 | 8,637 | 0 | 0 | 124,318 | 0.3 |
 
-Jobs: 10K TLS 261116-012341-188fac, 10K plain 261116-012345-cba126 (three interleaved rounds each);
-100K one arm and round per job in ABBA order, TLS 261116-012350-66ef55, -012355-6cbb4e,
--012359-7fcd7c, -012405-815b06, plain 261116-012410-6d7174, -012414-ba9ee6, -012418-4d5602,
+Jobs: 10K TLS 261116-090554-1c2b25, 10K plain 261116-012345-cba126 (three interleaved rounds
+each); 100K one arm and round per job in ABBA order, TLS 261116-060000-d56d24, -060007-067b1b,
+-060012-60b2e7, -060018-27237b, plain 261116-012410-6d7174, -012414-ba9ee6, -012418-4d5602,
 -012423-dcb492.
 
-- **TLS:** an idle connection costs 58.7% less at 10K (56,810 B fewer) and 58.8% less at 100K
-  (56,739 B fewer): 2.42x as many idle TLS connections per GiB. Per round at 100K, after over
-  before is 0.4123 and 0.4121. Each difference is over 370 times the larger arm's spread.
+- **TLS:** an idle connection costs 58.5% less at 10K (56,554 B fewer) and 58.7% less at 100K
+  (56,674 B fewer): 2.41x as many idle TLS connections per GiB. Per round at 100K, after over
+  before is 0.4126 and 0.4125. Each difference is over 500 times the larger arm's spread.
 - **Plain:** 39.7% less at both counts (5,706 and 5,690 B fewer), 1.66x as many per GiB.
-- **Per 100K idle connections:** TLS goes from 9.65 GB (8.99 GiB) to 3.98 GB (3.71 GiB), 5.28 GiB
+- **Per 100K idle connections:** TLS goes from 9.65 GB (8.98 GiB) to 3.98 GB (3.71 GiB), 5.27 GiB
   saved; plain from 1.43 GB (1.33 GiB) to 0.86 GB (0.80 GiB), 0.53 GiB saved. A 16 GiB budget
-  holds about 432K idle TLS connections after, 178K before.
-- **Under pressure:** at 100K TLS the before arm's 9.65 GB pushed macOS to compress 5.8 to 6.1 GB
-  of it (RSS 3.5 to 3.8 GB); the after arm's 3.98 GB was not compressed. Footprint counts both.
-- **Wakeups:** 0.2 per second in both arms, idle; the change does not move them.
+  holds about 431K idle TLS connections after, 178K before.
+- **Under pressure:** at 100K TLS the before arm's 9.65 GB pushes macOS to compress several GB of
+  it (RSS 3.0 GB median); the after arm's 3.98 GB is not compressed. Footprint counts both.
+- **Wakeups:** 0.2 to 0.5 per second idle in both arms; the change does not move them.
 
 The TlsStream change alone (http:d92104d, job 261115-214324-a3838f, 10K, bench http:f1e173f)
 measured 45,801 B against 96,727 B before: TlsStream takes about 50.9 KB of the TLS saving and the
@@ -102,8 +111,10 @@ body touched and the after arm does not:
 ### By owner
 
 From the owners profile (live operator-new blocks by usable size; OpenSSL's requested bytes by
-allocating file): 10K in the jobs above, 100K in 261116-012427-2c38f4, -012431-fec7c5 (TLS) and
-261116-012436-2ce3c9, -012441-481714 (plain). The blocks are the same at both counts. Heap blocks
+allocating file): 10K in the jobs above (TLS after at ad6771f), 100K in 261116-012427-2c38f4
+(TLS before), 261116-060022-c30d0a (TLS after, 47d6726) and 261116-012436-2ce3c9, -012441-481714
+(plain). The blocks are the same at both counts but for the receive's handler blocks: TLS after's
+other heap blocks are 2,448 B at ad6771f, 2,336 B at 47d6726. Heap blocks
 count reserved bytes, so the before arm's 98,304 B frame shows whole although only its touched
 pages reach the footprint.
 
@@ -112,7 +123,7 @@ pages reach the footprint.
 | connection coroutine frame | 98,304 | 2,560 | 98,304 | 2,560 |
 | Asio `ssl::stream` staging (2 x 17,408) | 34,816 | 0 | | |
 | `ConnectionInput` (4 KiB read-ahead) | 4,608 | 4,608 | 4,608 | 4,608 |
-| other heap blocks (socket, timers, parser, request) | 3,056 | 2,336 | 1,408 | 1,360 |
+| other heap blocks (socket, timers, parser, request) | 3,056 | 2,448 | 1,408 | 1,360 |
 | OpenSSL `bss_bio.c` (the BIO pair) | 34,928 | 0 | | |
 | OpenSSL session state (`tls_common.c` 8,848, `ml_kem.c` 6,336, `ssl_lib.c` 5,620, the rest) | 28,048 | 27,920 | | |
 | kernel socket (receive and send mbufs) | 0 | 0 | 0 | 0 |
@@ -124,26 +135,43 @@ X25519MLKEM768 key share (`ml_kem.c`) is 6,336 B of it.
 
 ### Throughput and latency
 
-`bench/idle-cost/ab.sh load` (wrk against the bench server), five interleaved rounds of before,
-after and an A/A arm (before again). Each cell is the median over rounds of after over before,
-with the min-max over rounds: for five rounds that is the distribution-free interval at 93.8%.
-Jobs 261116-012332-c66999 (TLS keep-alive) and 261116-012337-d0d5f6 (TLS close, plain 1 MiB).
+`bench/idle-cost/ab.sh load` (wrk against the bench server), five interleaved rounds of before
+(http:a17b197), after (http:ad6771f) and an A/A arm (before again). Each cell is the median over
+rounds of after over before, with the min-max over rounds: for five rounds that is the
+distribution-free interval at 93.8%. p50 and p99 are after's median over before's. Jobs
+261116-090524-ec6fc0 (TLS keep-alive, with http:47d6726 as a third arm) and 261116-090550-a7dfdc
+(TLS 1 MiB, TLS close, plain 1 MiB); runs in `docs/perf/idle/load/`.
 
 | row | req/s after | req/s A/A | CPU/req after | CPU/req A/A | p50 after | p99 after |
 |---|---:|---:|---:|---:|---:|---:|
-| TLS `/` c1 keep-alive | **0.924 (0.850-0.985)** | 1.019 (0.963-1.079) | **1.177 (1.086-1.257)** | 0.991 (0.931-1.042) | 1.140 | 1.056 |
-| TLS `/` c64 keep-alive | **0.760 (0.753-0.851)** | 0.992 (0.941-1.055) | **1.311 (1.177-1.324)** | 1.008 (0.950-1.059) | 1.281 | 1.508 |
-| TLS 1 MiB c8 keep-alive | 1.137 (1.045-1.164) | 1.017 (0.903-1.040) | 0.906 (0.889-0.978) | 0.982 (0.965-1.095) | 0.885 | 0.815 |
-| TLS `/` c8 close | 0.989 (0.949-1.016) | 1.024 (0.956-1.059) | 1.012 (0.998-1.061) | 0.997 (0.940-1.065) | 0.857 | 0.894 |
-| plain 1 MiB c8 keep-alive | 0.978 (0.965-0.994) | 0.996 (0.945-1.032) | 1.023 (1.006-1.036) | 1.004 (0.968-1.058) | 1.008 | 0.977 |
+| TLS `/` c1 keep-alive | 0.935 (0.914-1.056) | 0.986 (0.915-1.106) | **1.100 (0.997-1.144)** | 1.009 (0.910-1.084) | 1.070 | 1.038 |
+| TLS `/` c64 keep-alive | 0.920 (0.910-1.004) | 0.990 (0.888-1.022) | 1.088 (0.996-1.099) | 1.011 (0.978-1.124) | 1.051 | 1.111 |
+| TLS 1 MiB c8 keep-alive | 1.138 (1.093-1.222) | 1.038 (1.024-1.053) | 0.902 (0.844-0.939) | 0.962 (0.951-0.978) | 0.876 | 0.850 |
+| TLS `/` c8 close | **0.967 (0.948-0.981)** | 0.988 (0.968-1.021) | 1.052 (1.038-1.067) | 1.032 (0.994-1.053) | 0.897 | 0.916 |
+| plain 1 MiB c8 keep-alive | 1.005 (0.997-1.039) | 1.017 (1.001-1.036) | 0.995 (0.963-1.003) | 0.983 (0.967-0.998) | 0.977 | 0.959 |
 
-- **Regressed, outside the A/A band:** small TLS replies on a kept-alive connection. At one
-  connection the after arm serves 7.6% fewer requests per second for 17.7% more CPU per request;
-  at 64 connections 24.0% fewer for 31.1% more CPU, with p50 1.28x. The write join (http:76f698d)
-  narrowed this from 0.616x and 0.596x at http:4279a49 (jobs 261115-235032-963543,
-  261115-235036-fc949b) but did not close it.
-- **Better, outside the band:** 1 MiB TLS downloads, 13.7% more per second for 9.4% less CPU.
-- **Noise:** TLS with a handshake per request and plain 1 MiB downloads.
+- **Outside the A/A band, accepted (D103):** two cells, each by a hair. At one kept-alive
+  connection a small TLS reply costs 10.0% more CPU (31.07 against 27.87 us per request; the
+  band ends at 1.084), while its requests per second (0.935x) stay inside the band. With a
+  handshake per request, TLS serves 3.3% fewer requests per second (the band starts at 0.968).
+  The owner accepted both for the idle saving; their cost is not yet attributed.
+- **Inside the band:** small TLS replies at 64 connections (0.920x requests per second, 1.088x CPU,
+  +0.9 us per request) and plain 1 MiB downloads.
+- **Better, outside the band:** 1 MiB TLS downloads, 13.8% more per second for 9.8% less CPU.
+
+Syscalls and Asio handlers per request (`ab.sh count`, http_idle_count with libidle_syscount
+interposed, job 261116-081537-cfec36, median of two runs; counts, not timing):
+
+| per request | c1 before | c1 after | c64 before | c64 after |
+|---|---:|---:|---:|---:|
+| `recvfrom` (of them `EAGAIN`) | 2 (1) | 2 (1) | 2.006 (1.002) | 2.013 (1.002) |
+| `sendto` | 1 | 1 | 1.004 | 1.006 |
+| `kevent` | 1.998 | 1.999 | 0.020 | 0.021 |
+| socket `async_receive` | 1 | 1 | 1.006 | 1.003 |
+| `io_context` execute | 0 | 1 | 0.001 | 1.003 |
+
+The syscalls match. What the after arm adds per request is one deferred handler (the write's
+immediate completion), a copy of the received bytes for the BIO and the joined reply's copy.
 
 `bench/watch_ab.sh` (job 261115-214354-19da72, http:f1e173f, five rounds, http and httpb at 1
 and 64 connections, after against before with an A/A arm): every row of requests per second, p99
