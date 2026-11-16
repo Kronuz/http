@@ -6,11 +6,13 @@ Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://gith
 
 ## 2026-11-16: an idle TLS connection costs 58.7% less memory
 
-`bench/idle-cost`, i9-9980HK, 10K idle connections, exclusive jobs 261115-214324-a3838f and
-261115-214321-2a3f2c, http:f1e173f against http:a17b197: an idle TLS connection's footprint goes from
-96,727 to 39,941 B (11,101 to 26,883 per GiB) and a plain one's from 14,376 to 8,668 B (74,689 to
-123,869 per GiB); after a 64 KiB request body, 169,046 to 40,348 B (TLS) and 135,301 to 9,149 B
-(plain). Throughput, latency and CPU per request are inside the noise. Details in `docs/perf/idle.md`.
+`bench/idle-cost`, i9-9980HK, exclusive jobs, http:76f698d against http:a17b197: an idle TLS
+connection's footprint goes from 96,742 to 39,932 B at 10K (11,099 to 26,889 per GiB) and from
+96,527 to 39,788 B at 100K, 5.28 GiB less per 100K idle connections; a plain one's from 14,367 to
+8,661 B (74,736 to 123,980 per GiB); after a 64 KiB request body, 169,046 to 40,348 B (TLS) and
+135,301 to 9,149 B (plain). Small TLS replies on a kept-alive connection are slower: 0.924x
+requests per second at one connection and 0.760x at 64, outside the A/A band; 1 MiB TLS downloads
+are 1.137x. Details in `docs/perf/idle.md`.
 
 ### Changed
 
