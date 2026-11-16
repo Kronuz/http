@@ -27,6 +27,10 @@
 //       Transfer-Encoding, is read as a request
 //   [W] the reply's inactivity slices: every byte arrives, at every alignment of head and body
 //       against the 64 KiB slice
+//   [A] read_ahead(): the idle read goes through the watch's own buffer, appends at most
+//       kReadAhead bytes, and a token requested before it starts arms nothing
+//   [I] idle: the body scratch released at each idle wait comes back for the next body, after a
+//       long idle, for headers split across reads and headers larger than the read-ahead
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/ioctl.h>
@@ -554,6 +558,52 @@ static void lane_tests() {
 	}
 }
 
+static void read_ahead_tests() {
+	{   // appends what the watch's read took, at most kReadAhead, to what the string held
+		Pair p;
+		const std::string data = pattern(10000, 11);
+		p.send(data);
+		check(p.arrived(10000), "[A] the 10000 bytes reached the server's receive queue");
+		auto in = std::make_shared<Input>(p.server);
+		std::string out = "x";
+		bool done = false;
+		http::detail::ReadResult got{};
+		auto reader = [&, in]() -> task::task<void> {
+			got = co_await in->read_ahead(out, {});
+			done = true;
+		};
+		task::spawn(task::scheduler_ref::of(p.scheduler), reader());
+		p.io.restart();
+		for (auto end = clk::now() + 2s; !done && clk::now() < end;) { p.io.run_one_for(5ms); }
+		check(done && !got.error && got.bytes == Input::kReadAhead && out == "x" + data.substr(0, Input::kReadAhead),
+			"[A] read_ahead() appends the first kReadAhead bytes behind what the string held");
+		check(pending_bytes(p.server.native_handle()) == 10000 - static_cast<int>(Input::kReadAhead), "[A] and leaves the rest in the kernel");
+		auto b = read_once(p, in, 65536);
+		check(b.done && !b.error && b.data == data.substr(Input::kReadAhead), "[A] the next read() continues without a gap or a repeat");
+	}
+	{   // a token requested before it starts: operation_aborted, nothing armed or read
+		Pair p;
+		p.send("abc");
+		check(p.arrived(3), "[A] 3 bytes arrived");
+		auto in = std::make_shared<Input>(p.server);
+		task::cancel_source cancelled;
+		cancelled.request();
+		std::string out;
+		bool done = false;
+		http::detail::ReadResult got{};
+		auto reader = [&, in]() -> task::task<void> {
+			got = co_await in->read_ahead(out, cancelled.token());
+			done = true;
+		};
+		task::spawn(task::scheduler_ref::of(p.scheduler), reader());
+		p.settle();
+		check(done && got.error == asio::error::operation_aborted && out.empty() && pending_bytes(p.server.native_handle()) == 3,
+			"[A] a requested token ends read_ahead() with operation_aborted and reads nothing");
+		auto r = read_once(p, in, 100);
+		check(r.done && r.data == "abc", "[A] the bytes stay for the next read");
+	}
+}
+
 static void input_tests() {
 	// Bounded and ordered: 10000 bytes wait in the kernel; the watch takes 4096 of them and no more.
 	{
@@ -754,7 +804,34 @@ int main() {
 	std::printf("== read-ahead watch and sliced write tests ==\n");
 #ifndef READAHEAD_TEST_INTEGRATION_ONLY
 	input_tests();
+	read_ahead_tests();
 #endif
+
+	// [I] The body scratch is released at each idle wait and comes back for the next body.
+	{
+		Server s;
+		s.start();
+		Conn c(s.port);
+		const std::string big = pattern(300000, 2), other = pattern(200000, 6);
+		c.send(post("/echo", big));
+		check(c.read_response().body == big, "[I] a 300000-byte body is read through the scratch");
+		std::this_thread::sleep_for(1500ms);
+		c.send(get("/fast"));
+		check(c.read_response().body == "fast", "[I] a request after a long idle is served");
+		c.send(post("/echo", other));
+		check(c.read_response().body == other, "[I] and a body after it gets the scratch back");
+		const std::string head = "POST /echo HTTP/1.1\r\nHost: x\r\nX-Pad: " + std::string(6000, 'p') + "\r\nContent-Length: 5\r\n\r\n";
+		c.send(head.substr(0, 10));
+		std::this_thread::sleep_for(50ms);
+		c.send(head.substr(10, 5000));
+		std::this_thread::sleep_for(50ms);
+		c.send(head.substr(5010) + "hello");
+		check(c.read_response().body == "hello", "[I] a 6 KiB head split across three reads, larger than the read-ahead, is parsed whole");
+		std::this_thread::sleep_for(1500ms);
+		c.send(post("/echo", big) + get("/fast"));
+		const auto r1 = c.read_response(), r2 = c.read_response();
+		check(r1.body == big && r2.body == "fast", "[I] after another idle, a body and a request pipelined behind it are answered in order");
+	}
 
 	// [P] A pipelined request inside the read-ahead, at every alignment of the 4096-byte window.
 	{

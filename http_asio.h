@@ -432,7 +432,8 @@ struct ReadResult {
 // On a plain TCP socket a request's watch is lazy: it reads nothing until the handler first
 // asks for its cancel token (engage(), through Request's CancelWatch hook), and then one read
 // that does not wait decides what happened meanwhile by the same rules. A handler that never
-// asks costs no read, so its request's next read is the socket's own, after the reply.
+// asks costs no read. Between requests the connection reads its next head through the same
+// read (read_ahead()), so an idle connection holds no buffer but this one.
 template<class Stream>
 class ConnectionInput : public std::enable_shared_from_this<ConnectionInput<Stream>>, public CancelWatch {
 public:
@@ -509,10 +510,16 @@ public:
 	public:
 		Read(ConnectionInput& input, asio::mutable_buffer output, task::cancel_token token)
 			: input_(input), output_(output), token_(std::move(token)) {}
+		Read(ConnectionInput& input, std::string& append, task::cancel_token token)
+			: input_(input), append_(&append), token_(std::move(token)) {}
 		Read(const Read&) = delete;
 		Read& operator=(const Read&) = delete;
 		~Read() { input_.forget(waiting_); }
 		bool await_ready() {
+			if (append_ && !input_.pending_ && !input_.ready_) {
+				if (token_.requested()) { aborted_ = true; return true; }
+				input_.arm();
+			}
 			if (!input_.pending_ && !input_.ready_) {
 				direct_.emplace(SocketRead{&input_.stream_, output_}, std::move(token_));
 				return direct_->await_ready();
@@ -528,13 +535,14 @@ public:
 			return std::noop_coroutine();
 		}
 		ReadResult await_resume() {
+			if (aborted_) { return {asio::error::operation_aborted, 0}; }
 			if (direct_) {
 				const auto [error, bytes] = direct_->await_resume();
 				return {error, bytes};
 			}
 			cancel_.reset();
 			waiting_ = {};
-			return input_.take(output_);
+			return append_ ? input_.take(*append_) : input_.take(output_);
 		}
 	private:
 		struct SocketRead {
@@ -553,6 +561,8 @@ public:
 		using Direct = decltype(task::await_asio<void(asio::error_code, std::size_t)>(std::declval<SocketRead>(), std::declval<task::cancel_token>()));
 		ConnectionInput& input_;
 		asio::mutable_buffer output_;
+		std::string* append_ = nullptr;   // read_ahead(): the bytes go here
+		bool aborted_ = false;            // read_ahead() with its token already requested
 		task::cancel_token token_;
 		std::optional<Direct> direct_;
 		std::optional<task::cancel_callback<Cancel>> cancel_;
@@ -563,6 +573,9 @@ public:
 	// operation, awaited in place; with the watch's read pending, its completion resumes the
 	// reader. Neither makes a coroutine frame.
 	Read read(asio::mutable_buffer output, task::cancel_token token) { return Read(*this, output, std::move(token)); }
+	// The next bytes, appended to `out`: at most kReadAhead, always through the watch's read into
+	// the input's own buffer, so a connection waiting here holds no buffer of its own.
+	Read read_ahead(std::string& out, task::cancel_token token) { return Read(*this, out, std::move(token)); }
 private:
 	// The one coroutine the pending read resumes when it completes: a reader or the drain, with
 	// the scheduler it suspended on.
@@ -588,6 +601,18 @@ private:
 			std::memcpy(output.data(), buffer_ + taken_, n);
 			taken_ += n;
 			if (taken_ == size_) { size_ = taken_ = 0; ready_ = false; }
+			return ReadResult{{}, n};
+		}
+		ready_ = false;
+		return ReadResult{error_ ? error_ : asio::error::eof, 0};
+	}
+	ReadResult take(std::string& out) {
+		assert(ready_);
+		if (size_) {
+			const std::size_t n = size_ - taken_;
+			out.append(buffer_ + taken_, n);
+			size_ = taken_ = 0;
+			ready_ = false;
 			return ReadResult{{}, n};
 		}
 		ready_ = false;
@@ -851,7 +876,13 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 			return intake;
 		});
 		std::string buffered;
-		char tmp[64 * 1024];
+		// A body's read buffer: allocated by its first read, released at the next idle wait.
+		constexpr std::size_t kScratch = 64 * 1024;
+		std::unique_ptr<char[]> scratch;
+		const auto body_buffer = [&] {
+			if (!scratch) { scratch.reset(new char[kScratch]); }
+			return asio::buffer(scratch.get(), kScratch);
+		};
 		std::string head;                          // a buffered reply's head; the storage is reused
 		std::array<asio::const_buffer, 2> reply;   // what of the reply is still to be written
 		// A plain TCP socket sends a buffered reply at once (send_now), so it is put in
@@ -923,15 +954,21 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 			// timeout bounds the wait; from the first byte, the header timeout.
 			auto header_deadline = clock::time_point::max();
 			if (!buffered.empty() && ms(header)) { header_deadline = clock::now() + header; }
+			bool idle_wait = buffered.empty();   // nothing of the next request has arrived
 			while (!parser.headers_done()) {
 				if (buffered.empty()) {
+					if (idle_wait) {
+						// The connection waits holding only the input's own buffer.
+						scratch.reset();
+						if (buffered.capacity() > 2 * ConnectionInput<Stream>::kReadAhead) { std::string().swap(buffered); }
+					}
 					const bool waiting = header_deadline == clock::time_point::max();
 					const auto until = std::min(request_deadline, waiting ? (ms(idle) ? clock::now() + idle : clock::time_point::max()) : header_deadline);
-					ReadResult r = co_await input->read(asio::buffer(tmp), bounded(until, stop));
+					ReadResult r = co_await input->read_ahead(buffered, bounded(until, stop));
 					settle_read(r);
 					if (r.error || r.bytes == 0) { co_return; }
+					idle_wait = false;
 					if (waiting && ms(header)) { header_deadline = clock::now() + header; }
-					buffered.append(tmp, r.bytes);
 				}
 				std::size_t used = parser.feed(buffered.data(), buffered.size());
 				buffered.erase(0, used);
@@ -986,7 +1023,7 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 							co_return Fed::Complete;
 						}
 						if (buffered.empty()) {
-							ReadResult r = co_await input->read(asio::buffer(tmp), bounded(body_deadline(request_deadline), token));
+							ReadResult r = co_await input->read(body_buffer(), bounded(body_deadline(request_deadline), token));
 							settle_read(r);
 							if (r.error == asio::error::operation_aborted && handler_done) { co_return Fed::Abandoned; }
 							if (r.error || r.bytes == 0) {
@@ -998,7 +1035,7 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 								fail_body(failure);
 								co_return Fed::Failed;
 							}
-							buffered.append(tmp, r.bytes);
+							buffered.append(scratch.get(), r.bytes);
 						}
 						std::size_t used = parser.feed(buffered.data(), buffered.size());
 						buffered.erase(0, used);
@@ -1045,10 +1082,10 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 			// ---- BUFFERED / PUSH path ----
 			while (!parser.complete()) {
 				if (buffered.empty()) {
-					ReadResult r = co_await input->read(asio::buffer(tmp), bounded(body_deadline(request_deadline), stop));
+					ReadResult r = co_await input->read(body_buffer(), bounded(body_deadline(request_deadline), stop));
 					settle_read(r);
 					if (r.error || r.bytes == 0) { co_return; }
-					buffered.append(tmp, r.bytes);
+					buffered.append(scratch.get(), r.bytes);
 				}
 				std::size_t used = parser.feed(buffered.data(), buffered.size());
 				buffered.erase(0, used);
