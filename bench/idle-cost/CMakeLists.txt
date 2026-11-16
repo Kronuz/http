@@ -15,11 +15,14 @@ foreach(dir product bench)
   execute_process(COMMAND git -C "${source}" rev-parse HEAD OUTPUT_VARIABLE ${dir}_commit
     OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
 endforeach()
+# OpenSSL's headers first, so they match the library that links: Apple clang searches
+# /usr/local/include before -isystem directories (the imported targets' include), so the
+# libraries link by path and the headers come in as the first -I.
+get_filename_component(openssl_include "${OPENSSL_INCLUDE_DIR}" REALPATH)
 foreach(target http_idle_cost http_idle_owners)
   add_executable(${target} server.cc)
-  # OpenSSL's headers first, so they match the library that links.
-  target_include_directories(${target} BEFORE PRIVATE "${OPENSSL_INCLUDE_DIR}")
-  target_link_libraries(${target} PRIVATE http OpenSSL::SSL OpenSSL::Crypto)
+  target_compile_options(${target} BEFORE PRIVATE "-I${openssl_include}")
+  target_link_libraries(${target} PRIVATE http "${OPENSSL_SSL_LIBRARY}" "${OPENSSL_CRYPTO_LIBRARY}")
   target_compile_definitions(${target} PRIVATE HTTP_IDLE_PRODUCT_COMMIT="${product_commit}" HTTP_IDLE_BENCH_COMMIT="${bench_commit}")
 endforeach()
 target_compile_definitions(http_idle_cost PRIVATE HTTP_IDLE_OWNERS=0)

@@ -6,6 +6,8 @@
 #
 #   sh bench/idle-cost/ab.sh build    Release builds of every arm, stamped with their commits
 #   sh bench/idle-cost/ab.sh run      build what is missing, run, summarize
+#   sh bench/idle-cost/ab.sh load     wrk rows (LOAD_ROWS, LOAD_ROUNDS, LOAD_SECONDS) per arm and an
+#                                     A/A copy of the first, through load_ab.py
 #
 # Environment (defaults): ARMS="head=." (e.g. "base=$JOB_REF_BASE head=."), MODES="plain tls",
 #   COUNT=10000, ROUNDS=3, WARM=0 (bytes each connection POSTs before idling), OWNERS=1,
@@ -74,5 +76,20 @@ run)
 	python3 bench/idle-cost/summarize.py "$OUT/runs" | tee "$OUT/summary.md"
 	if [ -n "${JOB_OUT:-}" ]; then mkdir -p "$JOB_OUT" && cp -R "$OUT/runs" "$OUT/summary.md" "$JOB_OUT/"; fi
 	;;
-*) echo "usage: $0 build|run" >&2; exit 2 ;;
+load)
+	# Throughput, latency and CPU per request under wrk; "aa" is a copy of the first arm.
+	build_all
+	first=${ARMS%% *}; first=${first%%=*}
+	cp "$BINS/build-$first/http_idle_cost" "$BINS/aa"
+	set --
+	for a in $ARMS; do set -- "$@" --arm "${a%%=*}=$BINS/build-${a%%=*}/http_idle_cost"; done
+	set -- "$@" --arm "aa=$BINS/aa"
+	for row in ${LOAD_ROWS:-"tls,/,1,keep tls,/,64,keep tls,/download/1048576,8,keep tls,/,8,close plain,/download/1048576,8,keep"}; do
+		set -- "$@" --row "$row"
+	done
+	mkdir -p "$OUT"
+	python3 bench/idle-cost/load_ab.py "$@" --rounds "${LOAD_ROUNDS:-5}" --seconds "${LOAD_SECONDS:-3}" --out "$OUT/load.jsonl" | tee "$OUT/load.txt"
+	if [ -n "${JOB_OUT:-}" ]; then mkdir -p "$JOB_OUT" && cp "$OUT/load.jsonl" "$OUT/load.txt" "$JOB_OUT/"; fi
+	;;
+*) echo "usage: $0 build|run|load" >&2; exit 2 ;;
 esac

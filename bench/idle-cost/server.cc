@@ -270,9 +270,11 @@ void self_signed(asio::ssl::context& context) {
 	X509_gmtime_adj(X509_getm_notBefore(x), 0);
 	X509_gmtime_adj(X509_getm_notAfter(x), 86400);
 	X509_set_pubkey(x, key);
-	X509_NAME* name = X509_get_subject_name(x);
+	X509_NAME* name = X509_NAME_new();
 	X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC, reinterpret_cast<const unsigned char*>("localhost"), -1, -1, 0);
+	X509_set_subject_name(x, name);
 	X509_set_issuer_name(x, name);
+	X509_NAME_free(name);
 	X509_sign(x, key, EVP_sha256());
 	if (SSL_CTX_use_certificate(context.native_handle(), x) != 1 || SSL_CTX_use_PrivateKey(context.native_handle(), key) != 1) {
 		throw std::runtime_error("certificate");
@@ -329,7 +331,7 @@ int main(int argc, char** argv) {
 	}
 	if (!CRYPTO_set_mem_functions(ssl_malloc, ssl_realloc, ssl_free)) { return 3; }
 	// The headers compiled against must be the library that runs.
-	if (OpenSSL_version_major() != OPENSSL_VERSION_MAJOR || OpenSSL_version_minor() != OPENSSL_VERSION_MINOR) {
+	if (OPENSSL_version_major() != OPENSSL_VERSION_MAJOR || OPENSSL_version_minor() != OPENSSL_VERSION_MINOR) {
 		std::cerr << "OpenSSL headers " << OPENSSL_VERSION_TEXT << " but library " << OpenSSL_version(OPENSSL_VERSION) << '\n';
 		return 4;
 	}
