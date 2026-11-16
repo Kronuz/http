@@ -184,10 +184,11 @@ A `304` short-circuits range + compression; a `206` skips compression.
 
 ## Limitations
 
-Response-side *streaming* (chunked `Transfer-Encoding`) is not in the Asio writer yet
-— it buffers the whole response, so the transforms above always have the full body to
-work on, but a huge response is held in memory. Request-side streaming (both push and
-concurrent pull, with flow control) is done.
+Buffered responses (`send()`, `write()` + `end()`) are held whole in memory, so the transforms
+above always have the full body to work on. A huge response streams through
+`ResponseWriter::stream()`, which hands back an owned `OwnedStreamCapability` for an asynchronous
+producer (chunked framing, backpressure; see `docs/OWNED_STREAMING.md`); streamed bodies skip
+these transforms. Request-side streaming (both push and concurrent pull, with flow control) is done.
 
 ## Deferred response ownership
 
