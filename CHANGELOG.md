@@ -4,6 +4,16 @@ Newest first. Dates are 2026.
 
 Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://github.com/Kronuz/cpp-libraries/blob/main/docs/UPGRADING-2026-10.md#http) lists what changes for callers, how to find affected inputs, the commits not to pin, and the speedup.
 
+## 2026-11-16: Accept q-values parse without libc
+
+### Changed
+
+- **`q=` follows RFC 9110's qvalue grammar.** `Accept` read `q` with `std::stod`; it now reads at most
+  three decimal digits itself, so the work is bounded and no libc call is made. `0`, `0.5`, `0.123`,
+  `1`, `1.000` and `.5` parse as before; further decimals are ignored, an integer part above 0 is 1,
+  a leading `-` is 0, and a value with no digits (empty, `abc`) is malformed and takes the default 1.0.
+  Exponent forms such as `1e-1` are no longer read as numbers.
+
 ## 2026-11-09: a handler that asks for its token costs no extra read
 
 `bench_http`'s `http_server_compare` under `wrk`, i9-9980HK, exclusive job 261109-150350-f39012,

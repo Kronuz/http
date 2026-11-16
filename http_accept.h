@@ -201,6 +201,32 @@ private:
 		return out;
 	}
 
+	// RFC 9110 qvalue ("0" ["." 0*3DIGIT] / "1" ["." 0*3("0")]) as a double, without libc.
+	// Reads digits only, at most three fractional ones (the rest are ignored), so the work is
+	// bounded by the leading zeros. Lenient where strtod was: ".5" is 0.5, an integer part
+	// above 0 clamps to 1, a leading '-' is 0, and text after the number is ignored. A value
+	// with no digits (empty, "abc") is malformed and takes the default 1.0.
+	static double parse_qvalue(std::string_view v) {
+		if (!v.empty() && v.front() == '-') { return 0.0; }
+		std::size_t i = 0;
+		bool digits = false, big = false;
+		for (; i < v.size() && v[i] >= '0' && v[i] <= '9'; ++i) {
+			digits = true;
+			if (v[i] != '0') { big = true; }
+		}
+		int thousandths = 0, places = 0;
+		if (i < v.size() && v[i] == '.') {
+			for (++i; i < v.size() && v[i] >= '0' && v[i] <= '9' && places < 3; ++i, ++places) {
+				digits = true;
+				thousandths = thousandths * 10 + (v[i] - '0');
+			}
+		}
+		if (!digits) { return 1.0; }
+		if (big) { return 1.0; }
+		for (; places < 3; ++places) { thousandths *= 10; }
+		return thousandths / 1000.0;
+	}
+
 	// Parse the parameter list after the media range: q= sets the quality (default 1.0),
 	// every other "key=value" is retained on the item (lower-cased key, verbatim value).
 	static void parse_params(std::string_view params, AcceptItem& item) {
@@ -214,9 +240,7 @@ private:
 			std::string_view key = trim(p.substr(0, eq));
 			std::string_view val = trim(p.substr(eq + 1));
 			if (key.size() == 1 && (key[0] == 'q' || key[0] == 'Q')) {
-				double q = 1.0;
-				try { q = std::stod(std::string(val)); } catch (...) { q = 1.0; }
-				item.q = q < 0.0 ? 0.0 : (q > 1.0 ? 1.0 : q);
+				item.q = parse_qvalue(val);
 			} else if (!key.empty()) {
 				item.params.emplace_back(lower(key), std::string(val));
 			}

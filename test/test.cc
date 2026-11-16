@@ -166,6 +166,30 @@ int main() {
 		CHECK(p.match("application/json")->param("indent") == "4");
 		CHECK(http::Accept("image/png").negotiate_match(produce).item == nullptr);   // 406: no match
 
+		// qvalues (RFC 9110): valid forms order by thousandths; malformed ones take the
+		// default 1.0 and never reach libc (a 10,000-digit q passed on Linux before too).
+		{
+			const std::vector<std::string> two{"a/x", "b/x"};
+			auto qof = [](const char* q) { return http::Accept(std::string("a/x;q=") + q).quality("a/x"); };
+			CHECK(qof("0") == 0.0);
+			CHECK(qof("0.5") == 0.5);
+			CHECK(qof("0.123") == 0.123);
+			CHECK(qof("1") == 1.0);
+			CHECK(qof("1.000") == 1.0);
+			CHECK(qof("") == 1.0);
+			CHECK(qof("abc") == 1.0);
+			CHECK(qof("-1") == 0.0);
+			CHECK(qof("2") == 1.0);
+			CHECK(qof("0.12345") == 0.123);                 // extra decimals are ignored
+			CHECK(qof(std::string(10000, '9').c_str()) == 1.0);
+			CHECK(qof((std::string("0.") + std::string(10000, '9')).c_str()) == 0.999);
+			CHECK(qof((std::string(10000, '0') + "5").c_str()) == 1.0);   // integer part 5
+			CHECK(http::Accept("a/x;q=0.123, b/x;q=0.5").best(two) == "b/x");
+			CHECK(http::Accept("a/x;q=abc, b/x;q=0.9").best(two) == "a/x");
+			CHECK(http::Accept("a/x;q=0, b/x;q=0.001").best(two) == "b/x");
+			CHECK(http::Accept("a/x;q=-1, b/x;q=2").best(two) == "b/x");
+		}
+
 		// the AcceptCache parses once and returns a shared, immutable Accept
 		http::AcceptCache cache(2);
 		auto a1 = cache.get("application/json;indent=2");
