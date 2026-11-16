@@ -1,7 +1,10 @@
 // The TLS connection factory over real TCP: a client that trusts the server's certificate
 // gets its reply; the failure hook names why other connections ended before serving: plain
 // HTTP sent to the TLS port (protocol), a client that refuses the certificate
-// (certificate), and a client that never sends a ClientHello (deadline).
+// (certificate), and a client that never sends a ClientHello (deadline). The stream itself:
+// keep-alive across a long idle (OpenSSL's record buffers released and reacquired), pipelined
+// requests, bodies far larger than a record in both directions under a slow reader, a peer
+// that leaves with or without close_notify, and a stop with idle connections.
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -9,6 +12,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -16,9 +20,16 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
+#include <openssl/crypto.h>
 #include <openssl/pem.h>
 #include <openssl/x509v3.h>
+#ifdef __APPLE__
+#include <malloc/malloc.h>
+#else
+#include <malloc.h>
+#endif
 
 #include "http_asio_tls.h"
 #include "reactor_tls.h"
@@ -31,9 +42,90 @@ static void check(bool ok, const char* what) {
 	if (!ok) { ++failures; }
 }
 
+// "/" says hello; "/big" sends kBig patterned bytes; "/sum" answers its body's size and sum.
+constexpr std::size_t kBig = 4 * 1024 * 1024;
+static char pattern(std::size_t i) { return static_cast<char>('a' + i % 23); }
 struct Hello : http::HttpHandler {
-	task::task<void> handle(http::Request&, http::ResponseWriter& w) override { w.send(200, "hello"); co_return; }
+	task::task<void> handle(http::Request& r, http::ResponseWriter& w) override {
+		if (r.path == "/big") {
+			std::string body(kBig, '\0');
+			for (std::size_t i = 0; i < body.size(); ++i) { body[i] = pattern(i); }
+			w.send(200, body);
+		} else if (r.path == "/sum") {
+			std::uint64_t sum = 0;
+			for (unsigned char c : r.body) { sum += c; }
+			w.send(200, std::to_string(r.body.size()) + ":" + std::to_string(sum));
+		} else {
+			w.send(200, "hello");
+		}
+		co_return;
+	}
 };
+
+// The server's OpenSSL live bytes, counted through OpenSSL's allocator hooks (set before any
+// other OpenSSL call): every thread but the test's own, which runs the clients.
+static std::atomic<long long> openssl_bytes{0};
+static thread_local bool client_thread = false;
+static std::size_t usable(void* p) {
+#ifdef __APPLE__
+	return p ? malloc_size(p) : 0;
+#else
+	return p ? malloc_usable_size(p) : 0;
+#endif
+}
+static void* counted_malloc(std::size_t n, const char*, int) {
+	void* p = std::malloc(n);
+	if (!client_thread) { openssl_bytes += static_cast<long long>(usable(p)); }
+	return p;
+}
+static void counted_free(void* p, const char*, int) {
+	if (!client_thread) { openssl_bytes -= static_cast<long long>(usable(p)); }
+	std::free(p);
+}
+static void* counted_realloc(void* p, std::size_t n, const char*, int) {
+	const auto before = static_cast<long long>(usable(p));
+	void* q = std::realloc(p, n);
+	if (!client_thread && (q || !n)) { openssl_bytes += static_cast<long long>(usable(q)) - before; }
+	return q;
+}
+
+// A blocking TLS client connection to the server.
+struct Client {
+	asio::io_context io;
+	asio::ssl::stream<asio::ip::tcp::socket> s;
+	Client(unsigned short port, asio::ssl::context& context) : s(io, context) {
+		s.next_layer().connect({asio::ip::make_address("127.0.0.1"), port});
+		reactor::tls::bind_hostname(s.native_handle(), "localhost");
+		s.handshake(asio::ssl::stream_base::client);
+	}
+	void send(const std::string& bytes) { asio::write(s, asio::buffer(bytes)); }
+	// One response: its head and exactly Content-Length body bytes; "" when the stream ends first.
+	std::string response() {
+		while (in.find("\r\n\r\n") == std::string::npos) { if (!more()) { return ""; } }
+		const auto end = in.find("\r\n\r\n") + 4;
+		const auto at = in.find("Content-Length: ");
+		const std::size_t length = at < end ? std::stoul(in.substr(at + 16)) : 0;
+		while (in.size() < end + length) { if (!more()) { return ""; } }
+		std::string out = in.substr(0, end + length);
+		in.erase(0, end + length);
+		return out;
+	}
+	std::string get(const std::string& path) {
+		send("GET " + path + " HTTP/1.1\r\nHost: localhost\r\n\r\n");
+		return response();
+	}
+	bool more() {
+		char b[16384];
+		asio::error_code ec;
+		const std::size_t n = s.read_some(asio::buffer(b), ec);
+		if (ec) { return false; }
+		in.append(b, n);
+		return true;
+	}
+	std::string in;
+};
+
+static bool says_hello(const std::string& r) { return r.rfind("HTTP/1.1 200", 0) == 0 && r.size() >= 5 && r.compare(r.size() - 5, 5, "hello") == 0; }
 
 // A self-signed certificate for localhost and 127.0.0.1, and its key, as PEM files.
 static void self_signed(const std::string& cert_path, const std::string& key_path) {
@@ -103,6 +195,8 @@ static std::string tls_get(unsigned short port, asio::ssl::context& client) {
 }
 
 int main() {
+	if (!CRYPTO_set_mem_functions(counted_malloc, counted_realloc, counted_free)) { return EXIT_FAILURE; }
+	client_thread = true;
 	std::signal(SIGPIPE, SIG_IGN);
 	char dir[] = "/tmp/http_tls_XXXXXX";
 	if (!::mkdtemp(dir)) { return EXIT_FAILURE; }
@@ -154,7 +248,70 @@ int main() {
 	check(seen_of(http::TlsFailure::protocol) == 1, "plain HTTP to the TLS port is reported as protocol");
 	check(seen_of(http::TlsFailure::certificate) == 1, "a refused certificate is reported as certificate");
 	check(seen_of(http::TlsFailure::deadline) == 1, "a silent client is reported at the handshake deadline");
+
+	const auto active_is = [&](std::size_t n) {
+		for (int i = 0; i < 200 && svc.connection_stats().active != n; ++i) { std::this_thread::sleep_for(10ms); }
+		return svc.connection_stats().active == n;
+	};
+	{  // keep-alive across a long idle: the record buffers are released while idle and come back
+		constexpr int kIdle = 8;
+		std::vector<std::unique_ptr<Client>> idle;
+		const long long before = openssl_bytes.load();
+		bool served = true;
+		for (int i = 0; i < kIdle; ++i) {
+			idle.push_back(std::make_unique<Client>(port, trusting));
+			served = served && says_hello(idle.back()->get("/"));
+		}
+		check(served, "each idle-to-be connection is served");
+		std::this_thread::sleep_for(1500ms);
+		// An asio::ssl::stream's BIO pair alone would hold two 17 KiB halves per connection.
+		const long long per_connection = (openssl_bytes.load() - before) / kIdle;
+		std::printf("  server OpenSSL bytes per idle connection: %lld\n", per_connection);
+		check(per_connection < 48 * 1024, "an idle TLS connection holds no record or BIO buffers (OpenSSL under 48 KiB)");
+		bool again = true;
+		for (auto& c : idle) { again = again && says_hello(c->get("/")) && says_hello(c->get("/")); }
+		check(again, "a request after a long idle is served on every connection, twice");
+	}
+	check(active_is(0), "every idle connection ends when its client leaves");
+	{  // pipelined requests in one write, answered in order
+		Client c(port, trusting);
+		c.send("GET / HTTP/1.1\r\nHost: x\r\n\r\nGET /sum HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nabcGET / HTTP/1.1\r\nHost: x\r\n\r\n");
+		const auto a = c.response(), b = c.response(), d = c.response();
+		check(says_hello(a) && b.find("\r\n\r\n3:294") != std::string::npos && says_hello(d), "three pipelined requests are answered in order");
+	}
+	{  // a body far larger than a record each way; the client reads the download slowly
+		Client c(port, trusting);
+		std::string body(kBig, '\0');
+		std::uint64_t sum = 0;
+		for (std::size_t i = 0; i < body.size(); ++i) { body[i] = pattern(i); sum += static_cast<unsigned char>(body[i]); }
+		c.send("POST /sum HTTP/1.1\r\nHost: x\r\nContent-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body);
+		const auto up = c.response();
+		check(up.find("\r\n\r\n" + std::to_string(kBig) + ":" + std::to_string(sum)) != std::string::npos, "a 4 MiB upload arrives whole");
+		c.send("GET /big HTTP/1.1\r\nHost: x\r\n\r\n");
+		std::this_thread::sleep_for(300ms);   // the server's writes wait for the socket meanwhile
+		const auto down = c.response();
+		const auto at = down.find("\r\n\r\n") + 4;
+		bool same = down.size() == at + kBig;
+		for (std::size_t i = 0; same && i < kBig; ++i) { same = down[at + i] == pattern(i); }
+		check(same, "a 4 MiB download arrives whole under a slow reader");
+		check(says_hello(c.get("/")), "the connection serves on after both");
+	}
+	{  // a peer that leaves while idle, with and without close_notify
+		auto polite = std::make_unique<Client>(port, trusting), abrupt = std::make_unique<Client>(port, trusting);
+		check(says_hello(polite->get("/")) && says_hello(abrupt->get("/")), "two connections are served");
+		check(active_is(2), "both are held idle");
+		asio::error_code ignored;
+		polite->s.shutdown(ignored);
+		check(active_is(1), "a close_notify ends its idle connection");
+		abrupt->s.next_layer().close();
+		check(active_is(0), "a TCP close without close_notify ends its idle connection");
+	}
+	auto lingering = std::make_unique<Client>(port, trusting);
+	check(says_hello(lingering->get("/")), "a connection left idle is served");
+	const auto stop_started = std::chrono::steady_clock::now();
 	svc.stop();
+	check(std::chrono::steady_clock::now() - stop_started < 3s, "stop ends an idle TLS connection's wait promptly");
+	check(lingering->get("/").empty(), "the stopped connection is closed");
 	std::remove(cert.c_str());
 	std::remove(key.c_str());
 	::rmdir(dir);

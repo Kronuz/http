@@ -5,8 +5,12 @@
 #include <asio/ssl.hpp>
 #include <atomic>
 #include <functional>
+#include <iterator>
+#include <openssl/bio.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
+#include <system_error>
+#include <utility>
 
 namespace http {
 
@@ -42,6 +46,192 @@ inline TlsFailure classify(const asio::error_code& error) {
 		return TlsFailure::other;
 	}
 }
+// A TLS connection that keeps no buffers of its own: OpenSSL reads and writes the socket
+// through a BIO over it, and an operation that would block waits for the socket to be ready.
+// Idle, it holds the SSL object and what OpenSSL keeps of the session, nothing of the records
+// (SSL_MODE_RELEASE_BUFFERS). One read and one write may be in flight at once, on the loop.
+class TlsStream {
+public:
+	using executor_type = asio::ip::tcp::socket::executor_type;
+	using lowest_layer_type = asio::ip::tcp::socket;
+
+	TlsStream(asio::ip::tcp::socket socket, asio::ssl::context& context) : socket_(std::move(socket)) {
+		socket_.non_blocking(true);   // the BIO's reads and writes return instead of waiting
+		ssl_ = ::SSL_new(context.native_handle());
+		BIO* bio = ssl_ ? ::BIO_new(method()) : nullptr;
+		if (!bio) {
+			::SSL_free(ssl_);
+			throw std::system_error(asio::error_code(static_cast<int>(::ERR_get_error()), asio::error::get_ssl_category()), "TLS stream");
+		}
+		::BIO_set_data(bio, this);
+		::SSL_set_bio(ssl_, bio, bio);
+		::SSL_set_mode(ssl_, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_RELEASE_BUFFERS);
+	}
+	// Only with no operation in flight: the BIO is pointed at the new stream.
+	TlsStream(TlsStream&& other) noexcept
+		: socket_(std::move(other.socket_)), ssl_(std::exchange(other.ssl_, nullptr)), socket_error_(other.socket_error_), eof_(other.eof_) {
+		if (ssl_) { ::BIO_set_data(::SSL_get_rbio(ssl_), this); }
+	}
+	TlsStream& operator=(TlsStream&&) = delete;
+	~TlsStream() { ::SSL_free(ssl_); }
+
+	executor_type get_executor() noexcept { return socket_.get_executor(); }
+	lowest_layer_type& lowest_layer() noexcept { return socket_; }
+	lowest_layer_type& next_layer() noexcept { return socket_; }
+	SSL* native_handle() noexcept { return ssl_; }
+
+	template<class Token>
+	auto async_handshake(asio::ssl::stream_base::handshake_type type, Token&& token) {
+		if (type == asio::ssl::stream_base::server) { ::SSL_set_accept_state(ssl_); }
+		else { ::SSL_set_connect_state(ssl_); }
+		return start<void(asio::error_code)>([](SSL* ssl, std::size_t& n) { n = 0; return ::SSL_do_handshake(ssl) == 1; }, true, std::forward<Token>(token));
+	}
+	template<class Buffers, class Token>
+	auto async_read_some(const Buffers& buffers, Token&& token) {
+		const asio::mutable_buffer b = first(buffers);
+		return start<void(asio::error_code, std::size_t)>(
+			[b](SSL* ssl, std::size_t& n) { return ::SSL_read_ex(ssl, b.data(), b.size(), &n) == 1; }, b.size() > 0, std::forward<Token>(token));
+	}
+	template<class Buffers, class Token>
+	auto async_write_some(const Buffers& buffers, Token&& token) {
+		const asio::const_buffer b = first(buffers);
+		return start<void(asio::error_code, std::size_t)>(
+			[b](SSL* ssl, std::size_t& n) { return ::SSL_write_ex(ssl, b.data(), b.size(), &n) == 1; }, b.size() > 0, std::forward<Token>(token));
+	}
+
+private:
+	enum class Want { nothing, read, write };
+
+	// One SSL call: done (error and bytes set), or the readiness it waits for.
+	template<class Call>
+	Want step(Call& call, asio::error_code& error, std::size_t& bytes) {
+		::ERR_clear_error();
+		socket_error_ = {};
+		std::size_t n = 0;
+		if (call(ssl_, n)) { error = {}; bytes = n; return Want::nothing; }
+		bytes = 0;
+		switch (::SSL_get_error(ssl_, 0)) {
+		case SSL_ERROR_WANT_READ: return Want::read;
+		case SSL_ERROR_WANT_WRITE: return Want::write;
+		case SSL_ERROR_ZERO_RETURN: error = asio::error::eof; break;   // the peer's close_notify
+		case SSL_ERROR_SYSCALL:
+			if (socket_error_) { error = socket_error_; break; }
+			[[fallthrough]];
+		case SSL_ERROR_SSL: {
+			const unsigned long code = ::ERR_get_error();
+			// A transport EOF without close_notify, as asio::ssl::stream reports it.
+			if (eof_ && (!code || ERR_GET_REASON(code) == SSL_R_UNEXPECTED_EOF_WHILE_READING)) { error = asio::ssl::error::stream_truncated; }
+			else if (code) { error = asio::error_code(static_cast<int>(code), asio::error::get_ssl_category()); }
+			else { error = asio::ssl::error::unspecified_system_error; }
+			break;
+		}
+		default: error = asio::ssl::error::unexpected_result; break;
+		}
+		return Want::nothing;
+	}
+
+	// The operation: SSL calls until one is done, waiting for readiness between them. A result
+	// found without waiting is posted, never delivered inside the initiating call.
+	template<class Call>
+	struct Operation {
+		TlsStream* stream;
+		Call call;
+		bool any;   // false: an empty buffer, done at once
+		enum class Phase { start, waiting, posted } phase = Phase::start;
+		asio::error_code error;
+		std::size_t bytes = 0;
+		template<class Self>
+		void operator()(Self& self, asio::error_code wait_error = {}) {
+			if (phase == Phase::posted) { return finish(self); }
+			if (phase == Phase::waiting && wait_error) { error = wait_error; return finish(self); }
+			if (any) {
+				switch (stream->step(call, error, bytes)) {
+				case Want::read: return wait(self, asio::socket_base::wait_read);
+				case Want::write: return wait(self, asio::socket_base::wait_write);
+				case Want::nothing: break;
+				}
+			}
+			if (phase == Phase::start) {
+				phase = Phase::posted;
+				auto executor = self.get_io_executor();
+				return asio::post(executor, std::move(self));
+			}
+			finish(self);
+		}
+		template<class Self>
+		void wait(Self& self, asio::socket_base::wait_type type) {
+			phase = Phase::waiting;
+			stream->socket_.async_wait(type, std::move(self));
+		}
+		template<class Self>
+		void finish(Self& self) {
+			if constexpr (requires { self.complete(error, bytes); }) { self.complete(error, bytes); }
+			else { self.complete(error); }
+		}
+	};
+	template<class Signature, class Call, class Token>
+	auto start(Call call, bool any, Token&& token) {
+		return asio::async_compose<Token, Signature>(Operation<Call>{this, std::move(call), any}, token, socket_);
+	}
+
+	template<class Buffers>
+	static auto first(const Buffers& buffers) {
+		for (auto it = asio::buffer_sequence_begin(buffers); it != asio::buffer_sequence_end(buffers); ++it) {
+			if (it->size()) { return *it; }
+		}
+		return typename std::iterator_traits<decltype(asio::buffer_sequence_begin(buffers))>::value_type{};
+	}
+
+	// The BIO: the socket's own non-blocking reads and writes. A socket error is kept for
+	// step(), and a read of EOF for BIO_eof.
+	static int bio_write(BIO* bio, const char* data, std::size_t size, std::size_t* written) {
+		auto* self = static_cast<TlsStream*>(::BIO_get_data(bio));
+		::BIO_clear_retry_flags(bio);
+		asio::error_code error;
+		*written = self->socket_.write_some(asio::const_buffer(data, size), error);
+		if (!error) { return 1; }
+		if (error == asio::error::would_block || error == asio::error::try_again) { ::BIO_set_retry_write(bio); }
+		else { self->socket_error_ = error; }
+		return 0;
+	}
+	static int bio_read(BIO* bio, char* data, std::size_t size, std::size_t* read) {
+		auto* self = static_cast<TlsStream*>(::BIO_get_data(bio));
+		::BIO_clear_retry_flags(bio);
+		asio::error_code error;
+		*read = self->socket_.read_some(asio::mutable_buffer(data, size), error);
+		if (!error) { return 1; }
+		if (error == asio::error::would_block || error == asio::error::try_again) { ::BIO_set_retry_read(bio); }
+		else if (error == asio::error::eof) { self->eof_ = true; }
+		else { self->socket_error_ = error; }
+		return 0;
+	}
+	static long bio_control(BIO* bio, int command, long, void*) {
+		switch (command) {
+		case BIO_CTRL_FLUSH: return 1;
+		case BIO_CTRL_EOF: return static_cast<TlsStream*>(::BIO_get_data(bio))->eof_ ? 1 : 0;
+		default: return 0;
+		}
+	}
+	static BIO_METHOD* method() {
+		static BIO_METHOD* const shared = [] {
+			BIO_METHOD* m = ::BIO_meth_new(::BIO_get_new_index() | BIO_TYPE_SOURCE_SINK, "http tls socket");
+			if (m) {
+				::BIO_meth_set_write_ex(m, bio_write);
+				::BIO_meth_set_read_ex(m, bio_read);
+				::BIO_meth_set_ctrl(m, bio_control);
+				::BIO_meth_set_create(m, [](BIO* bio) { ::BIO_set_init(bio, 1); return 1; });
+			}
+			return m;
+		}();
+		return shared;
+	}
+
+	asio::ip::tcp::socket socket_;
+	SSL* ssl_ = nullptr;
+	asio::error_code socket_error_;   // the last BIO call's socket error
+	bool eof_ = false;                // the socket read EOF
+};
+
 struct TlsAdmission {
 	std::atomic<std::size_t> pending{0};
 	std::atomic<std::size_t> active{0};
@@ -88,7 +278,7 @@ serve_tls_connection(asio::ip::tcp::socket socket, HttpHandler *handler, reactor
 	}
 	lease.handshake = true;
 	// Keep the context and stream alive through every original operation.
-	asio::ssl::stream<asio::ip::tcp::socket> stream(std::move(socket), *context);
+	TlsStream stream(std::move(socket), *context);
 	// Subtract elapsed time instead of adding an unbounded duration to a clock.
 	auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - accepted.accepted_at);
 	if (elapsed >= deadline) { fail(TlsFailure::deadline); co_return; }
