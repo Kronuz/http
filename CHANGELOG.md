@@ -18,7 +18,8 @@ Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://gith
   non-blocking socket through a BIO over it, and an operation that would block waits for the
   socket's readiness. The two 17,408 B staging buffers, the 34,928 B BIO pair and the engine's two
   timers are gone; OpenSSL's record buffers are still released between records. Errors map as
-  before: `close_notify` is `eof`, a TCP close without it `stream_truncated`.
+  before: `close_notify` is `eof`, a TCP close without it `stream_truncated`. Up to 8 KiB of small
+  buffers are joined into one record, as `asio::ssl::stream` did, so a reply is one record and one send.
 - **No read buffer while a connection waits.** The 64 KiB read scratch left the connection's
   coroutine frame: headers are read through the read-ahead watch's 4 KiB buffer, and a body through
   a 64 KiB buffer that exists from its first read to the next idle wait. A parse buffer that grew
