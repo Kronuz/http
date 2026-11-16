@@ -208,10 +208,9 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	if(TARGET reactor::tls)
 		add_executable(tls_asio_test test/tls_asio_test.cc)
 		target_link_libraries(tls_asio_test PRIVATE http reactor::tls)
-		# The headers of the OpenSSL that links come first: Apple clang finds another OpenSSL's headers
-		# in /usr/local/include before the imported target's -isystem directory.
-		get_filename_component(openssl_include "${OPENSSL_INCLUDE_DIR}" REALPATH)
-		target_compile_options(tls_asio_test BEFORE PRIVATE "-I${openssl_include}")
+		# The linked OpenSSL's headers as -I: clang searches /usr/local/include, where another OpenSSL's
+		# headers may be, before -isystem directories, and drops an -I that repeats one.
+		set_target_properties(tls_asio_test PROPERTIES NO_SYSTEM_FROM_IMPORTED ON)
 		add_test(NAME tls_asio COMMAND tls_asio_test)
 		set_tests_properties(tls_asio PROPERTIES TIMEOUT 60)
 	endif()
