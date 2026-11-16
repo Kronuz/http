@@ -149,18 +149,19 @@ private:
 	}
 
 	// The operation: SSL calls until one is done, waiting for readiness between them. A result
-	// found without waiting is posted, never delivered inside the initiating call.
+	// found without waiting is deferred, never delivered inside the initiating call: it runs after
+	// the current handler, from the thread's own queue, so it neither locks nor wakes the reactor.
 	template<class Call>
 	struct Operation {
 		TlsStream* stream;
 		Call call;
 		bool any;   // false: an empty buffer, done at once
-		enum class Phase { start, waiting, posted } phase = Phase::start;
+		enum class Phase { start, waiting, deferred } phase = Phase::start;
 		asio::error_code error;
 		std::size_t bytes = 0;
 		template<class Self>
 		void operator()(Self& self, asio::error_code wait_error = {}) {
-			if (phase == Phase::posted) { return finish(self); }
+			if (phase == Phase::deferred) { return finish(self); }
 			if (phase == Phase::waiting && wait_error) { error = wait_error; return finish(self); }
 			if (any) {
 				switch (stream->step(call, error, bytes)) {
@@ -170,9 +171,9 @@ private:
 				}
 			}
 			if (phase == Phase::start) {
-				phase = Phase::posted;
+				phase = Phase::deferred;
 				auto executor = self.get_io_executor();
-				return asio::post(executor, std::move(self));
+				return asio::defer(executor, std::move(self));
 			}
 			finish(self);
 		}

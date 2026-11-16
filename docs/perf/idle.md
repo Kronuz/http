@@ -29,7 +29,7 @@ operation waits for the socket's readiness (`async_wait`) and calls OpenSSL agai
 socket buffer is the staging, so an idle TLS connection holds the SSL object and its session
 state, and OpenSSL's record buffers are released between records. The error mapping is
 asio's (a `close_notify` is `eof`, a TCP close without it `stream_truncated`, OpenSSL errors
-in the ssl category), a result found without waiting is posted rather than delivered inside the
+in the ssl category), a result found without waiting is deferred (run after the current handler) rather than delivered inside the
 initiating call, one read and one write may be in flight at once, and a write joins up to 8 KiB
 of small buffers into one record, as before: a reply's head and body leave in one record and one
 send. The joined copy belongs to the write and is released when it completes.
