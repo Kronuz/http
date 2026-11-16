@@ -5,7 +5,9 @@
 #include <asio/ssl.hpp>
 #include <atomic>
 #include <functional>
+#include <algorithm>
 #include <iterator>
+#include <memory>
 #include <openssl/bio.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
@@ -92,14 +94,30 @@ public:
 		return start<void(asio::error_code, std::size_t)>(
 			[b](SSL* ssl, std::size_t& n) { return ::SSL_read_ex(ssl, b.data(), b.size(), &n) == 1; }, b.size() > 0, std::forward<Token>(token));
 	}
+	// Small buffers are joined into one record (up to kJoin bytes), as asio::ssl::stream does: a
+	// reply's head and body leave in one record and one send, not two.
 	template<class Buffers, class Token>
 	auto async_write_some(const Buffers& buffers, Token&& token) {
-		const asio::const_buffer b = first(buffers);
+		asio::const_buffer b = first(buffers);
+		std::unique_ptr<char[]> joined;
+		if (b.size() < kJoin) {
+			std::size_t total = 0;
+			for (auto it = asio::buffer_sequence_begin(buffers); it != asio::buffer_sequence_end(buffers) && total < kJoin; ++it) {
+				total += std::min(it->size(), kJoin - total);
+			}
+			if (total > b.size()) {
+				joined.reset(new char[total]);
+				asio::buffer_copy(asio::buffer(joined.get(), total), buffers);
+				b = asio::const_buffer(joined.get(), total);
+			}
+		}
 		return start<void(asio::error_code, std::size_t)>(
-			[b](SSL* ssl, std::size_t& n) { return ::SSL_write_ex(ssl, b.data(), b.size(), &n) == 1; }, b.size() > 0, std::forward<Token>(token));
+			[b, joined = std::move(joined)](SSL* ssl, std::size_t& n) { return ::SSL_write_ex(ssl, b.data(), b.size(), &n) == 1; },
+			b.size() > 0, std::forward<Token>(token));
 	}
 
 private:
+	static constexpr std::size_t kJoin = 8192;   // asio::ssl::stream's linearisation size
 	enum class Want { nothing, read, write };
 
 	// One SSL call: done (error and bytes set), or the readiness it waits for.

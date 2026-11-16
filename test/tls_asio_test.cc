@@ -282,6 +282,22 @@ int main() {
 		const auto a = c.response(), b = c.response(), d = c.response();
 		check(says_hello(a) && b.find("\r\n\r\n3:294") != std::string::npos && says_hello(d), "three pipelined requests are answered in order");
 	}
+	{  // a small reply's head and body arrive in one record (the server joins them, as asio::ssl::stream did)
+		// Each record read reports its 5-byte header (set before the handshake, so the record layer
+		// has it); an encrypted record's type byte is application data.
+		static int records = 0;
+		asio::ssl::context counting(asio::ssl::context::tls);
+		reactor::tls::configure(counting, reactor::tls::Options{"", "", cert}, reactor::tls::Role::Client);
+		::SSL_CTX_set_msg_callback(counting.native_handle(), [](int write, int, int type, const void* buf, std::size_t len, SSL*, void*) {
+			if (!write && type == SSL3_RT_HEADER && len >= 1 && *static_cast<const unsigned char*>(buf) == SSL3_RT_APPLICATION_DATA) { ++records; }
+		});
+		Client c(port, counting);
+		const bool first = says_hello(c.get("/"));   // the session tickets arrive around this one
+		records = 0;
+		const bool second = says_hello(c.get("/"));
+		std::printf("  records in a small reply: %d\n", records);
+		check(first && second && records == 1, "a small reply's head and body arrive in one TLS record");
+	}
 	{  // a body far larger than a record each way; the client reads the download slowly
 		Client c(port, trusting);
 		std::string body(kBig, '\0');
