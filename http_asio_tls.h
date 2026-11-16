@@ -4,6 +4,7 @@
 #include "http_asio.h"
 #include <asio/ssl.hpp>
 #include <atomic>
+#include <cstring>
 #include <functional>
 #include <algorithm>
 #include <iterator>
@@ -49,10 +50,11 @@ inline TlsFailure classify(const asio::error_code& error) {
 	}
 }
 // A TLS connection that keeps no buffers of its own: OpenSSL reads and writes the socket
-// through a BIO over it, and an operation that would block waits for the socket to be ready.
-// Idle, it holds the SSL object and what OpenSSL keeps of the session, nothing of the records
-// (SSL_MODE_RELEASE_BUFFERS). OpenSSL reads ahead, so a record costs one recv, and every read asks
-// OpenSSL before it waits for the socket. One read and one write may be in flight at once.
+// through a BIO over it. A read that needs bytes receives them through Asio into the caller's
+// buffer (speculative, so the reactor is not re-armed per wait), and the BIO serves them from a
+// copy held only until OpenSSL takes it. Idle, it holds the SSL object and what OpenSSL keeps of
+// the session, nothing of the records (SSL_MODE_RELEASE_BUFFERS). The handshake, writes and small
+// reads read the socket directly and wait for readiness. One read and one write may be in flight.
 class TlsStream {
 public:
 	using executor_type = asio::ip::tcp::socket::executor_type;
@@ -73,7 +75,8 @@ public:
 	}
 	// Only with no operation in flight: the BIO is pointed at the new stream.
 	TlsStream(TlsStream&& other) noexcept
-		: socket_(std::move(other.socket_)), ssl_(std::exchange(other.ssl_, nullptr)), socket_error_(other.socket_error_), eof_(other.eof_) {
+		: socket_(std::move(other.socket_)), ssl_(std::exchange(other.ssl_, nullptr)), input_(std::move(other.input_)),
+		  input_begin_(other.input_begin_), input_end_(other.input_end_), socket_error_(other.socket_error_), eof_(other.eof_) {
 		if (ssl_) { ::BIO_set_data(::SSL_get_rbio(ssl_), this); }
 	}
 	TlsStream& operator=(TlsStream&&) = delete;
@@ -88,13 +91,14 @@ public:
 	auto async_handshake(asio::ssl::stream_base::handshake_type type, Token&& token) {
 		if (type == asio::ssl::stream_base::server) { ::SSL_set_accept_state(ssl_); }
 		else { ::SSL_set_connect_state(ssl_); }
-		return start<void(asio::error_code)>([](SSL* ssl, std::size_t& n) { n = 0; return ::SSL_do_handshake(ssl) == 1; }, true, std::forward<Token>(token));
+		return start<void(asio::error_code)>([](SSL* ssl, std::size_t& n) { n = 0; return ::SSL_do_handshake(ssl) == 1; }, true, {}, std::forward<Token>(token));
 	}
 	template<class Buffers, class Token>
 	auto async_read_some(const Buffers& buffers, Token&& token) {
 		const asio::mutable_buffer b = first(buffers);
 		return start<void(asio::error_code, std::size_t)>(
-			[b](SSL* ssl, std::size_t& n) { return ::SSL_read_ex(ssl, b.data(), b.size(), &n) == 1; }, b.size() > 0, std::forward<Token>(token));
+			[b](SSL* ssl, std::size_t& n) { return ::SSL_read_ex(ssl, b.data(), b.size(), &n) == 1; }, b.size() > 0,
+			b.size() >= kMinReceive ? b : asio::mutable_buffer(), std::forward<Token>(token));
 	}
 	// Small buffers are joined into one record (up to kJoin bytes), as asio::ssl::stream does: a
 	// reply's head and body leave in one record and one send, not two.
@@ -115,20 +119,25 @@ public:
 		}
 		return start<void(asio::error_code, std::size_t)>(
 			[b, joined = std::move(joined)](SSL* ssl, std::size_t& n) { return ::SSL_write_ex(ssl, b.data(), b.size(), &n) == 1; },
-			b.size() > 0, std::forward<Token>(token));
+			b.size() > 0, {}, std::forward<Token>(token));
 	}
 
 private:
-	static constexpr std::size_t kJoin = 8192;   // asio::ssl::stream's linearisation size
+	static constexpr std::size_t kJoin = 8192;        // asio::ssl::stream's linearisation size
+	static constexpr std::size_t kMinReceive = 512;   // a smaller read waits and reads directly
 	enum class Want { nothing, read, write };
 
 	// One SSL call: done (error and bytes set), or the readiness it waits for.
+	// With `receiving`, the BIO serves only received bytes and an empty input wants a read.
 	template<class Call>
-	Want step(Call& call, asio::error_code& error, std::size_t& bytes) {
+	Want step(Call& call, bool receiving, asio::error_code& error, std::size_t& bytes) {
 		::ERR_clear_error();
 		socket_error_ = {};
 		std::size_t n = 0;
-		if (call(ssl_, n)) { error = {}; bytes = n; return Want::nothing; }
+		receiving_ = receiving;
+		const bool done = call(ssl_, n);
+		receiving_ = false;
+		if (done) { error = {}; bytes = n; return Want::nothing; }
 		bytes = 0;
 		switch (::SSL_get_error(ssl_, 0)) {
 		case SSL_ERROR_WANT_READ: return Want::read;
@@ -150,24 +159,38 @@ private:
 		return Want::nothing;
 	}
 
-	// The operation: SSL calls until one is done, waiting for readiness between them. A result
-	// found without waiting is deferred, never delivered inside the initiating call: it runs after
-	// the current handler, from the thread's own queue, so it neither locks nor wakes the reactor.
+	// The operation: SSL calls until one is done, receiving or waiting for readiness between them.
+	// A result found without either is deferred, never delivered inside the initiating call: it
+	// runs after the current handler, from the thread's own queue, so it neither locks nor wakes
+	// the reactor. A read with `room` receives into it: the caller's buffer, unused until then.
 	template<class Call>
 	struct Operation {
 		TlsStream* stream;
 		Call call;
-		bool any;   // false: an empty buffer, done at once
+		bool any;                     // false: an empty buffer, done at once
+		asio::mutable_buffer room;    // empty: wait for readiness instead of receiving
 		enum class Phase { start, waiting, deferred } phase = Phase::start;
 		asio::error_code error;
 		std::size_t bytes = 0;
+		template<class Self>
+		void operator()(Self& self, asio::error_code received_error, std::size_t received) {
+			if (received_error == asio::error::eof) { stream->eof_ = true; }   // OpenSSL reports it
+			else if (received_error) { error = received_error; return finish(self); }
+			else { stream->take(room, received); }
+			(*this)(self);
+		}
 		template<class Self>
 		void operator()(Self& self, asio::error_code wait_error = {}) {
 			if (phase == Phase::deferred) { return finish(self); }
 			if (phase == Phase::waiting && wait_error) { error = wait_error; return finish(self); }
 			if (any) {
-				switch (stream->step(call, error, bytes)) {
-				case Want::read: return wait(self, asio::socket_base::wait_read);
+				switch (stream->step(call, room.size() > 0, error, bytes)) {
+				case Want::read:
+					if (room.size() > 0) {
+						phase = Phase::waiting;
+						return stream->socket_.async_receive(room, std::move(self));
+					}
+					return wait(self, asio::socket_base::wait_read);
 				case Want::write: return wait(self, asio::socket_base::wait_write);
 				case Want::nothing: break;
 				}
@@ -191,8 +214,15 @@ private:
 		}
 	};
 	template<class Signature, class Call, class Token>
-	auto start(Call call, bool any, Token&& token) {
-		return asio::async_compose<Token, Signature>(Operation<Call>{this, std::move(call), any}, token, socket_);
+	auto start(Call call, bool any, asio::mutable_buffer room, Token&& token) {
+		return asio::async_compose<Token, Signature>(Operation<Call>{this, std::move(call), any, room}, token, socket_);
+	}
+	// Keeps `size` received bytes for the BIO; the read's buffer is about to take the plaintext.
+	void take(asio::mutable_buffer room, std::size_t size) {
+		input_.reset(new char[size]);
+		std::memcpy(input_.get(), room.data(), size);
+		input_begin_ = 0;
+		input_end_ = size;
 	}
 
 	template<class Buffers>
@@ -218,6 +248,15 @@ private:
 	static int bio_read(BIO* bio, char* data, std::size_t size, std::size_t* read) {
 		auto* self = static_cast<TlsStream*>(::BIO_get_data(bio));
 		::BIO_clear_retry_flags(bio);
+		if (self->input_begin_ < self->input_end_) {   // received bytes first; freed once taken
+			*read = std::min(size, self->input_end_ - self->input_begin_);
+			std::memcpy(data, self->input_.get() + self->input_begin_, *read);
+			self->input_begin_ += *read;
+			if (self->input_begin_ == self->input_end_) { self->input_.reset(); self->input_begin_ = self->input_end_ = 0; }
+			return 1;
+		}
+		if (self->receiving_ && !self->eof_) { ::BIO_set_retry_read(bio); *read = 0; return 0; }
+		if (self->eof_) { *read = 0; return 0; }
 		asio::error_code error;
 		*read = self->socket_.read_some(asio::mutable_buffer(data, size), error);
 		if (!error) { return 1; }
@@ -249,7 +288,10 @@ private:
 
 	asio::ip::tcp::socket socket_;
 	SSL* ssl_ = nullptr;
+	std::unique_ptr<char[]> input_;   // received bytes OpenSSL has not taken yet
+	std::size_t input_begin_ = 0, input_end_ = 0;
 	asio::error_code socket_error_;   // the last BIO call's socket error
+	bool receiving_ = false;          // a read's SSL call: the BIO does not read the socket
 	bool eof_ = false;                // the socket read EOF
 };
 
