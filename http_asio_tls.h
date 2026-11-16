@@ -51,7 +51,8 @@ inline TlsFailure classify(const asio::error_code& error) {
 // A TLS connection that keeps no buffers of its own: OpenSSL reads and writes the socket
 // through a BIO over it, and an operation that would block waits for the socket to be ready.
 // Idle, it holds the SSL object and what OpenSSL keeps of the session, nothing of the records
-// (SSL_MODE_RELEASE_BUFFERS). One read and one write may be in flight at once, on the loop.
+// (SSL_MODE_RELEASE_BUFFERS). OpenSSL reads ahead, so a record costs one recv, and every read asks
+// OpenSSL before it waits for the socket. One read and one write may be in flight at once.
 class TlsStream {
 public:
 	using executor_type = asio::ip::tcp::socket::executor_type;
@@ -68,6 +69,7 @@ public:
 		::BIO_set_data(bio, this);
 		::SSL_set_bio(ssl_, bio, bio);
 		::SSL_set_mode(ssl_, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_RELEASE_BUFFERS);
+		::SSL_set_read_ahead(ssl_, 1);   // a record's header and body in one recv; released when empty
 	}
 	// Only with no operation in flight: the BIO is pointed at the new stream.
 	TlsStream(TlsStream&& other) noexcept
