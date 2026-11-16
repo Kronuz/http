@@ -53,6 +53,7 @@ run_one() {
 	python3 bench/idle-cost/run.py "$binary" $tls --count "$COUNT" --warm-bytes "$WARM" --idle-seconds "$IDLE" \
 		--base-port "$base" --source-port 30000 --label "$arm/$mode/$round" > "$file"
 	echo "# ran $arm $mode round $round: $(tail -1 "$file")"
+	if [ -n "${JOB_OUT:-}" ]; then mkdir -p "$JOB_OUT/runs" && cp "$file" "$JOB_OUT/runs/"; fi
 }
 
 case ${1:-} in
@@ -73,7 +74,8 @@ run)
 			for a in $arms; do run_one "$a" "$mode" owners "$BINS/build-$a/http_idle_owners"; done
 		fi
 	done
-	python3 bench/idle-cost/summarize.py "$OUT/runs" | tee "$OUT/summary.md"
+	python3 bench/idle-cost/summarize.py "$OUT/runs" > "$OUT/summary.md"
+	cat "$OUT/summary.md"
 	if [ -n "${JOB_OUT:-}" ]; then mkdir -p "$JOB_OUT" && cp -R "$OUT/runs" "$OUT/summary.md" "$JOB_OUT/"; fi
 	;;
 load)
@@ -84,11 +86,13 @@ load)
 	set --
 	for a in $ARMS; do set -- "$@" --arm "${a%%=*}=$BINS/build-${a%%=*}/http_idle_cost"; done
 	set -- "$@" --arm "aa=$BINS/aa"
-	for row in ${LOAD_ROWS:-"tls,/,1,keep tls,/,64,keep tls,/download/1048576,8,keep tls,/,8,close plain,/download/1048576,8,keep"}; do
-		set -- "$@" --row "$row"
-	done
+	# An assignment does not field-split; the unquoted $rows does, one row per word.
+	rows=${LOAD_ROWS:-tls,/,1,keep tls,/,64,keep tls,/download/1048576,8,keep tls,/,8,close plain,/download/1048576,8,keep}
+	for row in $rows; do set -- "$@" --row "$row"; done
 	mkdir -p "$OUT"
-	python3 bench/idle-cost/load_ab.py "$@" --rounds "${LOAD_ROUNDS:-5}" --seconds "${LOAD_SECONDS:-3}" --out "$OUT/load.jsonl" | tee "$OUT/load.txt"
+	python3 bench/idle-cost/load_ab.py "$@" --rounds "${LOAD_ROUNDS:-5}" --seconds "${LOAD_SECONDS:-3}" --out "$OUT/load.jsonl" > "$OUT/load.txt" ||
+		{ cat "$OUT/load.txt"; exit 1; }
+	cat "$OUT/load.txt"
 	if [ -n "${JOB_OUT:-}" ]; then mkdir -p "$JOB_OUT" && cp "$OUT/load.jsonl" "$OUT/load.txt" "$JOB_OUT/"; fi
 	;;
 *) echo "usage: $0 build|run|load" >&2; exit 2 ;;

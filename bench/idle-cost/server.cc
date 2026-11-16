@@ -9,6 +9,7 @@
 #include <openssl/x509v3.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -371,5 +372,8 @@ int main(int argc, char** argv) {
 			  << ",\"request_object\":" << sizeof(http::Request) << ",\"timer_object\":" << sizeof(asio::steady_timer) << "}" << std::endl;
 	snapshot("baseline", services);
 	for (std::string stage; std::getline(std::cin, stage) && stage != "quit";) { snapshot(stage, services); }
+	const auto stopping = std::chrono::steady_clock::now();
 	for (auto& service : services) { service->stop(); }
+	std::cerr << "# server: stopped in "
+			  << std::chrono::duration<double>(std::chrono::steady_clock::now() - stopping).count() << " s" << std::endl;
 }

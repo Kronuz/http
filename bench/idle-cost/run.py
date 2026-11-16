@@ -95,6 +95,10 @@ def main() -> None:
     started = time.monotonic()
     timing: dict[str, float] = {}
 
+    def progress(what: str) -> None:
+        # The job log's record of where a run spends its time, as it happens.
+        print(f"# {args.label} {time.monotonic() - started:.1f}s: {what}", file=sys.stderr, flush=True)
+
     def ask(stage: str) -> dict[str, object]:
         assert server.stdin and server.stdout
         server.stdin.write(stage + "\n")
@@ -177,6 +181,7 @@ def main() -> None:
         if len(clients) != args.count:
             raise RuntimeError(f"setup stopped at {len(clients)} of {args.count}")
         timing["setup_s"] = time.monotonic() - started
+        progress(f"{len(clients)} connections open")
         time.sleep(2)
         rows = []
         for stage in ("idle-0", "idle-1", "idle-2"):
@@ -191,17 +196,23 @@ def main() -> None:
             rows.append(row)
             print(json.dumps(row), flush=True)
         timing["measured_s"] = time.monotonic() - started
+        progress("idle snapshots taken")
     except BaseException:
         print(json.dumps({"invalid_run_connections": len(clients)}), flush=True)
         raise
     finally:
+        progress(f"teardown: closing {len(clients)} connections")
         linger = struct.pack("ii", 1, 0)
-        for peer in clients:
+        for closed, peer in enumerate(clients, 1):
             try:
                 peer.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
             except OSError:
                 pass
             peer.close()
+            if closed % 10000 == 0:
+                progress(f"teardown: {closed} closed")
+        timing["closed_s"] = time.monotonic() - started
+        progress("teardown: connections closed; stopping the server")
         if server.poll() is None:
             server.stdin.write("quit\n")
             server.stdin.flush()
@@ -211,6 +222,7 @@ def main() -> None:
                 print(json.dumps({"server_killed_by_driver": True}), flush=True)
                 server.kill()
                 server.wait()
+        progress("teardown: server stopped")
         timing["total_s"] = time.monotonic() - started
         print(json.dumps({"timing": timing, "server_exit": server.returncode}), flush=True)
     if server.returncode:
