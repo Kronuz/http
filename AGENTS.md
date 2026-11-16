@@ -36,6 +36,9 @@ http_owned_stream.h   OwnedStreamCapability: owned response streaming (ResponseW
 http_owned_stream_asio.h  Its Asio implementation, plain TCP and TLS.
 http_owned_storage.h  Owned chunk storage and allocation refusal for owned streams.
 http_asio_tls.h       Optional TLS adapter (tls_connection_factory); the only OpenSSL user.
+                      Its connection is a detail::TlsStream: OpenSSL reads and writes the
+                      non-blocking socket through a BIO over it and waits for readiness, so
+                      an idle TLS connection keeps no staging or BIO buffers.
 reactor (dep)         The generic Asio server runtime (Kronuz/reactor): the shared-nothing
                       reactor pool, accept/bind strategies, admission gate, and graceful
                       shutdown. Extracted from http_asio.h so other services share it.
@@ -59,6 +62,9 @@ test/readahead_test.cc ctest "readahead": the connection's read-ahead watch (its
                       pipelined request inside the window at every alignment, a flood of
                       pipelined requests, bodies cut short, request smuggling, replies sent at
                       once, and the sliced reply write.
+test/tls_asio_test.cc ctest "tls_asio": the TLS factory and its failure hook, and TlsStream: keep-
+                      alive across a long idle, pipelining, large bodies under a slow reader,
+                      close with and without close_notify, stop with idle connections.
 test/timeouts_test.cc ctest "timeouts": the idle, header and inactivity timeouts over real TCP,
                       slow clients under and over them, stalled and slow readers.
 docs/mechanisms/coroutine-handlers.md  How a request runs, is cancelled, admitted and stopped.
@@ -69,6 +75,11 @@ docs/AUDIT.md         Transport audit findings with their before/after measureme
 docs/perf/timeouts-cpu.md  Per-request CPU and latency against a minimal Asio server, with the
                       timeouts off and on, what each part of the connection input costs, and
                       how to reproduce it.
+docs/perf/idle.md     Where an idle connection's bytes go, plain and TLS, by owner; the
+                      numbers at 10K and 100K idle and idle connections per GiB.
+bench/idle-cost/      The idle memory bench behind docs/perf/idle.md: server.cc holds the
+                      connections run.py opens; ab.sh builds and runs arms; summarize.py and
+                      load_ab.py (wrk throughput, latency, CPU per request) report.
 test/asio_test.cc     ctest "asio": the transport end-to-end over real TCP — suspended
                       handlers, 503 backpressure, N reactors (both bind modes), keep-alive,
                       compression, streamed request bodies, error mapping.
