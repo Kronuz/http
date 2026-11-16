@@ -198,6 +198,9 @@ int main() {
 	if (!CRYPTO_set_mem_functions(counted_malloc, counted_realloc, counted_free)) { return EXIT_FAILURE; }
 	client_thread = true;
 	std::signal(SIGPIPE, SIG_IGN);
+	std::printf("  OpenSSL headers %s, library %s\n", OPENSSL_VERSION_TEXT, OpenSSL_version(OPENSSL_VERSION));
+	check(OPENSSL_version_major() == OPENSSL_VERSION_MAJOR && OPENSSL_version_minor() == OPENSSL_VERSION_MINOR,
+		"the OpenSSL headers compiled against are the library that runs");
 	char dir[] = "/tmp/http_tls_XXXXXX";
 	if (!::mkdtemp(dir)) { return EXIT_FAILURE; }
 	const std::string cert = std::string(dir) + "/cert.pem", key = std::string(dir) + "/key.pem";
