@@ -2,8 +2,11 @@
 
 One run: start the server (plain or TLS), open every connection from this process (one GET,
 or one POST of --warm-bytes, each reply checked), wait, snapshot three times while idle, then
-reset every connection (SO_LINGER 0, so no FIN_WAIT or TIME_WAIT outlives the run) and stop
-the server. Every line printed is JSON; a failed or short run raises and prints no idle rows.
+stop the server and exit with every connection set to reset (SO_LINGER 0), so no FIN_WAIT or
+TIME_WAIT outlives the run. The process exits without closing them one by one: on macOS a
+reset close costs time in proportion to the connections still open, and the exit's teardown
+is several times cheaper at 100K. Every line printed is JSON; a failed or short run raises
+and prints no idle rows.
 """
 
 from __future__ import annotations
@@ -201,18 +204,13 @@ def main() -> None:
         print(json.dumps({"invalid_run_connections": len(clients)}), flush=True)
         raise
     finally:
-        progress(f"teardown: closing {len(clients)} connections")
         linger = struct.pack("ii", 1, 0)
-        for closed, peer in enumerate(clients, 1):
+        for peer in clients:
             try:
                 peer.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
             except OSError:
                 pass
-            peer.close()
-            if closed % 10000 == 0:
-                progress(f"teardown: {closed} closed")
-        timing["closed_s"] = time.monotonic() - started
-        progress("teardown: connections closed; stopping the server")
+        progress(f"teardown: {len(clients)} connections set to reset; stopping the server")
         if server.poll() is None:
             server.stdin.write("quit\n")
             server.stdin.flush()
@@ -222,11 +220,13 @@ def main() -> None:
                 print(json.dumps({"server_killed_by_driver": True}), flush=True)
                 server.kill()
                 server.wait()
-        progress("teardown: server stopped")
+        progress("teardown: server stopped; exiting, the kernel resets the connections")
         timing["total_s"] = time.monotonic() - started
         print(json.dumps({"timing": timing, "server_exit": server.returncode}), flush=True)
     if server.returncode:
         raise RuntimeError(f"server exit {server.returncode}")
+    sys.stderr.flush()
+    os._exit(0)  # skips closing each connection; the exit resets them all
 
 
 if __name__ == "__main__":

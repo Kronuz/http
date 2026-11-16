@@ -10,7 +10,8 @@
 #                                     A/A copy of the first, through load_ab.py
 #
 # Environment (defaults): ARMS="head=." (e.g. "base=$JOB_REF_BASE head=."), MODES="plain tls",
-#   COUNT=10000, ROUNDS=3, WARM=0 (bytes each connection POSTs before idling), OWNERS=1,
+#   COUNT=10000, ROUNDS=3, FIRST_ROUND=0 (the first round's number, so rounds split across jobs
+#   merge into one runs directory), WARM=0 (bytes each connection POSTs before idling), OWNERS=1,
 #   IDLE=5 (seconds between the first two idle snapshots), OUT=.scratch/idle/out,
 #   BINS=.scratch/idle (builds, shared by runs). Results: $OUT/runs/*.jsonl and
 #   $OUT/summary.md, copied to $JOB_OUT when a campaign job runs it.
@@ -20,6 +21,7 @@ ARMS=${ARMS:-"head=."}
 MODES=${MODES:-"plain tls"}
 COUNT=${COUNT:-10000}
 ROUNDS=${ROUNDS:-3}
+FIRST_ROUND=${FIRST_ROUND:-0}
 WARM=${WARM:-0}
 OWNERS=${OWNERS:-1}
 IDLE=${IDLE:-5}
@@ -64,8 +66,8 @@ run)
 	arms=""; for a in $ARMS; do arms="$arms ${a%%=*}"; done
 	reversed=""; for a in $arms; do reversed="$a $reversed"; done
 	for mode in $MODES; do
-		r=0
-		while [ "$r" -lt "$ROUNDS" ]; do
+		r=$FIRST_ROUND
+		while [ "$r" -lt $((FIRST_ROUND + ROUNDS)) ]; do
 			order=$arms; [ $((r % 2)) -eq 1 ] && order=$reversed
 			for a in $order; do run_one "$a" "$mode" "$r" "$BINS/build-$a/http_idle_cost"; done
 			r=$((r + 1))
