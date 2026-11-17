@@ -298,6 +298,43 @@ int main() {
 		std::printf("  records in a small reply: %d\n", records);
 		check(first && second && records == 1, "a small reply's head and body arrive in one TLS record");
 	}
+	{  // TlsStream: a write found done completes in place; a write started inside that completion is deferred
+		asio::io_context io;
+		asio::ip::tcp::acceptor acceptor(io, {asio::ip::make_address("127.0.0.1"), 0});
+		std::string got;
+		std::thread peer([&, p = acceptor.local_endpoint().port()] {
+			try {
+				asio::io_context client_io;
+				asio::ssl::stream<asio::ip::tcp::socket> s(client_io, trusting);
+				s.next_layer().connect({asio::ip::make_address("127.0.0.1"), p});
+				reactor::tls::bind_hostname(s.native_handle(), "localhost");
+				s.handshake(asio::ssl::stream_base::client);
+				char b[16];
+				std::size_t n = 0;
+				while (n < 10) { n += s.read_some(asio::buffer(b + n, sizeof b - n)); }
+				got.assign(b, n);
+			} catch (const std::exception&) {}
+		});
+		http::detail::TlsStream tls(acceptor.accept(), *server);
+		asio::error_code handshake = asio::error::would_block;
+		tls.async_handshake(asio::ssl::stream_base::server, [&](asio::error_code e) { handshake = e; });
+		io.run();
+		io.restart();
+		const std::array<asio::const_buffer, 2> one{asio::buffer("hel", 3), asio::buffer("lo", 2)}, two{asio::buffer("wor", 3), asio::buffer("ld", 2)};
+		bool first = false, second = false, inside = false, second_inside = true;
+		asio::async_write(tls, one, [&](asio::error_code e, std::size_t) {
+			first = !e;
+			inside = true;
+			asio::async_write(tls, two, [&](asio::error_code e2, std::size_t) { second = !e2; second_inside = inside; });
+			inside = false;
+		});
+		const bool in_place = first;
+		io.run();
+		peer.join();
+		check(!handshake && in_place, "a small TLS write found done completes in place");
+		check(second && !second_inside, "a TLS write started inside that completion is deferred, not nested");
+		check(got == "helloworld", "both writes arrive, in order");
+	}
 	{  // a body far larger than a record each way; the client reads the download slowly
 		Client c(port, trusting);
 		std::string body(kBig, '\0');
