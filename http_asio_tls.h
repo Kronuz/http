@@ -71,7 +71,6 @@ public:
 		::BIO_set_data(bio, this);
 		::SSL_set_bio(ssl_, bio, bio);
 		::SSL_set_mode(ssl_, SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER | SSL_MODE_RELEASE_BUFFERS);
-		::SSL_set_read_ahead(ssl_, 1);   // a record's header and body in one recv; released when empty
 	}
 	// Only with no operation in flight: the BIO is pointed at the new stream.
 	TlsStream(TlsStream&& other) noexcept
@@ -91,6 +90,8 @@ public:
 	auto async_handshake(asio::ssl::stream_base::handshake_type type, Token&& token) {
 		if (type == asio::ssl::stream_base::server) { ::SSL_set_accept_state(ssl_); }
 		else { ::SSL_set_connect_state(ssl_); }
+		// After the state, which resets the record layer: a record's header and body in one recv.
+		::SSL_set_read_ahead(ssl_, 1);
 		return start<void(asio::error_code)>([](SSL* ssl, std::size_t& n) { n = 0; return ::SSL_do_handshake(ssl) == 1; }, true, {}, std::forward<Token>(token));
 	}
 	template<class Buffers, class Token>
