@@ -240,7 +240,9 @@ void snapshot(const std::string& stage, const std::vector<std::unique_ptr<http::
 			  << ",\"allocator_live\":" << live << ",\"allocator_reserved\":" << reserved
 			  << ",\"openssl_live\":" << ssl_bytes.load() << ",\"openssl_blocks\":" << ssl_blocks.load()
 			  << ",\"voluntary_switches\":" << usage.ru_nvcsw << ",\"involuntary_switches\":" << usage.ru_nivcsw
-			  << ",\"cpu_us\":" << (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1000000LL + usage.ru_utime.tv_usec + usage.ru_stime.tv_usec;
+			  << ",\"cpu_us\":" << (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1000000LL + usage.ru_utime.tv_usec + usage.ru_stime.tv_usec
+			  << ",\"user_us\":" << usage.ru_utime.tv_sec * 1000000LL + usage.ru_utime.tv_usec
+			  << ",\"system_us\":" << usage.ru_stime.tv_sec * 1000000LL + usage.ru_stime.tv_usec;
 #if HTTP_IDLE_COUNT
 	std::cout << ",\"asio\":{";
 	bool first = true;

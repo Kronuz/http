@@ -10,6 +10,8 @@
 #                                     A/A copy of the first, through load_ab.py
 #   sh bench/idle-cost/ab.sh count    the load rows on http_idle_count, syscalls counted: Asio
 #                                     handlers and syscalls per request per arm (not timing)
+#   sh bench/idle-cost/ab.sh profile  the load rows with /usr/bin/sample attached: microseconds
+#                                     per request by library and frame per arm (sample_summary.py)
 #
 # Environment (defaults): ARMS="head=." (e.g. "base=$JOB_REF_BASE head=."), MODES="plain tls",
 #   COUNT=10000, ROUNDS=3, FIRST_ROUND=0 (the first round's number, so rounds split across jobs
@@ -125,5 +127,21 @@ for (row, arm), runs in sorted(rows.items()):
 PY
 	if [ -n "${JOB_OUT:-}" ]; then mkdir -p "$JOB_OUT" && cp "$OUT/count.jsonl" "$OUT/count.txt" "$JOB_OUT/"; fi
 	;;
-*) echo "usage: $0 build|run|load|count" >&2; exit 2 ;;
+profile)
+	# "aa" is a copy of the first arm: its deltas are the profile's noise.
+	build_all
+	first=${ARMS%% *}; first=${first%%=*}
+	cp "$BINS/build-$first/http_idle_cost" "$BINS/aa"
+	set --
+	for a in $ARMS; do set -- "$@" --arm "${a%%=*}=$BINS/build-${a%%=*}/http_idle_cost"; done
+	set -- "$@" --arm "aa=$BINS/aa"
+	rows=${LOAD_ROWS:-tls,/,1,keep tls,/,8,close}
+	for row in $rows; do set -- "$@" --row "$row"; done
+	rm -rf "$OUT/samples" && mkdir -p "$OUT/samples"
+	python3 bench/idle-cost/load_ab.py "$@" --rounds "${LOAD_ROUNDS:-3}" --seconds "${LOAD_SECONDS:-10}" \
+		--out "$OUT/profile.jsonl" --sample-dir "$OUT/samples" > "$OUT/profile.txt" || { cat "$OUT/profile.txt"; exit 1; }
+	python3 bench/idle-cost/sample_summary.py "$OUT/profile.jsonl" "$OUT/samples" | tee -a "$OUT/profile.txt"
+	if [ -n "${JOB_OUT:-}" ]; then mkdir -p "$JOB_OUT" && cp -R "$OUT/profile.jsonl" "$OUT/profile.txt" "$OUT/samples" "$JOB_OUT/"; fi
+	;;
+*) echo "usage: $0 build|run|load|count|profile" >&2; exit 2 ;;
 esac
