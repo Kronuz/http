@@ -208,16 +208,21 @@ the ratio to before, min-max in parentheses; runs in `docs/perf/idle/small-reply
 | TLS `/` c64 keep-alive | 0.953 (0.891-1.085) | 1.001 (0.939-1.112) | 1.017 (0.885-1.172) | 1.046 (0.923-1.121) | 1.000 (0.901-1.060) | 0.986 (0.854-1.129) |
 | TLS `/` c8 close | 1.052 (0.944-1.111) | 1.037 (0.981-1.073) | 1.055 (0.878-1.218) | 0.943 (0.919-1.059) | 0.980 (0.897-1.018) | 0.980 (0.832-1.128) |
 
-- **Every cell of after is inside the A/A band;** ad6771f's c1 CPU (1.094) is not. At one connection a small reply costs +1.17 us CPU per request
-  over before (median of the per-round differences: user +1.37, system -0.20) on a 32.1 us request;
-  ad6771f's cost +2.61 us in the same job. The two kept copies account for 0.54 us of it.
-- **After against ad6771f:** at 64 connections 3.2% less CPU per request (0.968, 0.945-0.995) and
-  3.3% more requests per second (1.033, 1.006-1.054), every round in the same direction but inside
-  the A/A band, so not counted; at one connection 1.009 (0.882-1.038).
+- **Every cell of after is inside the A/A band.** At one connection a small reply costs +1.17 us
+  CPU per request over before (1.037x; median of the per-round differences: user +1.37,
+  system -0.20) on a 32.1 us request. The two kept copies account for 0.54 us of it.
+- **After against ad6771f, paired in the same rounds:** at one connection CPU per request is 1.009
+  (0.882-1.038), +0.28 us, and after costs the same or more in 3 of 5 rounds; E3's effect at c1 is
+  unresolved. The two medians' gap against before (1.037 against 1.094) comes from rounds where
+  ad6771f ran high, so it is not a measured difference. E3 stays for the Asio rule and because it
+  runs the same handlers as the old stream (counts, job 261116-200646-529fc3). At 64 connections 3.2%
+  less CPU per request (0.968, 0.945-0.995) and 3.3% more requests per second (1.033, 1.006-1.054),
+  every round in the same direction but inside the A/A band, so not counted.
 - **The close path:** ad6771f's 0.967x requests per second does not reproduce (1.052 here, 1.049 in
   job 261116-190832-1dac8f), and after is 1.037. A handshake takes 9.51 `recvfrom` per connection
-  against 4.75 before (`EAGAIN` 2.10 against 2.00), which costs about 3.5 us of system time per
-  connection (system 1.064x) and is outweighed by 15.6 us less user time. Setting read-ahead after
+  against 4.75 before (`EAGAIN` 2.10 against 2.00), twice the `recvfrom` count. The per-connection
+  system (1.064x) and user (0.972x) time deltas are inside the A/A band, so neither is a measured
+  cost or saving of those recvs. Setting read-ahead after
   the handshake state (http:8368ea9) leaves them at 9.20 (job 261116-200140-8e96ee); their cause
   is open.
 

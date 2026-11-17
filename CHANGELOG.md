@@ -8,10 +8,12 @@ Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://gith
 
 `bench/idle-cost`, i9-9980HK, exclusive job 261116-200643-d30410 against http:a17b197 with an A/A
 arm: a small TLS reply on one kept-alive connection costs +1.17 us CPU per request over the old
-stream (1.037x, band 0.874-1.066), against +2.61 us for http:ad6771f in the same job; at 64
-connections 1.000x, and TLS with a handshake per request serves 1.037x requests per second. Every
-cell is inside the A/A band. Idle TLS stays at 40,075 B per connection at 10K. The attribution is
-in `docs/perf/idle.md`, "Small TLS replies".
+stream (1.037x, inside the A/A band 0.874-1.066); at 64 connections 1.000x, and TLS with a
+handshake per request serves 1.037x requests per second, both inside the band. Against
+http:ad6771f paired in the same rounds, the c1 CPU is 1.009x (0.882-1.038): the change's effect at
+one connection is unresolved. It stays for the Asio rule and for running the old stream's handlers
+(counts, job 261116-200646-529fc3). Idle TLS stays at 40,075 B per connection at 10K. The
+attribution is in `docs/perf/idle.md`, "Small TLS replies".
 
 ### Changed
 
