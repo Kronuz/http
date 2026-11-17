@@ -20,7 +20,22 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-IDLE = {"kevent", "__psynch_cvwait", "__semwait_signal", "read", "__workq_kernreturn", "mach_msg2_trap", "__select"}
+IDLE = {
+    "kevent",
+    "__psynch_cvwait",
+    "__semwait_signal",
+    "read",
+    "__read_nocancel",
+    "__workq_kernreturn",
+    "mach_msg2_trap",
+    "__select",
+}
+# Allocator frames: their own time is charged to the nearest caller that is none of them.
+ALLOCATOR = re.compile(
+    r"^(malloc|calloc|realloc|free|_malloc|_free|szone_|tiny_|small_|nanov2_|_nanov2|mvm_|malloc_|operator new|"
+    r"operator delete|CRYPTO_malloc|CRYPTO_free|CRYPTO_zalloc|CRYPTO_clear_free|\(anonymous namespace\)::ssl_(malloc|free|realloc)|"
+    r"_platform_|__bzero|OPENSSL_cleanse)"
+)
 LINE = re.compile(r"^([ +!:|]*)(\d+) (.*)$")
 FRAME = re.compile(r"^(.*?)  \(in (.*?)\)")
 # Inclusive time under these frames, outermost occurrence only.
@@ -115,20 +130,27 @@ def measure(path: Path, rps: float) -> dict[str, float]:
     out: dict[str, float] = defaultdict(float)
     anchors = {k: re.compile(v) for k, v in ANCHORS.items()}
 
-    def walk(node: Node, active: frozenset[str]) -> None:
+    def walk(node: Node, active: frozenset[str], caller: str = "?") -> None:
         here = set(active)
         for key, pattern in anchors.items():
             if key not in active and pattern.search(node.symbol):
                 out[f"anchor {key}"] += node.count * scale
                 here.add(key)
         own = node.own()
+        library = node.library or "?"
+        if not library.startswith("lib") and library != "?":
+            library = "server"  # the arm's binary, whatever its file name
+        allocator = bool(ALLOCATOR.search(node.symbol))
+        if not allocator:
+            caller = f"{strip_templates(node.symbol)[:100]} ({library})"
         if own > 0 and node.symbol not in IDLE and not node.symbol.startswith("Thread_"):
-            library = node.library or "?"
             out[f"lib {library}"] += own * scale
             out[f"fn {strip_templates(node.symbol)} ({library})"] += own * scale
             out["cpu"] += own * scale
+            if allocator:
+                out[f"alloc/copy from {caller}"] += own * scale
         for child in node.children:
-            walk(child, frozenset(here))
+            walk(child, frozenset(here), caller)
 
     for thread in threads:
         for child in thread.children:
@@ -216,6 +238,10 @@ def main() -> None:
         print("| function | " + " | ".join(arms) + " | " + " | ".join(f"{a} - {first}" for a in arms[1:]) + " |")
         print("|---|" + "---:|" * (2 * len(arms) - 1))
         table("fn ", 30)
+        print(f"\nAllocator and copy time by caller, moved most ({', '.join(arms[1:])} against {first}):\n")
+        print("| caller | " + " | ".join(arms) + " | " + " | ".join(f"{a} - {first}" for a in arms[1:]) + " |")
+        print("|---|" + "---:|" * (2 * len(arms) - 1))
+        table("alloc/copy from ", 20)
 
 
 if __name__ == "__main__":
