@@ -120,7 +120,7 @@ public:
 		}
 		return start<void(asio::error_code, std::size_t)>(
 			[b, joined = std::move(joined)](SSL* ssl, std::size_t& n) { return ::SSL_write_ex(ssl, b.data(), b.size(), &n) == 1; },
-			b.size() > 0, {}, std::forward<Token>(token), true);
+			b.size() > 0, {}, std::forward<Token>(token));
 	}
 
 private:
@@ -161,18 +161,15 @@ private:
 	}
 
 	// The operation: SSL calls until one is done, receiving or waiting for readiness between them.
-	// A read or handshake result found without either is deferred, never delivered inside the
-	// initiating call: it runs after the current handler, from the thread's own queue. A write
-	// found done completes in place, unless it is itself inside such a completion (then deferred),
-	// so a write chain nests one level at most. A read with `room` receives into it: the caller's
-	// buffer, unused until then.
+	// A result found without either is deferred, never delivered inside the initiating call: it
+	// runs after the current handler, from the thread's own queue, so it neither locks nor wakes
+	// the reactor. A read with `room` receives into it: the caller's buffer, unused until then.
 	template<class Call>
 	struct Operation {
 		TlsStream* stream;
 		Call call;
 		bool any;                     // false: an empty buffer, done at once
 		asio::mutable_buffer room;    // empty: wait for readiness instead of receiving
-		bool in_place = false;        // a write: an immediate result completes in place
 		enum class Phase { start, waiting, deferred } phase = Phase::start;
 		asio::error_code error;
 		std::size_t bytes = 0;
@@ -199,13 +196,6 @@ private:
 				case Want::nothing: break;
 				}
 			}
-			if (phase == Phase::start && in_place && !completing_in_place) {
-				struct Nest {
-					Nest() noexcept { completing_in_place = true; }
-					~Nest() { completing_in_place = false; }
-				} nest;
-				return finish(self);   // the stream may be gone after this
-			}
 			if (phase == Phase::start) {
 				phase = Phase::deferred;
 				auto executor = self.get_io_executor();
@@ -225,10 +215,9 @@ private:
 		}
 	};
 	template<class Signature, class Call, class Token>
-	auto start(Call call, bool any, asio::mutable_buffer room, Token&& token, bool in_place = false) {
-		return asio::async_compose<Token, Signature>(Operation<Call>{this, std::move(call), any, room, in_place}, token, socket_);
+	auto start(Call call, bool any, asio::mutable_buffer room, Token&& token) {
+		return asio::async_compose<Token, Signature>(Operation<Call>{this, std::move(call), any, room}, token, socket_);
 	}
-	static inline thread_local bool completing_in_place = false;   // a write completing in place on this thread
 	// Keeps `size` received bytes for the BIO; the read's buffer is about to take the plaintext.
 	void take(asio::mutable_buffer room, std::size_t size) {
 		input_.reset(new char[size]);
