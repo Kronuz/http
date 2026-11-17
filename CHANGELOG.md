@@ -4,6 +4,25 @@ Newest first. Dates are 2026.
 
 Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://github.com/Kronuz/cpp-libraries/blob/main/docs/UPGRADING-2026-10.md#http) lists what changes for callers, how to find affected inputs, the commits not to pin, and the speedup.
 
+## 2026-11-17: a small TLS reply runs the old stream's handlers again
+
+`bench/idle-cost`, i9-9980HK, exclusive job 261116-200643-d30410 against http:a17b197 with an A/A
+arm: a small TLS reply on one kept-alive connection costs +1.17 us CPU per request over the old
+stream (1.037x, band 0.874-1.066), against +2.61 us for http:ad6771f in the same job; at 64
+connections 1.000x, and TLS with a handshake per request serves 1.037x requests per second. Every
+cell is inside the A/A band. Idle TLS stays at 40,075 B per connection at 10K. The attribution is
+in `docs/perf/idle.md`, "Small TLS replies".
+
+### Changed
+
+- **A TLS result found at once completes through a zero-byte send.** `detail::TlsStream` posted it
+  with `asio::defer`, which built an `executor_function` through `any_io_executor` and ran one
+  `io_context` execute per request. It now completes through a zero-byte `async_send` on the
+  socket, as `asio::ssl::stream`'s speculative send does: Asio makes no syscall for it and queues
+  it on the loop's own queue, never inside the initiating call.
+- **Read-ahead is set when the handshake starts,** after the accept or connect state, not at
+  construction. No count changes with it: a handshake still takes about twice the old `recv` calls.
+
 ## 2026-11-16: an idle TLS connection costs 58.5% less memory
 
 `bench/idle-cost`, i9-9980HK, exclusive jobs against http:a17b197: an idle TLS connection's

@@ -29,13 +29,16 @@ OpenSSL a copy that is freed once OpenSSL has taken it. The receive is speculati
 `asio::ssl::stream` makes; a readiness wait (`async_wait`) would cost a `kevent` per request,
 because the kqueue reactor re-arms its filter on every non-speculative start. Writes, the
 handshake and reads under 512 B go straight to the non-blocking socket and wait for readiness
-when it is full or empty. OpenSSL reads ahead, so a record's header and body arrive in one
-`recv`, and its record buffers are released between records. An idle TLS connection holds the SSL
-object and its session state.
+when it is full or empty. OpenSSL reads ahead, so on a kept-alive connection a record's header
+and body arrive in one `recv`, and its record buffers are released between records. A handshake
+still takes twice the old stream's `recv` calls (see "Small TLS replies" below). An idle TLS
+connection holds the SSL object and its session state.
 
 The error mapping is asio's (a `close_notify` is `eof`, a TCP close without it `stream_truncated`,
-OpenSSL errors in the ssl category). A result found without waiting is deferred (run after the
-current handler, from the thread's own queue) rather than delivered inside the initiating call.
+OpenSSL errors in the ssl category). A result found without waiting never completes inside the
+initiating call: it completes through a zero-byte `async_send` on the socket, which Asio queues as
+an immediate completion on the loop's own queue, with no syscall, lock or wake. That is the
+speculative send `asio::ssl::stream` makes, so a small reply runs the same handlers it did.
 One read and one write may be in flight at once, and a write joins up to 8 KiB of small buffers
 into one record, as `asio::ssl::stream` does: a reply's head and body leave in one record and one
 send. The joined copy belongs to the write and is released when it completes.
@@ -154,7 +157,7 @@ distribution-free interval at 93.8%. p50 and p99 are after's median over before'
   connection a small TLS reply costs 10.0% more CPU (31.07 against 27.87 us per request; the
   band ends at 1.084), while its requests per second (0.935x) stay inside the band. With a
   handshake per request, TLS serves 3.3% fewer requests per second (the band starts at 0.968).
-  The owner accepted both for the idle saving; their cost is not yet attributed.
+  The owner accepted both for the idle saving; "Small TLS replies" below attributes them.
 - **Inside the band:** small TLS replies at 64 connections (0.920x requests per second, 1.088x CPU,
   +0.9 us per request) and plain 1 MiB downloads.
 - **Better, outside the band:** 1 MiB TLS downloads, 13.8% more per second for 9.8% less CPU.
@@ -176,6 +179,47 @@ immediate completion), a copy of the received bytes for the BIO and the joined r
 `bench/watch_ab.sh` (job 261115-214354-19da72, http:f1e173f, five rounds, http and httpb at 1
 and 64 connections, after against before with an A/A arm): every row of requests per second, p99
 and CPU per request is noise (geomeans 1.001, 0.983 and 1.009; A/A 1.000, 1.019 and 0.999).
+
+### Small TLS replies
+
+Where http:ad6771f's extra CPU on a small kept-alive TLS reply went, from `/usr/bin/sample` on
+the load rows (job 261116-190828-78aa9b, three interleaved rounds of 10 s with an A/A arm; own time
+per request, after minus before):
+
+| cost per request | us | what it is |
+|---|---:|---|
+| the immediate result's `asio::defer` | about 0.85 | an `executor_function` built through `any_io_executor`, the composed op moved in and out; one `io_context` execute per request that the old stream did not make. Allocation under it 0.05 |
+| the received bytes' copy for the BIO | 0.34 | `take()`: what lets an idle connection hold no receive buffer |
+| the joined reply's copy | 0.20 | head and body in one record; without it a reply is two records and two sends |
+| OpenSSL's record path | spread | libssl +0.75 and libcrypto +0.64, no function above 0.11 |
+
+All of it is user time; syscalls per request are equal. http:0eb4c52 replaces the defer with the
+zero-byte send above: per request the c1 row now runs one socket send completion and no
+`io_context` execute, as the old stream did (job 261116-200646-529fc3). The two copies stay: they
+are the price of holding no buffers while idle.
+
+`ab.sh load` at http:0eb4c52 (job 261116-200643-d30410, exclusive, five interleaved rounds of
+before http:a17b197, prev http:ad6771f, after http:0eb4c52 and an A/A arm; median over rounds of
+the ratio to before, min-max in parentheses; runs in `docs/perf/idle/small-reply/`):
+
+| row | req/s prev | req/s after | req/s A/A | CPU/req prev | CPU/req after | CPU/req A/A |
+|---|---:|---:|---:|---:|---:|---:|
+| TLS `/` c1 keep-alive | 0.954 (0.860-1.049) | 0.989 (0.814-1.033) | 1.015 (0.929-1.157) | 1.094 (0.999-1.222) | 1.037 (0.999-1.268) | 0.982 (0.874-1.066) |
+| TLS `/` c64 keep-alive | 0.953 (0.891-1.085) | 1.001 (0.939-1.112) | 1.017 (0.885-1.172) | 1.046 (0.923-1.121) | 1.000 (0.901-1.060) | 0.986 (0.854-1.129) |
+| TLS `/` c8 close | 1.052 (0.944-1.111) | 1.037 (0.981-1.073) | 1.055 (0.878-1.218) | 0.943 (0.919-1.059) | 0.980 (0.897-1.018) | 0.980 (0.832-1.128) |
+
+- **Every cell of after is inside the A/A band;** ad6771f's c1 CPU (1.094) is not. At one connection a small reply costs +1.17 us CPU per request
+  over before (median of the per-round differences: user +1.37, system -0.20) on a 32.1 us request;
+  ad6771f's cost +2.61 us in the same job. The two kept copies account for 0.54 us of it.
+- **After against ad6771f:** at 64 connections 3.2% less CPU per request (0.968, 0.945-0.995) and
+  3.3% more requests per second (1.033, 1.006-1.054), every round in the same direction but inside
+  the A/A band, so not counted; at one connection 1.009 (0.882-1.038).
+- **The close path:** ad6771f's 0.967x requests per second does not reproduce (1.052 here, 1.049 in
+  job 261116-190832-1dac8f), and after is 1.037. A handshake takes 9.51 `recvfrom` per connection
+  against 4.75 before (`EAGAIN` 2.10 against 2.00), which costs about 3.5 us of system time per
+  connection (system 1.064x) and is outweighed by 15.6 us less user time. Setting read-ahead after
+  the handshake state (http:8368ea9) leaves them at 9.20 (job 261116-200140-8e96ee); their cause
+  is open.
 
 ## Reproduce
 
