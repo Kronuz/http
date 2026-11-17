@@ -161,20 +161,22 @@ private:
 	}
 
 	// The operation: SSL calls until one is done, receiving or waiting for readiness between them.
-	// A result found without either is deferred, never delivered inside the initiating call: it
-	// runs after the current handler, from the thread's own queue, so it neither locks nor wakes
-	// the reactor. A read with `room` receives into it: the caller's buffer, unused until then.
+	// A result found without either is never delivered inside the initiating call: it completes
+	// through a zero-byte send on the socket, which Asio queues as an immediate completion on the
+	// loop's own queue (no syscall, lock or wake), as asio::ssl::stream's speculative send does.
+	// A read with `room` receives into it: the caller's buffer, unused until then.
 	template<class Call>
 	struct Operation {
 		TlsStream* stream;
 		Call call;
 		bool any;                     // false: an empty buffer, done at once
 		asio::mutable_buffer room;    // empty: wait for readiness instead of receiving
-		enum class Phase { start, waiting, deferred } phase = Phase::start;
+		enum class Phase { start, waiting, posted } phase = Phase::start;
 		asio::error_code error;
 		std::size_t bytes = 0;
 		template<class Self>
 		void operator()(Self& self, asio::error_code received_error, std::size_t received) {
+			if (phase == Phase::posted) { return finish(self); }   // the zero-byte send: the result is ours
 			if (received_error == asio::error::eof) { stream->eof_ = true; }   // OpenSSL reports it
 			else if (received_error) { error = received_error; return finish(self); }
 			else { stream->take(room, received); }
@@ -182,7 +184,6 @@ private:
 		}
 		template<class Self>
 		void operator()(Self& self, asio::error_code wait_error = {}) {
-			if (phase == Phase::deferred) { return finish(self); }
 			if (phase == Phase::waiting && wait_error) { error = wait_error; return finish(self); }
 			if (any) {
 				switch (stream->step(call, room.size() > 0, error, bytes)) {
@@ -197,9 +198,8 @@ private:
 				}
 			}
 			if (phase == Phase::start) {
-				phase = Phase::deferred;
-				auto executor = self.get_io_executor();
-				return asio::defer(executor, std::move(self));
+				phase = Phase::posted;
+				return stream->socket_.async_send(asio::const_buffer(), std::move(self));
 			}
 			finish(self);
 		}
