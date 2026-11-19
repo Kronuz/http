@@ -159,7 +159,7 @@ editing it:
 | `create_extension(request)` | attach typed per-request state, built at headers-complete. |
 | `on_request_body(request)` | opt into push streaming: return a `BodySink` (light per-chunk work on the reactor), or nullptr to buffer. |
 | `wants_body_stream(request)` | opt into a streamed body: `handle()` runs while the body arrives and reads raw chunks from `Request::body_stream` with `co_await`, flow-controlled (O(buffer) memory). |
-| `Request::deadline()` | when the transport ends the request: its `request_timeout` from the start of the request's read, or `time_point::max()` when unbounded; bound the handler's own waits by it. |
+| `Request::deadline()` | the bound the transport applies to the request's reads and the rest of its reply: its `request_timeout` from the start of the request's read, or `time_point::max()` when unbounded (and in the body hooks, which run before it is set); bound the handler's own waits by it. |
 | `Request::cancel_token()` | the request's `task::cancel_token`, requested on the loop when the client closes or the service stops: poll it, register a `task::cancel_callback`, or pass it to a budget or a deadline; reads stop, writes finish. |
 | `on_error(exc, request, writer)` | map an exception to a response (default 500). |
 | `CompressionOptions::add_coding` | register a content-coding (the app owns the codec). |

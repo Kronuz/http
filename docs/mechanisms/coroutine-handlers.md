@@ -162,8 +162,8 @@ Teardown is task's four phases, each a call on `HttpAsioService` forwarded to re
 `TcpServer`; each runs the earlier ones first:
 
 1. `stop()`: `abort_all()` on each reactor's loop requests every session's token and
-   cancels every running request (`task::cancel_reason::shutdown`); a deferred or
-   owned-stream reply closes with `Shutdown`. The acceptors close. An idle keep-alive
+   cancels every running request (`task::cancel_reason::shutdown`); an owned-stream
+   reply closes with `Shutdown`. The acceptors close. An idle keep-alive
    connection ends at once, a streamed body read fails with `operation_aborted`, handlers
    stop at their next checkpoint and their responses are written. After the grace
    (`set_shutdown_grace`, 5 s by default) `force_all()` closes the sockets still held and

@@ -168,13 +168,8 @@ public:
 	// run in order: conditional (may flip to a bodyless 304) -> range (may flip to a
 	// 206 slice or 416) -> compression (self-skips 204/206/304 and tiny bodies).
 	// Builds only the status line + headers; the body is written separately (scatter
-	// -gather) so it is never copied into this string. See has_body()/body().
-	std::string serialize_head(bool keep_alive) {
-		std::string out;
-		serialize_head(out, keep_alive);
-		return out;
-	}
-	// The same, appended to `out` (a connection reuses one string for every reply's head).
+	// -gather) so it is never copied into this string, and appended to `out` (a connection
+	// reuses one string for every reply's head). See has_body()/body().
 	void serialize_head(std::string& out, bool keep_alive) {
 		maybe_conditional(); if (status_ != 304) { maybe_range(); } maybe_compress();
 		const char* reason = reason_phrase(status_);

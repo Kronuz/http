@@ -162,8 +162,10 @@ struct Request {
 	// For a transport: the scheduler of the loop that serves this request.
 	void set_scheduler(task::asio_scheduler* scheduler) noexcept { scheduler_ = scheduler; }
 
-	// When the transport ends this request: its request_timeout from the start of the request's
-	// read, or time_point::max() when unbounded. A handler bounds its own waits by it.
+	// The bound the transport applies to the request's reads and the rest of its reply: its
+	// request_timeout from the start of the request's read, or time_point::max() when unbounded.
+	// Set before handle(); the body hooks (create_extension, on_request_body, wants_body_stream)
+	// see max(). A handler bounds its own waits by it.
 	std::chrono::steady_clock::time_point deadline() const noexcept { return deadline_; }
 	// For a transport: the deadline of this request.
 	void set_deadline(std::chrono::steady_clock::time_point at) noexcept { deadline_ = at; }

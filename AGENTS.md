@@ -52,9 +52,8 @@ bench/server_compare.cc http_server_compare (-DHTTP_BUILD_BENCH=ON): a minimal A
                       reactor::TcpServer and http answering the same bytes. bench/run.sh and
                       bench/compare.sh drive it with wrk; bench/summarize.py takes medians.
 test/test.cc          ctest: method dispatch, 404 vs 405, param capture (transport-agnostic).
-test/deferred_test.cc, deferred_asio_test.cc, owned_stream_test.cc,
-owned_stream_asio_test.cc
-                      ctest: deferred replies, owned streaming.
+test/deferred_test.cc, owned_stream_test.cc, owned_stream_asio_test.cc
+                      ctest: reply validation, owned streaming.
 test/coroutine_test.cc ctest "coroutine": coroutine handlers, BodyStream, disconnect cancels
                       reads not writes, the admission 503, the body cap's 413, shutdown.
 test/readahead_test.cc ctest "readahead": the connection's read-ahead watch (its 4096-byte bound,
@@ -69,7 +68,7 @@ test/timeouts_test.cc ctest "timeouts": the idle, header and inactivity timeouts
                       slow clients under and over them, stalled and slow readers.
 docs/mechanisms/coroutine-handlers.md  How a request runs, is cancelled, admitted and stopped.
 docs/status/phase7c-l3.md  The L3 ledger.
-docs/TRANSPORT.md     Deferred replies, TLS, connection and request limits, rejections.
+docs/TRANSPORT.md     TLS, connection and request limits, rejections.
 docs/OWNED_STREAMING.md  Owned response streaming: framing, backpressure, footprint.
 docs/AUDIT.md         Transport audit findings with their before/after measurements.
 docs/perf/timeouts-cpu.md  Per-request CPU and latency against a minimal Asio server, with the
@@ -154,7 +153,7 @@ no worker pool and no thread handoff. Invariants -- do not break these when touc
   the write: `abort()` is `Request::cancel(task::cancel_reason::shutdown)`, `force()` closes the socket after the
   grace. `ConnectionInput::watch` keeps one read pending, up to 4096 bytes ahead of the
   parser. One rule reads it: a read error other than EOF (a reset, not our own cancellation)
-  calls `Request::cancel(http::disconnected)`, and closes a deferred or owned-stream reply's
+  calls `Request::cancel(http::disconnected)`, and closes an owned-stream reply's
   exchange; EOF is a half-close, which ends reading and cancels nothing, so the requests already
   read are answered and the connection closes after the last one. A failed reply write also
   calls `Request::cancel(http::disconnected)`. Pipelined input the watch reads ends the watch for the rest of the

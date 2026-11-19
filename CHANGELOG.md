@@ -11,9 +11,11 @@ leave the API.
 
 ### Added
 
-- **`Request::deadline()`**: when the transport ends the request, its `request_timeout` from the
-  start of the request's read, or `steady_clock::time_point::max()` without one. Set on the
-  buffered and the streamed path; a handler bounds its own waits by it.
+- **`Request::deadline()`**: the bound the transport applies to the request's reads and the rest
+  of its reply, its `request_timeout` from the start of the request's read, or
+  `steady_clock::time_point::max()` without one. Set before `handle()` on the buffered and the
+  streamed path; the body hooks (`create_extension`, `on_request_body`, `wants_body_stream`) run
+  before it and see `max()`. A handler bounds its own waits by it.
 
 ### Removed
 
