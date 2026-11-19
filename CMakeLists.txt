@@ -66,10 +66,10 @@ FetchContent_MakeAvailable(task)
 # Kronuz/reactor so other Kronuz network services share one runtime. Header-only; rides
 # on the same standalone Asio (so no second Asio fetch -- just its include dir). Set
 # REACTOR_INCLUDE_DIR to use a local checkout instead of fetching (dev iteration). The pin is
-# reactor:a59e9f8 (TcpServer::port()).
+# reactor:6fdd45f (the stop phases: stop_accepting, wait_requests, cancel_requests, force_connections).
 set(REACTOR_INCLUDE_DIR "" CACHE PATH "use an existing Kronuz/reactor dir instead of fetching")
 if(REACTOR_INCLUDE_DIR STREQUAL "")
-	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG ab69cf26e556f7108fb800d89c324648779e2549)
+	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG 6fdd45fb783ff4de035b2b8c3cd06ec8f3c1a90a)
 	FetchContent_MakeAvailable(reactor)
 	set(REACTOR_INCLUDE_DIR "${reactor_SOURCE_DIR}")
 endif()
