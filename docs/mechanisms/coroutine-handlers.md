@@ -32,9 +32,11 @@ headers complete   gate.enter() -- empty: 503 + Retry-After: 1, close      (admi
 handler start      RequestAbort on the reactor's list; ConnectionInput::watch set (on plain
                    TCP it reads once the handler first asks for its token)
 handler runs       co_await handler->handle(request, writer)          (a child task)
-                     client EOF / read error   -> request.cancel(http::disconnected)
+                     client reset (read error) -> request.cancel(http::disconnected)
+                     client EOF (half-close)   -> reading stops; nothing is cancelled
                      abort_all() at shutdown   -> request.cancel(task::cancel_reason::shutdown)
 handler returns    unwatch; an escaped exception is mapped; the response is written
+                     the write fails           -> request.cancel(http::disconnected), close
 settled            gate lease released; RequestAbort leaves the list; keep-alive continues
 ```
 
@@ -59,14 +61,26 @@ slice is spent. Writes take no token: once the request is admitted the transport
 response, so a client that half-closes after a `PUT` still receives the answer. A callback that
 throws is dropped by task; the next callback still runs.
 
-Two rules read the socket watch, and they differ on purpose:
+One rule reads the socket watch: a read error other than EOF (a reset) is a disconnect, and EOF
+is a half-close. A client may `shutdown(SHUT_WR)` after sending its request, which is legal
+HTTP, and it still gets the response. So EOF ends reading and cancels nothing: the requests
+already read are answered in order, no new read is started, and the connection closes after
+the last response is written.
 
-1. **A request in flight (`ConnectionInput::watch`).** EOF and any read error other than
-   our own cancellation call `cancel(http::disconnected)`. A client that closed has nobody
-   to read what a search computes. This matches Go's `net/http`.
-2. **A deferred or owned-stream reply (`ConnectionInput::monitor`).** Only a read error
-   other than EOF is a disconnect: the client may half-close after sending and still
-   expect the reply.
+1. **A request in flight (`ConnectionInput::watch`).** A reset (any read error other than EOF
+   and our own cancellation) calls `cancel(http::disconnected)`.
+2. **A deferred or owned-stream reply (`ConnectionInput::monitor`).** A reset closes the
+   exchange as `Disconnected`.
+3. **The reply's write.** A failed write ends the connection and calls
+   `cancel(http::disconnected)`, so a token the application kept past `handle()` (an owned
+   stream's producer, a deferred reply's work) sees it.
+
+TCP cannot tell a half-close from a full close until the server writes: after EOF nothing more
+is read, so a client that closed entirely is seen only when the reply's write fails. A handler
+that waits after a half-close is therefore ended by its own bound (a search's budget, a long
+poll's maximum wait, a deferred reply's deadline) or by shutdown, never by the transport's
+reads; its response is then written, or its write fails and the connection closes. The
+transport's request timeout bounds the request's reads and writes, not the handler.
 
 The watch reads ahead: one pending read of up to 4096 bytes into the connection's input
 buffer (`ConnectionInput::kReadAhead`). If the client pipelines the next request while a
@@ -76,13 +90,14 @@ again. `read()` returns the bytes first and in order, and nothing more is read a
 they are all consumed, so a connection holds at most 4096 bytes of input outside the kernel.
 The pending read is also the read for the next request: the connection's next read finds it
 pending and is resumed by its completion, with no coroutine frame or channel between them. A
-watch armed after EOF was already seen cancels the request at once.
+watch armed after a reset was already seen cancels the request at once; one armed after EOF
+reads nothing more.
 
 On plain TCP a buffered request's watch waits for the handler to ask. The request holds a
 `CancelWatch` hook that the first `cancel_token()` engages: one read that does not wait (`recv`
 with `MSG_DONTWAIT` into the input buffer) applies the rules above to what the client did
-meanwhile (data waiting is read ahead and ends the watch; EOF or a socket error cancels the
-request before the call returns, so the token is already requested), and with nothing waiting
+meanwhile (data waiting is read ahead and ends the watch; EOF ends it too; a socket error
+cancels the request before the call returns, so the token is already requested), and with nothing waiting
 the watch waits for the socket to be readable and then reads without waiting. An asynchronous
 read would first try the socket at once, a second `recv` after the one that just found it
 empty; so an asking request costs the same two `recv` calls as one that never asks (one that

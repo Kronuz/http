@@ -2,13 +2,16 @@
 // Each section proves one claim of docs/mechanisms/coroutine-handlers.md over real TCP:
 //   [A] a suspended handler does not stall the loop, and a throw after a suspension is mapped
 //   [B] BodyStream semantics (order, eof, error, bound, cancel)
-//   [C] a disconnect cancels reads but never writes; EOF cancels; a pipelined byte ends the watch
+//   [C] a reset cancels reads but never writes; a half-close (EOF) cancels nothing; a pipelined byte ends the watch
 //   [D] the in-flight gate answers 503 + Retry-After and counts the refusals
 //   [E] the buffered-body cap answers 413 (Content-Length and chunked), streams are not capped
 //   [F] shutdown: cancel, the response is still written, frames outlive the cancel, bounded by the grace
 //   [G] pipelined and keep-alive requests are unaffected by the per-request watch
 //   [H] a body cut short (FIN, half-close, RST, chunked) fails the reader, never eof, with the request cancelled
 //   [I] a throwing cancel callback is dropped: the handler's frames outlive it, streamed and buffered
+//   [J] a half-closed client keeps its response (D126): a plain handler, a long poll held on its
+//       token to its own bound, a deferred reply whose work waits on the token; a reset or a failed
+//       write cancels, a failed write included after the peer half-closed and then left
 //   [S] the streamed join: a hang-up after the body cancels the handler; a handler that answers early stops the feed
 //   [T] the task loop (design T4): (b) budget demotion, (c) affinity after a std::thread resume,
 //       (d) stop() with suspended handlers leaves no task frame, (e) task::cancelled after a
@@ -140,6 +143,8 @@ struct Obs {
 	std::atomic<bool> release{false};      // the test lets a held handler finish
 	std::atomic<int> checkpoints_after{-1};   // /hangup: checkpoints passed after the request was cancelled
 	std::atomic<bool> on_loop{false};      // /thread: resumed on the loop thread
+	std::atomic<double> finished_after_ms{-1};
+	std::optional<task::cancel_token> token;   // the request's token, kept past handle(); set before `started`
 	clk::time_point t0{};
 };
 // Busy work of about `d`, between checkpoints.
@@ -424,20 +429,72 @@ struct App : http::HttpHandler {
 			w.send(200, ec ? "failed" : chunk);
 			co_return;
 		}
-		if (req.path == "/body-wait") {   // [S]: reads the whole body, then waits for the request's cancellation (2 s at most)
+		if (req.path == "/body-wait") {   // [S]: reads the whole body, then waits for the request's cancellation (ms, 2 s by default)
 			std::optional<task::cancel_token> early;   // ?early=1: asks for the token before the body completes
 			if (param(req.query, "early") == "1") { early = req.cancel_token(); }
 			std::string chunk;
 			std::size_t total = 0;
 			while (!co_await req.body_stream->read(chunk)) { total += chunk.size(); }
 			const task::cancel_token token = early ? *early : req.cancel_token();
-			for (auto end = clk::now() + 2s; !token.requested() && clk::now() < end;) { co_await sleep_for(req, 5ms); }
+			const std::string ms = param(req.query, "ms");
+			for (auto end = clk::now() + (ms.empty() ? 2000ms : std::chrono::milliseconds(std::atoi(ms.c_str())));
+				!token.requested() && clk::now() < end;) { co_await sleep_for(req, 5ms); }
 			w.send(200, std::to_string(total) + (token.requested() ? ":cancelled" : ":done"));
 			co_return;
 		}
 		if (req.path == "/body-skip") {   // [S]: answers without reading the body (?read=1: after its first chunk)
 			if (param(req.query, "read") == "1") { std::string chunk; (void)co_await req.body_stream->read(chunk); }
 			w.send(200, "skipped");
+			co_return;
+		}
+		if (req.path == "/poll") {   // [J]: a long poll held on its token up to its own bound (ms), as Detent's subscription polls
+			auto o = get_obs(id);
+			o->t0 = clk::now();
+			const task::cancel_token token = req.cancel_token();
+			o->token = token;
+			task::cancel_callback record(token, [o](task::cancel_reason r) {
+				o->reason = static_cast<int>(r);
+				o->cancelled_after_ms = since_ms(o->t0);
+			});
+			o->started = true;
+			asio::steady_timer bound(req.scheduler().executor(), std::chrono::milliseconds(std::atoi(param(req.query, "ms").c_str())));
+			(void)co_await task::await_asio<void(asio::error_code)>([&](auto h) { bound.async_wait(std::move(h)); }, token);
+			o->finished_after_ms = since_ms(o->t0);
+			o->finished = true;
+			w.send(200, token.requested() ? "poll:cancelled" : "poll:bound");
+			co_return;
+		}
+		if (req.path == "/defer-poll") {   // [J]: a deferred reply whose work waits on the request's token up to its bound (ms)
+			auto o = get_obs(id);
+			o->t0 = clk::now();
+			const task::cancel_token token = req.cancel_token();
+			o->token = token;
+			http::DeferredOptions options;
+			options.deadline = clk::now() + 5s;
+			auto reply = w.defer(std::move(options));
+			o->started = true;
+			const auto work = [](std::unique_ptr<http::DeferredReply> reply, task::cancel_token token, asio::any_io_executor loop,
+				std::chrono::milliseconds ms, std::shared_ptr<Obs> o) -> task::task<void> {
+				asio::steady_timer bound(loop, ms);
+				(void)co_await task::await_asio<void(asio::error_code)>([&](auto h) { bound.async_wait(std::move(h)); }, token);
+				if (token.requested()) { o->reason = static_cast<int>(token.reason()); }
+				http::Response response;
+				response.status = 200;
+				response.body = token.requested() ? "deferred:cancelled" : "deferred:bound";
+				o->finished_after_ms = since_ms(o->t0);
+				(void)reply->complete(std::move(response));
+				o->finished = true;
+			};
+			task::spawn(task::scheduler_ref::of(req.scheduler()),
+				work(std::move(reply), token, req.scheduler().executor(), std::chrono::milliseconds(std::atoi(param(req.query, "ms").c_str())), o));
+			co_return;
+		}
+		if (req.path == "/big-token") {   // [J]: keeps its token past handle() and answers 32 MiB, more than the socket buffers take
+			auto o = get_obs(id);
+			o->token = req.cancel_token();
+			o->started = true;
+			w.send(200, std::string(32u << 20, 'x'));
+			o->finished = true;
 			co_return;
 		}
 		if (req.path == "/affine-thread") {   // T4 (h): a raw thread (no task, not the loop) touches the writer: Debug asserts
@@ -637,35 +694,25 @@ int main() {
 
 	body_stream_tests();
 
-	// [C] Disconnect cancels reads, not writes.
+	// [C] A reset cancels reads, not writes; a half-close cancels nothing.
 	{
 		unsigned short port = 0;
 		http::HttpAsioService svc(app, 1, 256);
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 
-		{   // a full close: the read is cancelled early; nobody is left to answer
+		{   // a reset: the read is cancelled early; nobody is left to answer
 			auto o = app.get_obs("close");
 			Conn c(port);
 			c.send(get("/read?id=close&ms=3000"));
 			until([&] { return o->started.load(); });
 			auto t0 = clk::now();
-			c.close();
+			c.rst();
 			until([&] { return o->finished.load(); }, 4000);
-			std::printf("  [C] close: cancelled after %.0f ms, finished %.0f ms after the close\n", o->cancelled_after_ms.load(), since_ms(t0));
-			check(o->reason == static_cast<int>(http::disconnected), "[C] a client close cancels the request with Disconnect");
+			std::printf("  [C] reset: cancelled after %.0f ms, finished %.0f ms after the reset\n", o->cancelled_after_ms.load(), since_ms(t0));
+			check(o->reason == static_cast<int>(http::disconnected), "[C] a client reset cancels the request with Disconnect");
 			check(o->finished && since_ms(t0) < 1500.0, "[C] the read stopped at its next checkpoint (not after its full 3 s)");
 			check(o->frame_ok, "[C] the request frame was alive after the cancel");
-		}
-		{   // a half-close (EOF): reads are cancelled, the response is still written
-			auto o = app.get_obs("half");
-			Conn c(port);
-			c.send(get("/read?id=half&ms=3000"));
-			until([&] { return o->started.load(); });
-			c.shut_wr();
-			auto r = c.read_response();
-			check(o->reason == static_cast<int>(http::disconnected), "[C] EOF cancels the request (the per-request rule)");
-			check(r.status == 200 && r.body == "read:cancelled", "[C] a half-closed client still receives the response of a cancelled read");
 		}
 		{   // a write is never cancelled: it completes and its response is attempted
 			auto o = app.get_obs("put");
@@ -674,8 +721,8 @@ int main() {
 			until([&] { return o->started.load(); });
 			c.shut_wr();
 			auto r = c.read_response();
-			check(o->reason == static_cast<int>(http::disconnected), "[C] the write was told about the half-close");
-			check(r.status == 200 && r.body == "write:cancelled" && o->frame_ok, "[C] a write completes after the client half-closed, and its response arrives");
+			check(o->reason == -1, "[C] a half-close does not cancel the write");
+			check(r.status == 200 && r.body == "write:completed" && o->frame_ok, "[C] a write completes after the client half-closed, and its response arrives");
 			auto o2 = app.get_obs("put2");
 			Conn c2(port);
 			c2.send("PUT /write?id=put2&ms=400 HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nabc");
@@ -692,9 +739,9 @@ int main() {
 			std::this_thread::sleep_for(50ms);           // the watch is reading
 			c.send("G");                                 // the next request's first byte arrives while it runs
 			std::this_thread::sleep_for(50ms);           // and the watch consumes it
-			c.close();
+			c.rst();
 			until([&] { return o->finished.load(); }, 3000);
-			check(o->finished && o->reason == -1, "[C] after a pipelined byte, a later close is not seen (the documented limit)");
+			check(o->finished && o->reason == -1, "[C] after a pipelined byte, a later reset is not seen (the documented limit)");
 		}
 		{   // without the byte the same close is seen (the control for the case above)
 			auto o = app.get_obs("nopipe");
@@ -702,9 +749,95 @@ int main() {
 			c.send(get("/read?id=nopipe&ms=700"));
 			until([&] { return o->started.load(); });
 			std::this_thread::sleep_for(50ms);
-			c.close();
+			c.rst();
 			until([&] { return o->finished.load(); }, 3000);
-			check(o->finished && o->reason == static_cast<int>(http::disconnected), "[C] the same close without the byte is seen");
+			check(o->finished && o->reason == static_cast<int>(http::disconnected), "[C] the same reset without the byte is seen");
+		}
+	}
+
+	// [J] A half-closed client keeps its response (D126); a reset or a failed write cancels.
+	{
+		unsigned short port = 0;
+		http::HttpAsioService svc(app, 1, 256);
+		app.service = &svc;
+		svc.start(0); port = svc.port(); wait_listen(port);
+		const auto released = [&] { return until([&] { return svc.reactor(0).gate().inflight.load() == 0; }); };
+		{   // a plain handler that polls its token: the half-close does not stop it, its whole answer arrives
+			auto o = app.get_obs("j-read");
+			Conn c(port);
+			c.send(get("/read?id=j-read&ms=300"));
+			until([&] { return o->started.load(); });
+			c.shut_wr();
+			auto r = c.read_response();
+			check(o->reason == -1, "[J] a half-close does not cancel a request in flight (reason " + std::to_string(o->reason.load()) + ")");
+			check(r.complete && r.status == 200 && r.body == "read:completed", "[J] a half-closed client gets the full response of a handler that checks its token (" + r.body + ")");
+			check(c.closed_by_peer() && released(), "[J] and then the connection closes and the request is released");
+		}
+		{   // a long poll held on its token, half-closed before the handler first asks: answered at its own bound
+			auto o = app.get_obs("j-poll");
+			Conn c(port);
+			c.send(get("/poll?id=j-poll&ms=300"));
+			c.shut_wr();
+			auto r = c.read_response();
+			until([&] { return o->started.load(); });   // orders the handler's writes before this thread's reads
+			std::printf("  [J] half-closed long poll: answered after %.0f ms (bound 300 ms)\n", o->finished_after_ms.load());
+			check(o->reason == -1 && r.complete && r.status == 200 && r.body == "poll:bound",
+				"[J] a long poll waiting on its token, half-closed before it asked, is answered when its own bound ends it (" + r.body + ")");
+			check(o->finished_after_ms.load() >= 290.0, "[J] it ran to its bound, not cut short by the half-close");
+			check(c.closed_by_peer() && released(), "[J] and then the connection closes and the request is released");
+			o->token.reset();
+		}
+		{   // a deferred reply whose work waits on the token, half-closed before the handler asked
+			auto o = app.get_obs("j-defer");
+			Conn c(port);
+			c.send(get("/defer-poll?id=j-defer&ms=300"));
+			c.shut_wr();
+			auto r = c.read_response();
+			until([&] { return o->finished.load(); });
+			check(o->reason == -1 && r.complete && r.status == 200 && r.body == "deferred:bound",
+				"[J] a deferred reply waiting on the token gets its full response after a half-close (" + r.body + ")");
+			check(c.closed_by_peer() && released(), "[J] and then the connection closes and the request is released");
+			o->token.reset();
+		}
+		{   // a reset cancels the long poll at once
+			auto o = app.get_obs("j-poll-rst");
+			Conn c(port);
+			c.send(get("/poll?id=j-poll-rst&ms=3000"));
+			until([&] { return o->started.load(); });
+			c.rst();
+			until([&] { return o->finished.load(); }, 4000);
+			check(o->reason == static_cast<int>(http::disconnected) && o->finished_after_ms.load() < 1500.0,
+				"[J] a reset cancels a held long poll with http::disconnected before its bound");
+			check(released(), "[J] and the request is released");
+			o->token.reset();
+		}
+		{   // the peer half-closes, then leaves: nothing is seen until the poll's bound, then the write fails and cancels
+			auto o = app.get_obs("j-poll-gone");
+			Conn c(port);
+			c.send(get("/poll?id=j-poll-gone&ms=300"));
+			until([&] { return o->started.load(); });
+			c.shut_wr();
+			std::this_thread::sleep_for(50ms);   // the watch read the EOF
+			c.rst();
+			const auto t0 = clk::now();
+			check(released(), "[J] a long poll whose peer half-closed and left ends by its own bound");
+			const bool cancelled = o->token && o->token->requested() && o->token->reason() == http::disconnected;
+			std::printf("  [J] half-closed then gone: released %.0f ms after the reset, poll ran %.0f ms (bound 300 ms)\n", since_ms(t0), o->finished_after_ms.load());
+			check(o->finished_after_ms.load() >= 290.0 && o->finished_after_ms.load() < 1500.0, "[J] nothing waits past the handler's own bound");
+			check(cancelled, "[J] and the failed write cancels the request (http::disconnected)");
+			o->token.reset();
+		}
+		{   // a failed write with no half-close: a token kept past handle() sees http::disconnected
+			auto o = app.get_obs("j-big");
+			Conn c(port);
+			c.send(get("/big-token?id=j-big"));
+			until([&] { return o->finished.load(); });
+			check(c.fill(), "[J] the big reply starts to arrive");
+			c.rst();
+			check(released(), "[J] the big reply's failed write ends the connection");
+			check(o->token && o->token->requested() && o->token->reason() == http::disconnected,
+				"[J] a failed write cancels the request: the token the handler kept sees http::disconnected");
+			o->token.reset();
 		}
 	}
 
@@ -741,16 +874,27 @@ int main() {
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
-		// A complete body, then a FIN while the handler still runs: the watch cancels the request and
-		// the answer still comes, whether the handler asks for its token after the body (the watch
-		// waits for it, as for a buffered body) or asked during it (the watch starts with the body's end).
-		for (const char* when : {"", "?early=1"}) {
+		// A complete body, then a reset while the handler still runs: the watch cancels the request,
+		// whether the handler asks for its token after the body (the watch waits for it, as for a
+		// buffered body) or asked during it (the watch starts with the body's end). A half-close
+		// instead cancels nothing: the handler runs to its bound and the answer comes.
+		for (const char* when : {"?ms=2000", "?early=1&ms=2000"}) {
+			Conn c(port);
+			c.send(post(std::string("/body-wait") + when, std::string(5000, 'a')));
+			std::this_thread::sleep_for(100ms);
+			const auto t0 = clk::now();
+			c.rst();
+			const bool ended = until([&] { return svc.reactor(0).gate().inflight.load() == 0; }, 1500);
+			check(ended && since_ms(t0) < 1500.0, std::string("[S] after a complete body, a reset cancels the running handler ") + (when[1] == 'e' ? "that asked during the body" : "that asks after it")
+				+ " (released after " + std::to_string(static_cast<int>(since_ms(t0))) + " ms, bound 2000 ms)");
+		}
+		for (const char* when : {"?ms=300", "?early=1&ms=300"}) {
 			Conn c(port);
 			c.send(post(std::string("/body-wait") + when, std::string(5000, 'a')));
 			std::this_thread::sleep_for(100ms);
 			c.shut_wr();
 			auto r = c.read_response();
-			check(r.status == 200 && r.body == "5000:cancelled", std::string("[S] after a complete body, a hang-up cancels the running handler ") + (*when ? "that asked during the body" : "that asks after it") + " (" + r.body + ")");
+			check(r.status == 200 && r.body == "5000:done" && c.closed_by_peer(), std::string("[S] after a complete body, a half-close does not cancel the running handler ") + (when[1] == 'e' ? "that asked during the body" : "that asks after it") + " (" + r.body + ")");
 		}
 		// A handler that answers without reading the body, or after its first chunk: the feed stops
 		// (its push, or its read of the rest the client holds) and the connection closes.
@@ -950,7 +1094,7 @@ int main() {
 			c.send(get("/throwcb?id=bx"));
 			until([&] { return o->started.load(); });
 			std::this_thread::sleep_for(50ms);
-			c.close();
+			c.rst();
 			std::this_thread::sleep_for(50ms);
 			o->release = true;
 			until([&] { return o->finished.load(); }, 3000);
@@ -1049,14 +1193,13 @@ int main() {
 		auto svc = std::make_unique<http::HttpAsioService>(app, 1, 64);
 		app.service = svc.get();
 		svc->start(0); port = svc->port(); wait_listen(port);
-		{   // the client hangs up: the watch's read completion runs the callback
+		{   // the client resets: the watch's read completion runs the callback (nobody is left to read the answer)
 			auto o = app.get_obs("h-hangup");
 			Conn c(port);
 			c.send(get("/cb-write?id=h-hangup"));
 			until([&] { return o->started.load(); });
-			c.shut_wr();
-			auto r = c.read_response();
-			check(r.status == 200 && r.body == "callback wrote" && header_value(r.head, "x-cancelled") == "1",
+			c.rst();
+			check(until([&] { return o->finished.load(); }) && until([&] { return svc->reactor(0).gate().inflight.load() == 0; }),
 				"[T] (h) a cancel callback on the hang-up writes through the writer");
 		}
 		{   // the service stops: the reactor's abort walk runs the callback
@@ -1099,19 +1242,20 @@ int main() {
 		http::HttpAsioService svc(app, 1, 64);
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
+		auto r = one(port, get("/own-cancel"));
+		check(r.status == 500, "[T] (e) task::cancelled from the handler's own source is a 500 (" + std::to_string(r.status) + ")");
 		{
 			auto o = app.get_obs("e");
 			Conn c(port);
 			c.send(get("/checkpoint?id=e"));
 			until([&] { return o->started.load(); });
-			c.shut_wr();   // a hang-up: the request is cancelled, and the half-closed client still reads
-			auto r = c.read_response();
-			check(r.status == 503 && header_value(r.head, "connection") == "close" && c.closed_by_peer(),
-				"[T] (e) task::cancelled after a disconnect is 503 with Connection: close, then the connection closes");
-			check(until([&] { return svc.reactor(0).gate().inflight.load() == 0; }), "[T] (e) the request is released");
+			std::thread stopper([&] { svc.stop(); });   // a shutdown cancels the request; the client still reads
+			auto answer = c.read_response();
+			stopper.join();
+			check(answer.status == 503 && header_value(answer.head, "connection") == "close" && c.closed_by_peer(),
+				"[T] (e) task::cancelled after the request's cancellation is 503 with Connection: close, then the connection closes");
+			check(svc.reactor(0).gate().inflight.load() == 0, "[T] (e) the request is released");
 		}
-		auto r = one(port, get("/own-cancel"));
-		check(r.status == 500, "[T] (e) task::cancelled from the handler's own source is a 500 (" + std::to_string(r.status) + ")");
 	}
 	{   // (f) a hang-up during a budget loop: no checkpoint passes once the request is cancelled
 		unsigned short port = 0;
@@ -1124,10 +1268,10 @@ int main() {
 		until([&] { return o->started.load(); });
 		std::this_thread::sleep_for(20ms);
 		const auto t0 = clk::now();
-		c.shut_wr();
-		auto r = c.read_response();
-		std::printf("  [T] (f) a hang-up during a budget loop -> 503 after %.1f ms, %d checkpoints after the cancel\n", since_ms(t0), o->checkpoints_after.load());
-		check(r.status == 503 && o->checkpoints_after == 0, "[T] (f) the first checkpoint after the hang-up throws task::cancelled");
+		c.rst();
+		until([&] { return o->finished.load(); });
+		std::printf("  [T] (f) a hang-up during a budget loop -> cancelled after %.1f ms, %d checkpoints after the cancel\n", since_ms(t0), o->checkpoints_after.load());
+		check(o->finished && o->checkpoints_after == 0, "[T] (f) the first checkpoint after the hang-up throws task::cancelled");
 	}
 	{   // (g) an owned stream started, then task::cancelled escapes: no terminal chunk, the request released
 		unsigned short port = 0;

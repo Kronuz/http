@@ -422,13 +422,13 @@ struct ReadResult {
 // recv and a second one for the rest. What the watch took is returned to the parser by
 // read(), first and in order, never discarded by a race, and no further read-ahead is
 // armed until it is all consumed, so at most kReadAhead bytes are held outside the kernel
-// however much the client sends. Two rules read it, and they differ on purpose:
-//   * a deferred or owned-stream reply (monitor): only a read error other than EOF is a
-//     disconnect, because the client may half-close after sending and still expect the reply;
-//   * a request in flight (watch): EOF and any read error but our own cancellation are a
-//     disconnect, because a client that closed has nobody to read what a search computes.
-//     Pipelined input (the client sent the next request early) ends the watch for the
-//     rest of that request: a later disconnect is not seen until the next read.
+// however much the client sends. One rule reads it: a read error other than EOF (a reset) is a
+// disconnect; EOF is a half-close, legal HTTP, so it ends reading but cancels nothing, and the
+// requests already read are answered. A request in flight (watch) is cancelled on a reset (not
+// our own cancellation), a deferred or owned-stream reply (monitor) is closed on one. After EOF
+// nothing more is read, so a later reset is seen only when the reply's write fails, which also
+// cancels the request. Pipelined input (the client sent the next request early) ends the watch
+// for the rest of that request: a later disconnect is not seen until the next read.
 // On a plain TCP socket a request's watch is lazy: it reads nothing until the handler first
 // asks for its cancel token (engage(), through Request's CancelWatch hook), and then one read
 // that does not wait decides what happened meanwhile by the same rules. A handler that never
@@ -464,8 +464,8 @@ public:
 	void watch(std::function<void()> on_disconnect, bool lazy = false) {
 		on_disconnect_ = std::move(on_disconnect);
 		if (ready_) {
-			if (error_ && error_ != asio::error::operation_aborted) { fire(); }
-			else if (size_) { on_disconnect_ = nullptr; }
+			if (reset(error_)) { fire(); }
+			else if (size_ || error_ == asio::error::eof) { on_disconnect_ = nullptr; }
 			return;
 		}
 		if (lazy && kLazyWatch) { return; }
@@ -474,8 +474,8 @@ public:
 	void unwatch() noexcept { on_disconnect_ = nullptr; }
 	// CancelWatch: the handler asked about cancellation; starts a lazy watch. One read that does
 	// not wait decides what the peer did while nobody watched, as the watch's read would have:
-	// data (a pipelined request) is read ahead and ends the watch, EOF or a socket error is a
-	// disconnect, and nothing yet arms the wait.
+	// data (a pipelined request) is read ahead and ends the watch, EOF (a half-close) ends it, a
+	// socket error is a disconnect, and nothing yet arms the wait.
 	void engage() noexcept override {
 		if (!on_disconnect_ || pending_ || ready_) { return; }
 		if constexpr (kLazyWatch) {
@@ -672,10 +672,14 @@ private:
 			if (auto c = owned_observer_.lock()) { c->exchange->observe_peer_disconnect(); }
 		}
 		if (on_disconnect_) {
-			if (!error) { on_disconnect_ = nullptr; }
-			else if (error != asio::error::operation_aborted) { fire(); }
+			if (reset(error)) { fire(); }
+			else if (error != asio::error::operation_aborted) { on_disconnect_ = nullptr; }
 		}
 		resume_waiter();   // last: the reader may arm the next read
+	}
+	// A read error that is the peer's disconnect: neither EOF (a half-close) nor our own cancellation.
+	static bool reset(const asio::error_code& error) noexcept {
+		return error && error != asio::error::eof && error != asio::error::operation_aborted;
 	}
 	void fire() {
 		auto callback = std::move(on_disconnect_);
@@ -922,7 +926,8 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 		const auto parse_failed = [&] {
 			if (parser.body_limit_exceeded()) { throw RequestRejected(413, "Payload Too Large\n"); }
 		};
-		// Writes the response; false when the connection cannot carry on. A buffered reply has
+		// Writes the response; false when the connection cannot carry on, and the caller cancels
+		// the request (a token the application kept sees the failed write). A buffered reply has
 		// been framed by send_reply(), and this writes what it left.
 		const auto respond = [&](AsioResponseWriter& writer, bool keep_alive, clock::time_point request_deadline) -> task::task<bool> {
 			if (writer.is_deferred()) { co_return co_await write_response(socket, writer, keep_alive, input, scheduler); }
@@ -1071,8 +1076,7 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 					writer.end();
 				}
 				const int sent = send_reply(writer, keep_alive);
-				if (sent == 0) { co_return; }
-				if (sent < 0 && !co_await respond(writer, keep_alive, request_deadline)) { co_return; }
+				if (sent == 0 || (sent < 0 && !co_await respond(writer, keep_alive, request_deadline))) { request.cancel(disconnected); co_return; }
 				admitted.reset();
 				if (!keep_alive || writer.wants_close()) { break; }
 				parser.reset();
@@ -1118,8 +1122,7 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 				}
 			}
 			const int sent = send_reply(writer, keep_alive);
-			if (sent == 0) { co_return; }
-			if (sent < 0 && !co_await respond(writer, keep_alive, request_deadline)) { co_return; }
+			if (sent == 0 || (sent < 0 && !co_await respond(writer, keep_alive, request_deadline))) { request.cancel(disconnected); co_return; }
 			admitted.reset();
 			if (!keep_alive || writer.wants_close()) { break; }
 		}

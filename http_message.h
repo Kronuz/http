@@ -50,8 +50,9 @@ using Headers = std::vector<std::pair<std::string, std::string>>;
 
 class BodyStream;   // http_body_stream.h -- the streamed request body (Request::body_stream)
 
-// The reason a request is cancelled when its client hangs up (closes its side, or the socket
-// fails on a read). The service stopping cancels with task::cancel_reason::shutdown.
+// The reason a request is cancelled when its client hangs up: a read fails (a reset), or the
+// reply's write fails. A half-close (EOF) is not a hang-up. The service stopping cancels with
+// task::cancel_reason::shutdown.
 inline constexpr task::cancel_reason disconnected = task::cancel_reason::user;
 
 // A transport's watch for a client hang-up that starts when the handler first asks for the
@@ -138,7 +139,7 @@ struct Request {
 	std::shared_ptr<BodyStream> body_stream;
 
 	// Cancellation, delivered on the connection's loop while the handler runs: the transport
-	// calls cancel() when the client closes its side (http::disconnected) or the service stops
+	// calls cancel() when the client hangs up (http::disconnected; a reset, not a half-close) or the service stops
 	// (task::cancel_reason::shutdown); the first call wins. A handler observes it through
 	// cancel_token(): polled (requested()), woken (a task::cancel_callback on it), or passed to
 	// what it awaits (a budget, a linked task::cancel_source, a deadline's parent). The first

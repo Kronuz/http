@@ -4,13 +4,13 @@
 // here over real TCP:
 //   [U] ConnectionInput on its own: the watch holds at most kReadAhead bytes outside the kernel,
 //       hands them back in order whatever the output size, arms nothing until they are consumed,
-//       and keeps the disconnect rules (EOF with nothing read fires; data ends the watch)
+//       and keeps the disconnect rules (a reset fires; EOF, a half-close, and data end the watch)
 //   [L] the lazy watch: it reads nothing until the handler asks (CancelWatch::engage), and the
 //       first question decides what happened meanwhile as the read would have; the Request hook
 //       engages it once, from the first cancel_token(); a read that finds the watch's read
 //       pending is resumed by it, its token ends the wait, and drain() waits for it
 //   [H] a heavy reader's read is resumed through its scheduler, a light one's inline
-//   [Q] the same over real TCP: a hang-up before the first question is seen by it, pipelined input
+//   [Q] the same over real TCP: a reset before the first question is seen by it, a half-close is not, pipelined input
 //       before it ends the watch, a handler that never asks has its pipelined successors answered
 //   [N] a buffered reply sent at once as far as the socket takes it: replies to 4 MiB arrive whole
 //   [P] a pipelined request that arrives inside the read-ahead (while the handler of the one
@@ -18,7 +18,8 @@
 //       the request line, the headers, the CRLF CRLF, the body and the next request
 //   [F] a flood of pipelined requests is answered in order, none lost or repeated
 //   [D] disconnect: the watch's data ends it for that request; a half-close after the pipelined
-//       request is seen by that request's own watch
+//       requests cancels none of them, all are answered in order and no read follows the EOF; a
+//       reset is seen by the request in flight
 //   [B] a client that disconnects in the middle of a buffered body never reaches the handler,
 //       and the request it held is released
 //   [S] request smuggling: ambiguous framing and a request hidden in a body are never executed
@@ -115,6 +116,7 @@ struct Conn {
 		}
 	}
 	void shut_wr() { ::shutdown(fd, SHUT_WR); }
+	void rst() { linger l{1, 0}; ::setsockopt(fd, SOL_SOCKET, SO_LINGER, &l, sizeof(l)); ::close(fd); fd = -1; }
 	void close() { if (fd >= 0) { ::close(fd); fd = -1; } }
 	bool fill() {
 		char b[16384];
@@ -287,7 +289,7 @@ static void lazy_watch_tests() {
 		auto a = read_once(p, in, 65536), b = read_once(p, in, 65536), c = read_once(p, in, 65536);
 		check(a.data + b.data + c.data == data, "[L] the bytes are read, the read-ahead first, in order");
 	}
-	{   // EOF before anyone asked: engage() fires at once, before it returns
+	{   // EOF (a half-close) before anyone asked: engage() reads it, ends the watch, fires nothing
 		Pair p;
 		auto in = std::make_shared<Input>(p.server);
 		int fired = 0;
@@ -297,10 +299,12 @@ static void lazy_watch_tests() {
 		check(until([&] { char b; return ::recv(p.server.native_handle(), &b, 1, MSG_PEEK | MSG_DONTWAIT) == 0; }), "[L] the EOF reached the server");
 		check(fired == 0, "[L] an EOF nobody asked about fires nothing");
 		in->engage();
-		check(fired == 1, "[L] engage() after the EOF fires the disconnect before it returns");
+		check(fired == 0, "[L] engage() after the EOF: a half-close is not a disconnect");
+		check(in->drain().await_ready(), "[L] and no read is pending after the EOF");
+		in->watch([&] { ++fired; }, true);   // the next request, already read: its watch reads nothing
 		in->engage();
 		p.settle();
-		check(fired == 1, "[L] once");
+		check(fired == 0 && in->drain().await_ready(), "[L] a watch set after the EOF fires nothing and starts no read");
 		auto r = read_once(p, in, 100);
 		check(r.done && r.error == asio::error::eof, "[L] and the EOF is read afterwards");
 	}
@@ -324,7 +328,18 @@ static void lazy_watch_tests() {
 		check(fired == 0, "[L] engage() with nothing waiting fires nothing");
 		::shutdown(p.client, SHUT_WR);
 		p.settle();
-		check(fired == 1, "[L] and the read it armed sees the EOF that follows");
+		check(fired == 0 && in->drain().await_ready(), "[L] the read it armed sees the EOF that follows: the watch ends, nothing fires, no read follows");
+	}
+	{   // asked before anything happened, then a reset: the armed read fires the disconnect
+		Pair p;
+		auto in = std::make_shared<Input>(p.server);
+		int fired = 0;
+		in->watch([&] { ++fired; }, true);
+		in->engage();
+		p.settle();
+		linger l{1, 0}; ::setsockopt(p.client, SOL_SOCKET, SO_LINGER, &l, sizeof(l)); ::close(p.client); p.client = -1;
+		p.settle();
+		check(fired == 1, "[L] and the read it armed sees a reset that follows");
 	}
 	{
 		Pair p;
@@ -651,7 +666,8 @@ static void input_tests() {
 		check(whole, "[U] three reads of 1000 take the 3000 read-ahead bytes while the 500 behind stay in the kernel; the fourth reads them");
 		check(got == first + more, "[U] the pieces are the stream, in order (" + std::to_string(got.size()) + " bytes)");
 	}
-	// EOF with nothing read fires; data then EOF does not fire, and the EOF is read afterwards.
+	// EOF with nothing read (a half-close) ends the watch and fires nothing; a reset fires once;
+	// data then EOF does not fire, and the EOF is read afterwards.
 	{
 		Pair p;
 		auto in = std::make_shared<Input>(p.server);
@@ -660,9 +676,23 @@ static void input_tests() {
 		p.settle();
 		::shutdown(p.client, SHUT_WR);
 		p.settle();
-		check(fired == 1, "[U] EOF with nothing read fires the disconnect once");
+		check(fired == 0, "[U] EOF with nothing read is a half-close: the watch fires nothing");
+		in->watch([&] { ++fired; });   // a watch set after the EOF: no disconnect, and no new read
+		check(fired == 0 && in->drain().await_ready(), "[U] a watch set after the EOF fires nothing and starts no read");
 		auto r = read_once(p, in, 100);
 		check(r.done && r.error == asio::error::eof, "[U] and the EOF is read afterwards");
+	}
+	{
+		Pair p;
+		auto in = std::make_shared<Input>(p.server);
+		int fired = 0;
+		in->watch([&] { ++fired; });
+		p.settle();
+		linger l{1, 0}; ::setsockopt(p.client, SOL_SOCKET, SO_LINGER, &l, sizeof(l)); ::close(p.client); p.client = -1;
+		p.settle();
+		check(fired == 1, "[U] a reset with nothing read fires the disconnect once");
+		in->watch([&] { ++fired; });
+		check(fired == 2, "[U] and a watch set after the reset fires at once");
 	}
 	{
 		Pair p;
@@ -912,21 +942,46 @@ int main() {
 		h.o->release = true;
 		auto r1 = h.c.read_response();
 		until([&] { return o2->started.load(); });
-		until([&] { return o2->reason.load() != -1; }, 1000);
-		check(o2->reason == static_cast<int>(http::disconnected), "[D] the pipelined request's own watch sees the half-close");
+		std::this_thread::sleep_for(30ms);   // its watch has read the EOF
+		check(o2->reason == -1, "[D] the pipelined request's own watch reads the half-close and does not cancel it");
 		o2->release = true;
 		auto r2 = h.c.read_response();
 		check(r1.body == "held" && r2.status == 200 && r2.body == "held", "[D] both are answered, the half-closed client included");
 		check(h.c.ends_silently(), "[D] and then the connection closes");
 	}
-	{   // the control: without pipelined input the half-close is seen by the first request
+	{   // a half-close behind three pipelined requests, the last two already read: all answered in order
+		Server s; s.start();
+		Held h(s, "d4");
+		auto o5 = s.app.get_obs("d5");
+		h.c.send(get("/hold?id=d5") + get("/echo") + post("/echo", "abc"));
+		h.c.shut_wr();
+		std::this_thread::sleep_for(30ms);
+		h.o->release = true;
+		until([&] { return o5->started.load(); });
+		std::this_thread::sleep_for(30ms);
+		o5->release = true;
+		auto r1 = h.c.read_response(), r2 = h.c.read_response(), r3 = h.c.read_response(), r4 = h.c.read_response();
+		check(h.o->reason == -1 && o5->reason == -1, "[D] a half-close after pipelined requests cancels none of them");
+		check(r1.body == "held" && r2.body == "held" && r3.status == 200 && r3.body.empty() && r4.body == "abc",
+			"[D] the requests read before the half-close are all answered, in order");
+		check(h.c.ends_silently(), "[D] and then the connection closes");
+	}
+	{   // without pipelined input the half-close is the first request's: it is not cancelled
 		Server s; s.start();
 		Held h(s, "d3");
 		h.c.shut_wr();
-		until([&] { return h.o->reason.load() != -1; }, 1000);
-		check(h.o->reason == static_cast<int>(http::disconnected), "[D] a half-close with nothing pipelined cancels the request in flight");
+		std::this_thread::sleep_for(30ms);
+		check(h.o->reason == -1, "[D] a half-close with nothing pipelined does not cancel the request in flight");
 		h.o->release = true;
-		check(h.c.read_response().body == "held", "[D] and its response is still written");
+		check(h.c.read_response().body == "held" && h.c.ends_silently(), "[D] its response is written, then the connection closes");
+	}
+	{   // a reset is a disconnect
+		Server s; s.start();
+		Held h(s, "d6");
+		h.c.rst();
+		until([&] { return h.o->reason.load() != -1; }, 1000);
+		check(h.o->reason == static_cast<int>(http::disconnected), "[D] a reset with nothing pipelined cancels the request in flight");
+		h.o->release = true;
 	}
 
 	// [B] A client that goes away in the middle of a buffered body never reaches the handler.
@@ -1071,9 +1126,21 @@ int main() {
 			std::this_thread::sleep_for(30ms);
 			o->release = true;
 			until([&] { return o->finished.load(); });
-			check(o->reason == static_cast<int>(http::disconnected), "[Q] " + ask + ": a half-close before the first question is a disconnect at that question");
+			check(o->reason == (ask == "poll" ? 0 : -1), "[Q] " + ask + ": a half-close before the first question is not a disconnect at that question");
+			check(c.read_response().body == "lazy" && c.ends_silently(), "[Q] " + ask + ": the response is written, then the connection closes");
+		}
+		for (const std::string ask : {"poll", "cb"}) {
+			Conn c(s.port);
+			const std::string id = "q-rst-" + ask;
+			auto o = s.app.get_obs(id);
+			c.send(get("/lazy?id=" + id + "&ask=" + ask));
+			until([&] { return o->started.load(); });
+			c.rst();
+			std::this_thread::sleep_for(30ms);
+			o->release = true;
+			until([&] { return o->finished.load(); });
+			check(o->reason == static_cast<int>(http::disconnected), "[Q] " + ask + ": a reset before the first question is a disconnect at that question");
 			if (ask == "cb") { check(o->at_once.load(), "[Q] cb: and the callback ran as it was registered"); }
-			check(c.read_response().body == "lazy" && c.ends_silently(), "[Q] " + ask + ": the response is still written, then the connection closes");
 		}
 		{
 			Conn c(s.port);
