@@ -67,12 +67,12 @@ struct App : http::HttpHandler {
 };
 
 // ---- streaming request-body app: counts an NDJSON body chunk-by-chunk without ever
-// buffering it, proving the gigabyte-safe path. The count lives in a ctx shared with
-// Request::user_data, so handle() reads it back after the sink is gone.
-struct BulkCtx { std::atomic<size_t> lines{0}; std::atomic<size_t> bytes{0}; };
+// buffering it, proving the gigabyte-safe path. The count lives in the request's extension,
+// so handle() reads it back after the sink is gone.
+struct BulkCtx : http::RequestExtension { std::atomic<size_t> lines{0}; std::atomic<size_t> bytes{0}; };
 struct CountSink : http::BodySink {
-	std::shared_ptr<BulkCtx> ctx;
-	explicit CountSink(std::shared_ptr<BulkCtx> c) : ctx(std::move(c)) {}
+	BulkCtx* ctx;
+	explicit CountSink(BulkCtx& c) : ctx(&c) {}
 	void write(std::string_view chunk) override {
 		ctx->bytes.fetch_add(chunk.size(), std::memory_order_relaxed);
 		for (char c : chunk) { if (c == '\n') { ctx->lines.fetch_add(1, std::memory_order_relaxed); } }
@@ -81,19 +81,17 @@ struct CountSink : http::BodySink {
 };
 struct StreamApp : http::HttpHandler {
 	task::task<void> handle(http::Request& req, http::ResponseWriter& resp) override {
-		auto ctx = std::static_pointer_cast<BulkCtx>(req.user_data);
-		size_t lines = ctx ? ctx->lines.load() : 0;
+		size_t lines = req.extension ? req.ext<BulkCtx>().lines.load() : 0;
 		// req.body must be EMPTY if the body streamed to the sink (never buffered).
 		bool streamed = req.body.empty();
 		resp.send(200, std::to_string(lines) + (streamed ? " streamed\n" : " buffered\n"));
 		co_return;
 	}
+	std::unique_ptr<http::RequestExtension> create_extension(const http::Request& req) override {
+		return req.path == "/bulk" ? std::make_unique<BulkCtx>() : nullptr;
+	}
 	std::unique_ptr<http::BodySink> on_request_body(http::Request& req) override {
-		if (req.path == "/bulk") {
-			auto ctx = std::make_shared<BulkCtx>();
-			req.user_data = ctx;
-			return std::make_unique<CountSink>(ctx);
-		}
+		if (req.path == "/bulk") { return std::make_unique<CountSink>(req.ext<BulkCtx>()); }
 		return nullptr;   // every other route buffers into Request::body
 	}
 };

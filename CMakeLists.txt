@@ -185,11 +185,6 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	target_link_libraries(http_test PRIVATE http)
 	add_test(NAME http COMMAND http_test)
 
-	add_executable(deferred_asio_test test/deferred_asio_test.cc)
-	target_link_libraries(deferred_asio_test PRIVATE http)
-	add_test(NAME deferred_asio COMMAND deferred_asio_test)
-	set_tests_properties(deferred_asio PROPERTIES TIMEOUT 60)
-
 	# The service's reactor lag probe.
 	add_executable(lag_asio_test test/lag_asio_test.cc)
 	target_link_libraries(lag_asio_test PRIVATE http)

@@ -4,7 +4,8 @@
 // the inactivity timeout while a slow one that moves completes; a reply the client stops
 // reading is cut at the inactivity timeout while a slow reader that moves gets all of it; a
 // slow client that stays under a timeout is served, also on a reused connection; unset, none
-// of them fires.
+// of them fires. Request::deadline() is the request timeout's bound, buffered and streamed, and
+// time_point::max() without one.
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -35,8 +36,18 @@ static void check(bool ok, const char* what) {
 static std::atomic<int> stream_end{0};
 
 struct Echo : http::HttpHandler {
-	bool wants_body_stream(const http::Request& r) override { return r.path == "/stream"; }
+	bool wants_body_stream(const http::Request& r) override { return r.path == "/stream" || r.path == "/stream-deadline"; }
 	task::task<void> handle(http::Request& req, http::ResponseWriter& w) override {
+		if (req.path == "/deadline" || req.path == "/stream-deadline") {   // the milliseconds left, or "unbounded"
+			if (req.body_stream) {
+				std::string chunk;
+				while (!co_await req.body_stream->read(chunk)) {}
+			}
+			const auto at = req.deadline();
+			w.send(200, at == clk::time_point::max() ? std::string("unbounded")
+				: std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(at - clk::now()).count()));
+			co_return;
+		}
 		if (req.path == "/stream") {
 			std::string chunk;
 			asio::error_code ec;
@@ -80,6 +91,17 @@ static std::pair<std::string, double> until_closed(int fd) {
 		got.append(b, static_cast<std::size_t>(n));
 	}
 	return {got, std::chrono::duration<double>(clk::now() - t0).count()};
+}
+
+// The body of the reply to `request`, sent on a fresh connection that closes after it.
+static std::string ask(unsigned short port, const std::string& request) {
+	int fd = dial(port);
+	put(fd, request);
+	auto [got, s] = until_closed(fd);
+	(void)s;
+	::close(fd);
+	const auto at = got.find("\r\n\r\n");
+	return at == std::string::npos ? std::string() : got.substr(at + 4);
 }
 
 int main() {
@@ -253,6 +275,24 @@ int main() {
 		check(trickle(fd), "and on the same connection after a reply, through the read-ahead");
 		::close(fd);
 		slow.stop();
+	}
+
+	{  // Request::deadline(): the request timeout from the start of the request's read
+		http::HttpAsioService bounded(echo, 1, 64);
+		bounded.set_request_timeout(2000ms);
+		bounded.start(0);
+		const auto left = [](const std::string& body) { return body.empty() || body == "unbounded" ? -1L : std::stol(body); };
+		const long buffered = left(ask(bounded.port(), "GET /deadline HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"));
+		check(buffered > 1500 && buffered <= 2000, "a buffered request's deadline is its request timeout");
+		const long streamed = left(ask(bounded.port(),
+			"POST /stream-deadline HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc"));
+		check(streamed > 1500 && streamed <= 2000, "a streamed request's deadline is its request timeout");
+		bounded.stop();
+		http::HttpAsioService unbounded(echo, 1, 64);
+		unbounded.start(0);
+		check(ask(unbounded.port(), "GET /deadline HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") == "unbounded",
+			"without a request timeout the deadline is time_point::max()");
+		unbounded.stop();
 	}
 
 	{  // unset: a silent connection stays open past every bound above

@@ -49,7 +49,7 @@ application code:
   table holds Xapiand's REST verbs (`COUNT`, `INFO`, `DUMP`, `RESTORE`, …) that stock
   llhttp rejects. Swapping it for another parser is contained here; the handler and the
   `Request`/`ResponseWriter` are parser-agnostic.
-- **Concurrency (coroutines on the loop).** `handle` is a coroutine awaited on the connection's loop. A handler that must wait `co_await`s and the loop serves other connections; nothing runs off the loop, so there is no worker pool to size. Excess requests receive 503 from the reactor's admission gate. The scoped writer and request remain valid until the coroutine completes, and a request's frame is never destroyed early. Delayed work transfers exclusive reply authority through `ResponseWriter::defer()` and retains the returned move-only `DeferredReply`, never the writer or request. The connection awaits one reply before handling the next keep-alive request.
+- **Concurrency (coroutines on the loop).** `handle` is a coroutine awaited on the connection's loop. A handler that must wait `co_await`s and the loop serves other connections; nothing runs off the loop, so there is no worker pool to size. Excess requests receive 503 from the reactor's admission gate. The scoped writer and request remain valid until the coroutine completes, and a request's frame is never destroyed early. A handler that waits bounds itself by `Request::deadline()`, the transport's per-request bound; only an owned stream (`ResponseWriter::stream()`) outlives `handle()`. The connection awaits one reply before handling the next keep-alive request.
 - **Request body (buffered or streamed).** A handler opts into streaming per
   endpoint (`on_request_body` returns a `BodySink`): the body then flows to the sink
   chunk-by-chunk as it is parsed, never accumulated, so a multi-gigabyte `RESTORE`
@@ -159,6 +159,7 @@ editing it:
 | `create_extension(request)` | attach typed per-request state, built at headers-complete. |
 | `on_request_body(request)` | opt into push streaming: return a `BodySink` (light per-chunk work on the reactor), or nullptr to buffer. |
 | `wants_body_stream(request)` | opt into a streamed body: `handle()` runs while the body arrives and reads raw chunks from `Request::body_stream` with `co_await`, flow-controlled (O(buffer) memory). |
+| `Request::deadline()` | when the transport ends the request: its `request_timeout` from the start of the request's read, or `time_point::max()` when unbounded; bound the handler's own waits by it. |
 | `Request::cancel_token()` | the request's `task::cancel_token`, requested on the loop when the client closes or the service stops: poll it, register a `task::cancel_callback`, or pass it to a budget or a deadline; reads stop, writes finish. |
 | `on_error(exc, request, writer)` | map an exception to a response (default 500). |
 | `CompressionOptions::add_coding` | register a content-coding (the app owns the codec). |
@@ -190,8 +191,9 @@ above always have the full body to work on. A huge response streams through
 producer (chunked framing, backpressure; see `docs/OWNED_STREAMING.md`); streamed bodies skip
 these transforms. Request-side streaming (both push and concurrent pull, with flow control) is done.
 
-## Deferred response ownership
+## Response ownership
 
-The scoped ResponseWriter and Request cannot escape the handler. `defer()` transfers exclusive buffered response authority into a move-only capability backed by a mutex-protected exchange. Application submission retains owned response bytes and a reply lease; the transport retains the request lease and waits on its connection executor. Completion before waiting is observable, and a handler that returns after `defer()` releases its in-flight admission when the reply settles.
-
-The exchange advances Waiting → Ready → Writing → Written, or enters Closing for deadline, disconnect, abandonment or shutdown. Closing retains all leases until the original socket operation has been canceled and reaped. Settlement is exactly once; hooks and lease destructors execute outside the lock. Escaped capabilities retain closed metadata, not a socket, stack writer or live executor. One bounded response is accepted, keep-alive handlers remain ordered, and sending half-close remains valid. Deferred response transforms are disabled.
+The scoped ResponseWriter and Request cannot escape the handler: a handler answers before its
+task completes, and one that waits bounds itself by `Request::deadline()` and its cancel token.
+The one capability that outlives `handle()` is an owned stream (`ResponseWriter::stream()`), whose
+exchange settles exactly once after its original socket writes are reaped.

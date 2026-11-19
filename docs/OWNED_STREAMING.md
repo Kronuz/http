@@ -1,12 +1,12 @@
 # Owned response streaming
 
-`ResponseWriter::stream()` adds an optional response capability for asynchronous producers. Existing synchronous writers default to unsupported, and existing buffered `send()`, `write()` and deferred `defer()` behavior remains available. The Asio writer supports the capability for both plain TCP and its generic TLS stream adapter. Retain the returned `OwnedStreamCapability`, rather than a scoped writer or request.
+`ResponseWriter::stream()` adds an optional response capability for asynchronous producers. Existing synchronous writers default to unsupported, and buffered `send()` and `write()` remain available. The Asio writer supports the capability for both plain TCP and its generic TLS stream adapter. Retain the returned `OwnedStreamCapability`, rather than a scoped writer or request.
 
 ## Admission and framing
 
 Configure a finite absolute deadline, a maximum payload length and a maximum individual chunk. Defaults bound payloads to 256 MiB and chunks to 65,536 bytes. `start(metadata, length, keep_alive)` emits a validated header with an exact Content-Length. `start_chunked(metadata, keep_alive)` emits Transfer-Encoding: chunked and retains the same finite payload and deadline bounds; it supports producers whose final encoded length is unavailable before streaming. The request's keep-alive policy remains authoritative.
 
-Metadata must have an empty buffered body. Header validation is shared with deferred replies: invalid field names, control characters and application overrides of transport framing are rejected. Unknown-length streams cannot use bodyless 204 or 304 statuses. An exact-length stream can finish only after accepting its declared payload length. A chunked stream also writes and reaps its terminating chunk before reporting Written.
+Metadata must have an empty buffered body. Header validation (`detail::validate_reply`): invalid field names, control characters and application overrides of transport framing are rejected. Unknown-length streams cannot use bodyless 204 or 304 statuses. An exact-length stream can finish only after accepting its declared payload length. A chunked stream also writes and reaps its terminating chunk before reporting Written.
 
 ## Ownership and backpressure
 

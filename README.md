@@ -111,8 +111,8 @@ Not for:
 
 - **HTTP/2, HTTP/3 or WebSockets.** None is implemented.
 - **Blocking handlers.** A handler runs on its connection's loop, so a blocking call stalls
-  every connection of that reactor; `co_await` instead, or hand the work to your own pool
-  through `ResponseWriter::defer()`.
+  every connection of that reactor; `co_await` instead, bounded by `Request::deadline()`, or
+  hand the work to your own pool and `co_await` its result.
 - **HTTP clients.** The library is a server.
 
 ## ⚡ Performance

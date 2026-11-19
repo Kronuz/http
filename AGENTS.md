@@ -31,7 +31,7 @@ http_asio.h           The Asio transport: the connection as a task::task (the
                       keep-alive, the per-request watch (ConnectionInput), the per-request
                       abort hook (RequestAbort, a reactor::Abortable), the streamed-body
                       feed, and HttpAsioService (a thin adapter over reactor::TcpServer).
-http_deferred.h       DeferredReply: an owned, delayed buffered reply (ResponseWriter::defer()).
+http_deferred.h       ReplyLimits, DeferredOptions, validate_reply: an owned stream's reply options.
 http_owned_stream.h   OwnedStreamCapability: owned response streaming (ResponseWriter::stream()).
 http_owned_stream_asio.h  Its Asio implementation, plain TCP and TLS.
 http_owned_storage.h  Owned chunk storage and allocation refusal for owned streams.
@@ -103,7 +103,7 @@ library does not.
 - **The handler is parser/transport/concurrency-agnostic.** It gets a `Request` and
   writes a `ResponseWriter`. It never sees the parser, the socket, or the loop. Don't
   leak any of those across the seam.
-- **Scoped response ownership.** Synchronous handlers finish before returning. Deferred handlers transfer authority through `ResponseWriter::defer()` and retain only the owned capability. Never retain a stack writer or Request. Original socket IO must be reaped before releasing request or reply leases; acceptance is distinct from delivery.
+- **Scoped response ownership.** A handler answers before it completes, waiting with `co_await` bounded by `Request::deadline()`; an owned stream (`ResponseWriter::stream()`) is the one capability that outlives it. Never retain a stack writer or Request. Original socket IO must be reaped before releasing request or reply leases; acceptance is distinct from delivery.
 
 - **Routing is application config.** `Router` (per-method radix trees + 404/405) is
   what Xapiand's hardcoded `prepare()` method-switch becomes.

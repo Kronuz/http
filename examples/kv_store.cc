@@ -29,14 +29,14 @@
 
 // A streaming request-body intake: counts NDJSON lines as the body arrives,
 // without ever holding the whole body in memory. The per-request count rides in
-// Request::user_data so the handler can read it once the body is fully received.
-struct BulkCtx { long lines = 0; };
+// the request's extension so the handler can read it once the body is fully received.
+struct BulkCtx : http::RequestExtension { long lines = 0; };
 
 class LineCountingSink : public http::BodySink {
-	std::shared_ptr<BulkCtx> ctx_;
+	BulkCtx* ctx_;
 	std::string partial_;
 public:
-	explicit LineCountingSink(std::shared_ptr<BulkCtx> ctx) : ctx_(std::move(ctx)) {}
+	explicit LineCountingSink(BulkCtx& ctx) : ctx_(&ctx) {}
 	void write(std::string_view chunk) override {
 		partial_.append(chunk);
 		std::size_t nl;
@@ -101,8 +101,7 @@ public:
 		// A streamed request body: POST NDJSON; the body is counted line-by-line as
 		// it arrives (see on_request_body) and never buffered whole.
 		router_.route("POST", "/bulk", [](http::Request& req, http::ResponseWriter& resp, const http::Params&) -> task::task<void> {
-			auto ctx = std::static_pointer_cast<BulkCtx>(req.user_data);
-			resp.send(200, "received " + std::to_string(ctx ? ctx->lines : 0) + " lines\n");
+			resp.send(200, "received " + std::to_string(req.extension ? req.ext<BulkCtx>().lines : 0) + " lines\n");
 			co_return;
 		});
 	}
@@ -112,12 +111,13 @@ public:
 	}
 
 	// Stream the body for POST /bulk instead of buffering it; everything else
-	// buffers (the default). The line count is carried in user_data.
+	// buffers (the default). The line count is carried in the request's extension.
+	std::unique_ptr<http::RequestExtension> create_extension(const http::Request& request) override {
+		return request.method == "POST" && request.path == "/bulk" ? std::make_unique<BulkCtx>() : nullptr;
+	}
 	std::unique_ptr<http::BodySink> on_request_body(http::Request& request) override {
 		if (request.method == "POST" && request.path == "/bulk") {
-			auto ctx = std::make_shared<BulkCtx>();
-			request.user_data = ctx;
-			return std::make_unique<LineCountingSink>(ctx);
+			return std::make_unique<LineCountingSink>(request.ext<BulkCtx>());
 		}
 		return nullptr;
 	}

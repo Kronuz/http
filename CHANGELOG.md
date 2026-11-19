@@ -4,6 +4,30 @@ Newest first. Dates are 2026.
 
 Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://github.com/Kronuz/cpp-libraries/blob/main/docs/UPGRADING-2026-10.md#http) lists what changes for callers, how to find affected inputs, the commits not to pin, and the speedup.
 
+## 2026-11-19: `Request::deadline()`; `user_data` and `DeferredReply` are gone
+
+A handler reads its request's deadline from the request, and the two surfaces no consumer used
+leave the API.
+
+### Added
+
+- **`Request::deadline()`**: when the transport ends the request, its `request_timeout` from the
+  start of the request's read, or `steady_clock::time_point::max()` without one. Set on the
+  buffered and the streamed path; a handler bounds its own waits by it.
+
+### Removed
+
+- **`Request::user_data`.** Per-request state is `Request::extension`, made by
+  `HttpHandler::create_extension()` before `on_request_body()` (the example and `asio_test` show a
+  body sink counting into it).
+- **`ResponseWriter::defer()` and `DeferredReply`**, with `detail::DeferredExchange` and the
+  transport's deferred path. A handler that waits `co_await`s within `handle()`; an owned stream
+  (`ResponseWriter::stream()`) is the one reply that outlives it. `DeferredOptions`,
+  `ReplyLimits`, `ReplySettlement` and `detail::validate_reply` stay as an owned stream's reply
+  options; `ReplySubmit` keeps `Accepted`, `TooLarge` and `Invalid`.
+- **For callers:** Detent, Xapiand, prism and http-log use neither surface; a pin bump needs no
+  source change.
+
 ## 2026-11-18: a half-closed client gets its response
 
 A client that sends its request and then half-closes (`shutdown(SHUT_WR)`) is answered. Before, the
