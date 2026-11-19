@@ -385,11 +385,12 @@ int main(int argc, char** argv) {
 	Handler handler;
 	std::vector<std::unique_ptr<http::HttpAsioService>> services;
 	for (unsigned long port = base_port; port < base_port + 8; ++port) {
-		http::HttpAsioService::ConnectionFactory factory;
-		if (tls) {
-			factory = http::tls_connection_factory(context, std::chrono::seconds(30), 100000, 200000, [](http::TlsFailure) { ++failures; });
-		}
-		auto service = std::make_unique<http::HttpAsioService>(handler, 1, 0, std::move(factory), 200000);
+		// The timeouts off, as the idle cost is measured: an idle connection holds no timer.
+		const http::Limits limits{.max_clients = 200000, .max_in_flight = 0, .idle_timeout = std::chrono::seconds(0),
+			.header_timeout = std::chrono::seconds(0), .inactivity_timeout = std::chrono::seconds(0),
+			.tls_handshake = std::chrono::seconds(30), .tls_handshakes = 100000};
+		auto service = std::make_unique<http::HttpAsioService>(handler, 1, limits,
+			http::Tls{tls ? context : nullptr, [](http::TlsFailure) { ++failures; }});
 		service->start(static_cast<unsigned short>(port));
 		services.push_back(std::move(service));
 	}

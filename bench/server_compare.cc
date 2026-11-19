@@ -192,13 +192,11 @@ int main(int argc, char** argv) {
 		http::HttpHandler& app = kind == "httpr" ? static_cast<http::HttpHandler&>(yielding)
 			: kind == "httpb" ? static_cast<http::HttpHandler&>(streamed)
 			: kind == "httpc" ? static_cast<http::HttpHandler&>(asking) : hello;
-		http::HttpAsioService service(app, reactors, /*in_flight_limit=*/0);
-		if (kind == "httpt") {
-			service.set_request_timeout(std::chrono::seconds(30));
-			service.set_idle_timeout(std::chrono::seconds(60));
-			service.set_header_timeout(std::chrono::seconds(10));
-			service.set_inactivity_timeout(std::chrono::seconds(30));
-		}
+		// No connection or admission bound; the timeouts off, or the production ones for httpt.
+		using std::chrono::seconds;
+		http::HttpAsioService service(app, reactors, kind == "httpt"
+			? http::Limits{.max_clients = 0, .max_in_flight = 0, .idle_timeout = seconds(60), .header_timeout = seconds(10), .inactivity_timeout = seconds(30), .request_timeout = seconds(30)}
+			: http::Limits{.max_clients = 0, .max_in_flight = 0, .idle_timeout = seconds(0), .header_timeout = seconds(0), .inactivity_timeout = seconds(0)});
 		service.start(port);
 		std::printf("ready http %zu\n", reactors);
 		std::fflush(stdout);
