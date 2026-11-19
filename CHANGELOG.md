@@ -4,6 +4,26 @@ Newest first. Dates are 2026.
 
 Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://github.com/Kronuz/cpp-libraries/blob/main/docs/UPGRADING-2026-10.md#http) lists what changes for callers, how to find affected inputs, the commits not to pin, and the speedup.
 
+## 2026-11-18: a half-closed client gets its response
+
+A client that sends its request and then half-closes (`shutdown(SHUT_WR)`) is answered. Before, the
+request watch treated that EOF as a hang-up and cancelled the request in flight, so a handler that
+checks its token stopped early and its answer was a cancelled one, or a `503`.
+
+### Changed
+
+- **EOF is a half-close, not a disconnect.** On a connection with a request in flight, EOF ends
+  reading and cancels nothing: the requests already read, pipelined ones included, are answered in
+  order, nothing more is read, and the connection closes after the last response. The request
+  watch and the deferred and owned-stream reply monitor now read one rule.
+- **A reset or a failed write cancels.** A read error other than EOF still calls
+  `Request::cancel(http::disconnected)`. A failed reply write now calls it too, so a token kept
+  past `handle()` (an owned stream's producer, a deferred reply's work) sees the failed delivery.
+- **For callers:** a handler that waits after a half-close is ended by its own bound (a budget, a
+  long poll's maximum, a deferred reply's deadline) or by shutdown; a full close behind the FIN is
+  seen only when the reply's write fails. A test that used a half-close or a plain `close()` as a
+  hang-up now needs a reset (`SO_LINGER` 0). No API changes.
+
 ## 2026-11-17: a small TLS reply runs the old stream's handlers again
 
 `bench/idle-cost`, i9-9980HK, exclusive job 261116-200643-d30410 against http:a17b197 with an A/A

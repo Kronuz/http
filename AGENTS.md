@@ -153,14 +153,16 @@ no worker pool and no thread handoff. Invariants -- do not break these when touc
   `reactor::Abortable`) is on the reactor's intrusive list from before the handler to after
   the write: `abort()` is `Request::cancel(task::cancel_reason::shutdown)`, `force()` closes the socket after the
   grace. `ConnectionInput::watch` keeps one read pending, up to 4096 bytes ahead of the
-  parser: EOF or a read error (not our own cancellation) calls `Request::cancel(http::disconnected)`.
-  That is the per-request rule and it differs from the deferred-reply monitor's (EOF is a
-  half-close there). Pipelined input the watch reads ends the watch for the rest of the
+  parser. One rule reads it: a read error other than EOF (a reset, not our own cancellation)
+  calls `Request::cancel(http::disconnected)`, and closes a deferred or owned-stream reply's
+  exchange; EOF is a half-close, which ends reading and cancels nothing, so the requests already
+  read are answered and the connection closes after the last one. A failed reply write also
+  calls `Request::cancel(http::disconnected)`. Pipelined input the watch reads ends the watch for the rest of the
   request; `read()` hands those bytes to the parser first, in order, in whatever pieces its
   caller asks for, and nothing more is read ahead until they are all consumed, so at most 4096
   bytes are held outside the kernel. On plain TCP a request's watch is lazy: the request
-  holds a `CancelWatch` hook, and the handler's first `cancel_token()` engages it, which peeks
-  at the socket (`MSG_PEEK | MSG_DONTWAIT`) to apply the same rules to what happened meanwhile
+  holds a `CancelWatch` hook, and the handler's first `cancel_token()` engages it, which reads
+  the socket without waiting (`MSG_DONTWAIT`) to apply the same rules to what happened meanwhile
   and then arms the read. A handler that never asks costs no read, no wake-up and no syscall
   for the watch. A streamed body's watch starts at the body's end, lazy the same way unless the
   handler already asked (`RequestAccess::asked`), then armed at once. TLS watches from the
