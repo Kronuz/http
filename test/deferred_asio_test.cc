@@ -88,7 +88,7 @@ struct Server {
 	std::unique_ptr<HttpAsioService> service;
 	unsigned short port;
 	explicit Server(std::shared_ptr<App> application = std::make_shared<App>()) : app(std::move(application)) {
-		service = std::make_unique<HttpAsioService>(*app, 1, 64);
+		service = std::make_unique<HttpAsioService>(*app, 1, http::Limits{.max_in_flight = 64});
 		service->start(0);
 		port = service->port();
 	}

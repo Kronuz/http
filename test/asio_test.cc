@@ -299,7 +299,7 @@ int main() {
 	// [A] Handlers that wait suspend: fast stays low-latency under slow load, on ONE loop.
 	{
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 256);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 256});
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 		std::vector<Resp> slow;
@@ -315,7 +315,7 @@ int main() {
 	}
 	// [P] start(0): port() reports the OS-assigned port, and it serves.
 	{
-		http::HttpAsioService svc(app, 2, 256);
+		http::HttpAsioService svc(app, 2, http::Limits{.max_in_flight = 256});
 		app.service = &svc;
 		check(svc.port() == 0, "[P] port() is 0 before start");
 		svc.start(0);
@@ -326,7 +326,7 @@ int main() {
 	// [C] Backpressure: in-flight cap 4 -> excess sheds 503.
 	{
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 4);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 4});
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 		auto res = fire(port, "/slow", 16);
@@ -339,7 +339,7 @@ int main() {
 	// [D] N reactors on one port (SO_REUSEPORT).
 	{
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 3, 64);
+		http::HttpAsioService svc(app, 3, http::Limits{.max_in_flight = 64});
 		app.service = &svc;
 		http::AsioBindOptions b; b.reuse_port = true; svc.set_bind_options(b);
 		svc.start(0); port = svc.port(); wait_listen(port);
@@ -352,7 +352,7 @@ int main() {
 	// and fans connections out round-robin to all reactors.
 	{
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 4, 64);
+		http::HttpAsioService svc(app, 4, http::Limits{.max_in_flight = 64});
 		app.service = &svc;
 		http::AsioBindOptions b; b.reuse_port = false; svc.set_bind_options(b);
 		svc.start(0); port = svc.port(); wait_listen(port);
@@ -363,7 +363,7 @@ int main() {
 	// [E] Keep-alive: three sequential requests on one connection.
 	{
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 64);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 64});
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 		int fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -385,7 +385,7 @@ int main() {
 	// [F] Compression: enable_compression + Accept-Encoding: gzip -> gzip round-trips.
 	{
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 64);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 64});
 		app.service = &svc;
 		svc.enable_compression();
 		svc.start(0); port = svc.port(); wait_listen(port);
@@ -399,7 +399,7 @@ int main() {
 	// [G] Error hook.
 	{
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 64);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 64});
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 		auto r = do_request(port, "/throw");
@@ -417,7 +417,7 @@ int main() {
 	{
 		unsigned short port = 0;
 		StreamApp sapp;
-		http::HttpAsioService svc(sapp, 1, 64);
+		http::HttpAsioService svc(sapp, 1, http::Limits{.max_in_flight = 64});
 		svc.start(0); port = svc.port(); wait_listen(port);
 		const int N = 200000;
 		std::string body;
@@ -437,7 +437,7 @@ int main() {
 	// with If-None-Match is answered 304 (bodyless).
 	{
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 64);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 64});
 		app.service = &svc;
 		svc.enable_conditional();
 		svc.start(0); port = svc.port(); wait_listen(port);
@@ -454,7 +454,7 @@ int main() {
 	// unsatisfiable range is 416.
 	{
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 64);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 64});
 		app.service = &svc;
 		svc.enable_ranges();
 		svc.start(0); port = svc.port(); wait_listen(port);
@@ -475,7 +475,7 @@ int main() {
 	{
 		unsigned short port = 0;
 		ConcurrentStreamApp capp;
-		http::HttpAsioService svc(capp, 1, 64);
+		http::HttpAsioService svc(capp, 1, http::Limits{.max_in_flight = 64});
 		capp.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 
@@ -524,7 +524,7 @@ int main() {
 	{
 		unsigned short port = 0;
 		ConcurrentStreamApp capp;
-		auto* svc = new http::HttpAsioService(capp, 1, 64);
+		auto* svc = new http::HttpAsioService(capp, 1, http::Limits{.max_in_flight = 64});
 		capp.service = svc;
 		svc->start(0); port = svc->port(); wait_listen(port);
 		int fd = ::socket(AF_INET, SOCK_STREAM, 0);

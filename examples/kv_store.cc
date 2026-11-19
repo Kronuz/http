@@ -136,7 +136,7 @@ int main(int argc, char** argv) {
 	// shared by all of them. The default bind (no SO_REUSEPORT) uses the portable
 	// shared-acceptor, so this runs the same on Linux and macOS.
 	std::size_t reactors = std::max(1u, std::thread::hardware_concurrency());
-	http::HttpAsioService service(app, reactors, /*in_flight_limit=*/256);
+	http::HttpAsioService service(app, reactors, http::Limits{.max_in_flight = 256});
 
 	std::signal(SIGINT, on_signal);
 	std::signal(SIGTERM, on_signal);

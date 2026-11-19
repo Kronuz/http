@@ -117,7 +117,8 @@ int main() {
 	}
 	App app;
 	unsigned short port = 0;
-	http::HttpAsioService service(app, 1, 0);
+	// The timeouts off: what the loop costs, without a deadline per read (docs/perf/timeouts-cpu.md has their cost).
+	http::HttpAsioService service(app, 1, http::Limits{.max_in_flight = 0, .idle_timeout = {}, .header_timeout = {}, .inactivity_timeout = {}});
 	service.start(0); port = service.port();
 	const double flat = handlers_per_request(port, get("/flat"), warm, n);
 	const double deep = handlers_per_request(port, get("/deep"), warm, n);

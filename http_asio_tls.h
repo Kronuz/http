@@ -1,6 +1,7 @@
 #pragma once
 
-// Optional TLS adapter. Plain HTTP users retain the same API and dependencies.
+// Optional TLS adapter: what serves HttpAsioService's Tls. Plain HTTP users retain the same
+// API and dependencies.
 #include "http_asio.h"
 #include <asio/ssl.hpp>
 #include <atomic>
@@ -16,11 +17,6 @@
 #include <utility>
 
 namespace http {
-
-// Why a TLS connection ended before serving: past the handshake deadline (queue time
-// included), the connection or handshake cap, or the handshake's own failure, by kind.
-enum class TlsFailure { deadline, connections, handshakes, version, cipher, certificate, protocol, other };
-using TlsFailureHook = std::function<void(TlsFailure)>;
 
 namespace detail {
 // The kind of a failed server handshake, from OpenSSL's reason code.
@@ -296,53 +292,31 @@ private:
 	bool eof_ = false;                // the socket read EOF
 };
 
-struct TlsAdmission {
-	std::atomic<std::size_t> pending{0};
-	std::atomic<std::size_t> active{0};
-	std::size_t maximum, connections;
-	TlsAdmission(std::size_t bound, std::size_t connection_bound)
-		: maximum(bound), connections(connection_bound) {}
-};
-// A TLS connection: admission, then the handshake under a deadline linked to the session's
-// token (shutdown ends it too), then the HTTP connection over the stream.
-inline task::task<void>
-serve_tls_connection(asio::ip::tcp::socket socket, HttpHandler *handler, reactor::Reactor *reactor,
-					 const AsioResponseOptions *options, std::shared_ptr<asio::ssl::context> context,
-					 std::chrono::milliseconds deadline, std::shared_ptr<TlsAdmission> admission,
-					 reactor::SessionContext accepted, TlsFailureHook failed = {}) {
+// A TLS connection: the handshake cap, then the handshake under a deadline linked to the
+// session's token (shutdown ends it too), then the HTTP connection over the stream. The service's
+// max_clients bounds TLS connections as it does plain ones, at the accept.
+inline task::task<void> serve_tls_connection(asio::ip::tcp::socket socket, HttpHandler* handler, reactor::Reactor* reactor,
+	ServiceState* state, reactor::SessionContext accepted) {
+	const std::chrono::milliseconds deadline = state->limits.tls_handshake;
 	auto fail = [&](TlsFailure why) {
-		if (failed) { failed(why); }
+		if (state->tls.failed) { state->tls.failed(why); }
 	};
 	// Queue time consumes the same deadline, before any SSL allocation.
 	auto now = std::chrono::steady_clock::now();
 	if (now >= accepted.accepted_at && now - accepted.accepted_at >= deadline) { fail(TlsFailure::deadline); co_return; }
-	// Admission precedes TLS allocation and is shared across reactor threads.
-	if (admission->active.fetch_add(1) >= admission->connections) {
-		admission->active.fetch_sub(1);
-		fail(TlsFailure::connections);
-		co_return;
-	}
-	struct Lease {
-		std::shared_ptr<TlsAdmission> owner;
-		bool handshake = false;
-		~Lease() {
-			if (handshake)
-				owner->pending.fetch_sub(1);
-			owner->active.fetch_sub(1);
-		}
-		void release() {
-			owner->pending.fetch_sub(1);
-			handshake = false;
-		}
-	} lease{admission};
-	if (admission->pending.fetch_add(1) >= admission->maximum) {
-		admission->pending.fetch_sub(1);
+	// The handshake cap precedes TLS allocation and is shared across reactor threads.
+	if (state->handshakes.fetch_add(1) >= state->limits.tls_handshakes) {
+		state->handshakes.fetch_sub(1);
 		fail(TlsFailure::handshakes);
 		co_return;
 	}
-	lease.handshake = true;
+	struct Handshake {
+		std::atomic<std::size_t>* count;
+		~Handshake() { release(); }
+		void release() { if (count) { count->fetch_sub(1); count = nullptr; } }
+	} handshake_slot{&state->handshakes};
 	// Keep the context and stream alive through every original operation.
-	TlsStream stream(std::move(socket), *context);
+	TlsStream stream(std::move(socket), *state->tls.context);
 	// Subtract elapsed time instead of adding an unbounded duration to a clock.
 	auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - accepted.accepted_at);
 	if (elapsed >= deadline) { fail(TlsFailure::deadline); co_return; }
@@ -355,26 +329,20 @@ serve_tls_connection(asio::ip::tcp::socket socket, HttpHandler *handler, reactor
 		if (handshake_error && handshake.expired()) { fail(TlsFailure::deadline); co_return; }
 	}
 	if (handshake_error) { fail(classify(handshake_error)); co_return; }
-	lease.release();
-	co_await serve_connection(std::move(stream), handler, reactor, options, std::move(accepted));
+	handshake_slot.release();
+	co_await serve_connection(std::move(stream), handler, reactor, state, std::move(accepted));
+}
+// `tls` as the service keeps it: checked against `limits` when it has a context.
+inline Tls checked_tls(const Limits& limits, const Tls& tls) {
+	if (tls.context && (limits.tls_handshake <= std::chrono::milliseconds::zero() || limits.tls_handshakes == 0)) {
+		throw std::invalid_argument("http::Limits: TLS needs a handshake deadline and cap");
+	}
+	return tls;
 }
 } // namespace detail
-// Serves each connection over TLS with `context`: at most `maximum_handshakes` handshakes and
-// `maximum_connections` TLS connections at once, each handshake within `handshake_deadline` of
-// its accept (queue time included). `failed`, when set, hears every connection that ends
-// before serving, and why.
-inline HttpAsioService::ConnectionFactory
-tls_connection_factory(std::shared_ptr<asio::ssl::context> context,
-	std::chrono::milliseconds handshake_deadline = std::chrono::seconds(5),
-	std::size_t maximum_handshakes = 64, std::size_t maximum_connections = 1024, TlsFailureHook failed = {}) {
-	if (!context || handshake_deadline <= std::chrono::milliseconds::zero() || !maximum_handshakes || !maximum_connections) {
-		throw std::invalid_argument("TLS connection configuration");
-	}
-	auto admission = std::make_shared<detail::TlsAdmission>(maximum_handshakes, maximum_connections);
-	return [context = std::move(context), handshake_deadline, admission, failed = std::move(failed)](asio::ip::tcp::socket socket,
-		HttpHandler* handler, reactor::Reactor* reactor, const AsioResponseOptions* options, reactor::SessionContext accepted) {
-		return detail::serve_tls_connection(std::move(socket), handler, reactor, options, context, handshake_deadline, admission, std::move(accepted), failed);
-	};
-}
+
+inline HttpAsioService::HttpAsioService(HttpHandler& handler, std::size_t reactors, const Limits& limits, Tls tls)
+	: HttpAsioService(handler, reactors, limits, detail::checked_tls(limits, tls),
+		tls.context ? &detail::serve_tls_connection : &detail::serve_connection<asio::ip::tcp::socket>) {}
 
 } // namespace http

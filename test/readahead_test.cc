@@ -825,7 +825,7 @@ struct Server {
 	App app;
 	unsigned short port = 0;
 	http::HttpAsioService svc;
-	explicit Server(std::size_t in_flight = 64) : svc(app, 1, in_flight) { app.service = &svc; }
+	explicit Server(http::Limits limits = http::Limits{.max_in_flight = 64}) : svc(app, 1, limits) { app.service = &svc; }
 	void start() { svc.start(0); port = svc.port(); Conn probe(port, 1); }
 	std::size_t inflight() { return static_cast<std::size_t>(svc.reactor(0).gate().inflight.load()); }
 };
@@ -1202,8 +1202,7 @@ int main() {
 
 	// [W] The reply goes out in 64 KiB slices of head and body together; every byte arrives.
 	{
-		Server s;
-		s.svc.set_inactivity_timeout(2000ms);
+		Server s(http::Limits{.max_in_flight = 64, .inactivity_timeout = 2000ms});
 		s.start();
 		std::size_t head = 0;
 		{   // the head's length for a five-digit body

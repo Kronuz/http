@@ -51,13 +51,12 @@ int main(int argc, char** argv) {
 	// The handler runs on the reactor (nothing leaves it). SO_REUSEPORT
 	// so each reactor binds its own acceptor (best on Linux); the portable shared
 	// acceptor kicks in automatically where SO_REUSEPORT is unavailable.
-	http::HttpAsioService service(app, reactors, /*in_flight_limit=*/0);
-	if (argc > 3 && (std::string(argv[3]) == "--timeouts" || std::string(argv[3]) == "timeouts")) {
-		service.set_request_timeout(std::chrono::seconds(30));
-		service.set_idle_timeout(std::chrono::seconds(60));
-		service.set_header_timeout(std::chrono::seconds(10));
-		service.set_inactivity_timeout(std::chrono::seconds(30));
-	}
+	// No connection or admission bound; the timeouts off, or the production ones with --timeouts.
+	const bool timeouts = argc > 3 && (std::string(argv[3]) == "--timeouts" || std::string(argv[3]) == "timeouts");
+	using std::chrono::seconds;
+	http::HttpAsioService service(app, reactors, timeouts
+		? http::Limits{.max_clients = 0, .max_in_flight = 0, .idle_timeout = seconds(60), .header_timeout = seconds(10), .inactivity_timeout = seconds(30), .request_timeout = seconds(30)}
+		: http::Limits{.max_clients = 0, .max_in_flight = 0, .idle_timeout = seconds(0), .header_timeout = seconds(0), .inactivity_timeout = seconds(0)});
 	http::AsioBindOptions bind;
 	bind.reuse_port = true;
 	service.set_bind_options(bind);

@@ -654,7 +654,7 @@ static bool affinity_death_test(const std::string& request) {
 		std::thread other_thread([&] { other_io.run(); });
 		app.away = &other;
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 64);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 64});
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 		auto r = one(port, request);
@@ -680,7 +680,7 @@ int main() {
 	// [A] A coroutine handler that waits suspends; the loop serves others. One reactor.
 	{
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 256);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 256});
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 		Resp slow;
@@ -707,7 +707,7 @@ int main() {
 	// [C] A reset cancels reads, not writes; a half-close cancels nothing.
 	{
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 256);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 256});
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 
@@ -768,7 +768,7 @@ int main() {
 	// [J] A half-closed client keeps its response (D126); a reset or a failed write cancels.
 	{
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 256);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 256});
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 		const auto released = [&] { return until([&] { return svc.reactor(0).gate().inflight.load() == 0; }); };
@@ -866,7 +866,7 @@ int main() {
 	// [D] The in-flight gate: a request over the cap is refused with 503 + Retry-After: 1.
 	{
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 2);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 2});
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 		std::vector<Resp> out(5);
@@ -893,7 +893,7 @@ int main() {
 	// [S] The streamed join (design D6): the feed and the handler, children of the connection.
 	{
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 64);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 64});
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 		// A complete body, then a reset while the handler still runs: the watch cancels the request,
@@ -937,9 +937,8 @@ int main() {
 	// [E] The buffered-body cap.
 	{
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 64);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 64, .max_body = 1024});
 		app.service = &svc;
-		svc.set_max_body(1024);
 		svc.start(0); port = svc.port(); wait_listen(port);
 		auto post = [&](const std::string& path, std::size_t advertised, const std::string& sent) {
 			Conn c(port);
@@ -973,7 +972,7 @@ int main() {
 	}
 	{   // the default cap is 16 MiB; 0 turns it off
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 64);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 64});
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 		Conn c(port);
@@ -984,7 +983,7 @@ int main() {
 	// [F] Shutdown.
 	{   // a running request is cancelled (Shutdown), its frame outlives the cancel, and its response is written
 		unsigned short port = 0;
-		auto svc = std::make_unique<http::HttpAsioService>(app, 1, 64);
+		auto svc = std::make_unique<http::HttpAsioService>(app, 1, http::Limits{.max_in_flight = 64});
 		app.service = svc.get();
 		svc->start(0); port = svc->port(); wait_listen(port);
 		auto o = app.get_obs("stop");
@@ -1003,7 +1002,7 @@ int main() {
 	}
 	{   // an idle keep-alive connection that already served a request does not hold stop()
 		unsigned short port = 0;
-		auto svc = std::make_unique<http::HttpAsioService>(app, 2, 64);
+		auto svc = std::make_unique<http::HttpAsioService>(app, 2, http::Limits{.max_in_flight = 64});
 		app.service = svc.get();
 		svc->start(0); port = svc->port(); wait_listen(port);
 		std::vector<std::unique_ptr<Conn>> idle;
@@ -1020,9 +1019,8 @@ int main() {
 	}
 	{   // a stalled writer is bounded by the grace
 		unsigned short port = 0;
-		auto svc = std::make_unique<http::HttpAsioService>(app, 1, 64);
+		auto svc = std::make_unique<http::HttpAsioService>(app, 1, http::Limits{.max_in_flight = 64, .shutdown_grace = 300ms});
 		app.service = svc.get();
-		svc->set_shutdown_grace(300ms);
 		svc->start(0); port = svc->port(); wait_listen(port);
 		Conn c(port);
 		int rcv = 4096; ::setsockopt(c.fd, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof(rcv));
@@ -1039,7 +1037,7 @@ int main() {
 	// [G] The per-request watch does not disturb pipelining or keep-alive.
 	{
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 64);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 64});
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 		Conn c(port);
@@ -1059,7 +1057,7 @@ int main() {
 	// and the request is already cancelled when its read returns.
 	{
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 64);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 64});
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 		const auto head = [](const std::string& id) {
@@ -1092,7 +1090,7 @@ int main() {
 	// [I] A cancel callback that throws is dropped; the handler's frames end by completing.
 	{
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 64);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 64});
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 		{   // streamed: the connection frame must not unwind under the running handler
@@ -1135,7 +1133,7 @@ int main() {
 	// [T] The task loop (design T4 (b)-(h); (a) and the never-asking watch are handler_count_test).
 	{   // (b) a budget loop is demoted between slices, the loop serves others meanwhile, and nothing stays queued after stop()
 		unsigned short port = 0;
-		auto svc = std::make_unique<http::HttpAsioService>(app, 1, 64);
+		auto svc = std::make_unique<http::HttpAsioService>(app, 1, http::Limits{.max_in_flight = 64});
 		app.service = svc.get();
 		svc->start(0); port = svc->port(); wait_listen(port);
 		app.demoted_seen = 0;
@@ -1158,7 +1156,7 @@ int main() {
 	}
 	{   // (c) a handler resumed by a std::thread finishes on the loop thread
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 64);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 64});
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 		auto r = one(port, get("/thread?id=thread", "Connection: close\r\n"));
@@ -1168,7 +1166,7 @@ int main() {
 		const auto baseline = task::detail::live_frames();
 		{
 			unsigned short port = 0;
-			auto svc = std::make_unique<http::HttpAsioService>(app, 2, 64);
+			auto svc = std::make_unique<http::HttpAsioService>(app, 2, http::Limits{.max_in_flight = 64});
 			app.service = svc.get();
 			svc->start(0); port = svc->port(); wait_listen(port);
 			Conn a(port), b(port), k(port), s(port);
@@ -1200,7 +1198,7 @@ int main() {
 	}
 	{   // Request::scheduler(): a handler starts a timer and a task::deadline on the connection's scheduler
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 64);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 64});
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 		auto r = one(port, get("/scheduler", "Connection: close\r\n"));
@@ -1212,7 +1210,7 @@ int main() {
 	}
 	{   // (h) a cancel callback on the loop thread, outside any task, touches the writer: the affinity check passes
 		unsigned short port = 0;
-		auto svc = std::make_unique<http::HttpAsioService>(app, 1, 64);
+		auto svc = std::make_unique<http::HttpAsioService>(app, 1, http::Limits{.max_in_flight = 64});
 		app.service = svc.get();
 		svc->start(0); port = svc->port(); wait_listen(port);
 		{   // the client resets: the watch's read completion runs the callback (nobody is left to read the answer)
@@ -1241,9 +1239,8 @@ int main() {
 		const auto baseline = task::detail::live_frames();
 		{
 			unsigned short port = 0;
-			auto svc = std::make_unique<http::HttpAsioService>(app, 1, 64);
+			auto svc = std::make_unique<http::HttpAsioService>(app, 1, http::Limits{.max_in_flight = 64, .shutdown_grace = 200ms});
 			app.service = svc.get();
-			svc->set_shutdown_grace(200ms);
 			svc->start(0); port = svc->port(); wait_listen(port);
 			Conn c(port);
 			c.send(get("/ignore?id=d-ignore"));
@@ -1261,7 +1258,7 @@ int main() {
 	}
 	{   // (e) task::cancelled after the request's cancellation is 503 + close; from the handler's own source, 500
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 64);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 64});
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 		auto r = one(port, get("/own-cancel"));
@@ -1281,7 +1278,7 @@ int main() {
 	}
 	{   // (f) a hang-up during a budget loop: no checkpoint passes once the request is cancelled
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 64);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 64});
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 		auto o = app.get_obs("f");
@@ -1297,7 +1294,7 @@ int main() {
 	}
 	{   // (g) an owned stream started, then task::cancelled escapes: no terminal chunk, the request released
 		unsigned short port = 0;
-		http::HttpAsioService svc(app, 1, 64);
+		http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 64});
 		app.service = &svc;
 		svc.start(0); port = svc.port(); wait_listen(port);
 		Conn c(port);
@@ -1314,7 +1311,7 @@ int main() {
 		app.away = &other;
 		{
 			unsigned short port = 0;
-			http::HttpAsioService svc(app, 1, 64);
+			http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 64});
 			app.service = &svc;
 			svc.start(0); port = svc.port(); wait_listen(port);
 			auto r = one(port, get("/affine-child", "Connection: close\r\n"));
@@ -1342,7 +1339,7 @@ int main() {
 			std::thread app_thread([&] { app_io.run(); });
 			{
 				unsigned short port = 0;
-				http::HttpAsioService svc(app, 1, 64);
+				http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 64});
 				app.service = &svc;
 				svc.start(0); port = svc.port(); wait_listen(port);
 				// A root of the application's scheduler suspended on a timer of the service's loop, and a
@@ -1374,7 +1371,7 @@ int main() {
 		}
 		{   // any order is safe: destroy_roots() alone runs stop() and close() first
 			unsigned short port = 0;
-			http::HttpAsioService svc(app, 1, 64);
+			http::HttpAsioService svc(app, 1, http::Limits{.max_in_flight = 64});
 			app.service = &svc;
 			svc.start(0); port = svc.port(); wait_listen(port);
 			task::event never;

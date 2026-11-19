@@ -51,14 +51,19 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <exception>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <coroutine>
 #include <optional>
 #include <string>
@@ -77,6 +82,8 @@
 #include "http_owned_stream_asio.h"
 #include "task_asio.hh"
 
+namespace asio::ssl { class context; }   // http_asio_tls.h holds what serves it
+
 namespace http {
 
 // The reactor pool, accept plumbing, admission gate, and graceful shutdown live in the
@@ -94,16 +101,37 @@ struct AsioResponseOptions {
 	bool conditional = false;   // derive a weak ETag + answer 304 on If-None-Match
 	bool ranges = false;        // serve a byte Range as 206 Partial Content
 	CompressionOptions compression{};
-	// Disabled for existing consumers. Authority opts into an absolute request
-	// network deadline so trickled headers/body bytes cannot renew admission.
+};
+
+// Every bound of a service, taken whole by its constructor, plain and TLS alike. Each timeout is
+// between zero (off) and 24 hours.
+struct Limits {
+	std::size_t max_clients = 1024;     // open connections, idle ones counted; more are closed at accept (0 = no bound)
+	std::size_t max_in_flight = 1024;   // requests admitted per loop; more are answered 503 (0 = no cap)
+	// idle: from a connection's start or a reply's end to the next request's first byte. header:
+	// from that byte to the end of the headers. inactivity: per body read and per 64 KiB of a
+	// buffered reply, so a slow transfer that moves completes. None bounds a running handler.
+	std::chrono::milliseconds idle_timeout{75'000}, header_timeout{30'000}, inactivity_timeout{60'000};
+	// Absolute, from a request's start to its reply's end, so trickled bytes cannot renew it.
 	std::chrono::milliseconds request_timeout{0};
-	// Each 0 = off. idle: from a connection's start or a reply's end to the next request's
-	// first byte. header: from that first byte to the end of the headers. inactivity: per
-	// body read and per 64 KiB of a buffered reply, so a slow transfer that moves completes.
-	std::chrono::milliseconds idle_timeout{0}, header_timeout{0}, inactivity_timeout{0};
+	std::chrono::milliseconds shutdown_grace{5'000};   // stop() between asking requests to stop and forcing them
 	// The largest body buffered into Request::body (0 = no cap); a larger request gets 413.
 	// A route that streams its body (wants_body_stream / on_request_body) is not capped.
-	std::size_t max_body = 16u * 1024 * 1024;
+	std::size_t max_body = 16u << 20;
+	std::chrono::milliseconds tls_handshake{5'000};    // from the accept, queue time included
+	std::size_t tls_handshakes = 64;                   // handshakes at once, across the loops
+};
+
+// Why a TLS connection ended before serving: past the handshake deadline (queue time
+// included), the handshake cap, or the handshake's own failure, by kind.
+enum class TlsFailure { deadline, handshakes, version, cipher, certificate, protocol, other };
+using TlsFailureHook = std::function<void(TlsFailure)>;
+
+// A service's TLS: the context its connections present (none: plain HTTP), and the hook that
+// hears each connection that ends before serving, and why. Serving it takes http_asio_tls.h.
+struct Tls {
+	std::shared_ptr<asio::ssl::context> context;
+	TlsFailureHook failed;
 };
 
 namespace detail {
@@ -552,11 +580,7 @@ public:
 		};
 		struct Cancel {
 			ConnectionInput* input;
-			void operator()() const {
-				input->cancelled_ = true;
-				asio::error_code ignored;
-				input->stream_.lowest_layer().cancel(ignored);
-			}
+			void operator()() const { input->cancel_read(); }
 		};
 		using Direct = decltype(task::await_asio<void(asio::error_code, std::size_t)>(std::declval<SocketRead>(), std::declval<task::cancel_token>()));
 		ConnectionInput& input_;
@@ -576,6 +600,12 @@ public:
 	// The next bytes, appended to `out`: at most kReadAhead, always through the watch's read into
 	// the input's own buffer, so a connection waiting here holds no buffer of its own.
 	Read read_ahead(std::string& out, task::cancel_token token) { return Read(*this, out, std::move(token)); }
+	// Ends the waiting reader's read as a requested token does: with operation_aborted.
+	void cancel_read() noexcept {
+		cancelled_ = true;
+		asio::error_code ignored;
+		stream_.lowest_layer().cancel(ignored);
+	}
 private:
 	// The one coroutine the pending read resumes when it completes: a reader or the drain, with
 	// the scheduler it suspended on.
@@ -841,18 +871,61 @@ inline std::size_t bytes_left(const std::array<asio::const_buffer, N>& buffers) 
 	return n;
 }
 
+// The connections of one loop waiting for their next request's first byte: close_idle() walks it
+// on the loop. Each is tracked and untracked on that loop only.
+struct IdleList {
+	reactor::Reactor* reactor = nullptr;
+	reactor::AbortList waiting;
+};
+
+// What the connections of one service share: their limits and response transforms, fixed before
+// start(), and what stop_accepting() and close_idle() tell them.
+struct ServiceState {
+	ServiceState(const Limits& bounds, Tls secure, std::size_t loops) : limits(bounds), tls(std::move(secure)) {
+		for (std::size_t i = 0; i < loops; ++i) { idle.push_back(std::make_unique<IdleList>()); }
+	}
+	const Limits limits;
+	const Tls tls;
+	AsioResponseOptions response;
+	std::atomic<std::size_t> handshakes{0};   // TLS handshakes in progress, across the loops
+	// stop_accepting() ran: a request whose first byte comes later is refused, a reply closes its connection.
+	std::atomic<bool> closing{false};
+	// close_idle() calls: a connection idle before the latest one closes after its reply.
+	std::atomic<std::uint64_t> idle_closes{0};
+	std::vector<std::unique_ptr<IdleList>> idle;   // one per loop
+	reactor::AbortList& idle_of(const reactor::Reactor& loop) {
+		for (auto& list : idle) { if (list->reactor == &loop) { return list->waiting; } }
+		std::abort();   // every loop of the service has its list
+	}
+};
+
+// A connection waiting for its next request, on its loop's idle list: close_idle() ends the wait,
+// and with it the connection.
+template<class Stream>
+struct IdleWait final : reactor::Abortable {
+	IdleWait(reactor::AbortList& list, ConnectionInput<Stream>& waiting) : input(waiting) { list.add(*this); }
+	void abort() override { input.cancel_read(); }
+	ConnectionInput<Stream>& input;
+};
+
 // Serve one connection: a keep-alive loop of parse -> handler -> write, all tasks on the
 // connection's loop. handle() is awaited as a child task, so a handler that waits suspends and
-// the loop serves other connections. A request is admitted at headers-complete (reactor gate,
-// else 503), and from then until its response is written it is tracked for shutdown and
-// watched for a client hang-up; both cancel it (Request::cancel) without destroying its frame.
+// the loop serves other connections. A request enters the reactor's gate at its first byte, so
+// wait_requests() counts it from then; one over the gate's cap, or one whose first byte comes
+// after stop_accepting(), is answered 503 at headers-complete. From then until its response is
+// written it is tracked for shutdown and watched for a client hang-up; both cancel it
+// (Request::cancel) without destroying its frame. Its reply says Connection: close, and the
+// connection closes after it, once the service stops accepting or close_idle() ran since the
+// connection last waited idle.
 // `stop` (the session's token) ends only the reads of a request, each through a deadline
 // linked to it when a timeout bounds the read; the handler and the reply's writes never see
 // it. A handler that opted into wants_body_stream runs beside the feed of its BodyStream.
 template<class Stream>
 inline task::task<void> serve_connection_body(Stream& socket, const std::shared_ptr<ConnectionInput<Stream>>& input, HttpHandler* handler,
-	reactor::Reactor* reactor, const AsioResponseOptions* options, const task::cancel_token& stop) {
+	reactor::Reactor* reactor, ServiceState* state, const task::cancel_token& stop) {
 	std::optional<RequestRejected> rejected;
+	const Limits& limits = state->limits;
+	const AsioResponseOptions* options = &state->response;
 	task::asio_scheduler& scheduler = reactor->scheduler();
 	try {
 		asio::error_code opt_ec;
@@ -861,13 +934,31 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 		if (auto peer = socket.lowest_layer().remote_endpoint(opt_ec); !opt_ec) { remote = peer.address().to_string(); }
 		const asio::any_io_executor ex = socket.get_executor();
 		RequestParser parser;
-		parser.set_body_limit(options ? options->max_body : 0);
-		reactor::AdmissionGate::Lease admitted;   // held from headers-complete to the settled response
-		// The headers-complete hook: admit the request, build the app's per-request extension,
-		// then choose how to take the body -- a BodyStream, an on_request_body sink, or the
-		// buffer in Request::body.
-		parser.set_headers_callback([handler, reactor, &remote, &admitted](Request& req) -> RequestParser::BodyIntake {
+		parser.set_body_limit(limits.max_body);
+		reactor::AdmissionGate::Lease admitted;   // held from the request's first byte to its settled response
+		bool refused = false;                     // its first byte came after stop_accepting()
+		// The request's first byte: it enters the gate, then reads whether the service stops
+		// accepting. The fence orders the two against stop_accepting()'s store and wait_requests()'
+		// read of the gates: a request that read the flag clear is counted there.
+		const auto first_byte = [&] {
 			admitted = reactor->gate().enter();
+			std::atomic_thread_fence(std::memory_order_seq_cst);
+			refused = state->closing.load(std::memory_order_seq_cst);
+			if (refused) { admitted.reset(); }
+		};
+		// close_idle()'s count when the connection started: a later call closes it, at once when it
+		// waits for a request (the walk on its loop), else at its next wait.
+		const std::uint64_t idle_epoch = state->idle_closes.load(std::memory_order_relaxed);
+		// Whether the connection may carry another request after this reply.
+		const auto stays_open = [&] {
+			return !state->closing.load(std::memory_order_relaxed) && state->idle_closes.load(std::memory_order_relaxed) == idle_epoch;
+		};
+		reactor::AbortList& idle_list = state->idle_of(*reactor);
+		// The headers-complete hook: refuse a request the gate or the stop did not admit, build the
+		// app's per-request extension, then choose how to take the body -- a BodyStream, an
+		// on_request_body sink, or the buffer in Request::body.
+		parser.set_headers_callback([handler, &remote, &admitted, &refused](Request& req) -> RequestParser::BodyIntake {
+			if (refused) { throw RequestRejected(503, "Service Unavailable\n"); }
 			if (!admitted) { throw RequestRejected(503, "Service Unavailable\n", RejectionContent::Text, 1); }
 			req.remote = remote;
 			req.extension = handler->create_extension(req);
@@ -900,9 +991,7 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 
 		using clock = std::chrono::steady_clock;
 		const auto ms = [](std::chrono::milliseconds t) { return t.count() > 0; };
-		const auto idle = options ? options->idle_timeout : std::chrono::milliseconds{0};
-		const auto header = options ? options->header_timeout : std::chrono::milliseconds{0};
-		const auto inactivity = options ? options->inactivity_timeout : std::chrono::milliseconds{0};
+		const auto idle = limits.idle_timeout, header = limits.header_timeout, inactivity = limits.inactivity_timeout;
 		// The next body read's deadline: the request's, or sooner when nothing arrives.
 		const auto body_deadline = [&](clock::time_point request_deadline) {
 			return ms(inactivity) ? std::min(request_deadline, clock::now() + inactivity) : request_deadline;
@@ -952,27 +1041,37 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 		for (;;) {
 			// A shutdown that arrived while the last request ran: its next read would not start.
 			if (stop.requested()) { co_return; }
-			const auto request_deadline = options && options->request_timeout.count() > 0
-				? clock::now() + options->request_timeout
+			const auto request_deadline = limits.request_timeout.count() > 0
+				? clock::now() + limits.request_timeout
 				: clock::time_point::max();
 			// Phase 1: parse the request line + headers. Until a byte arrives the idle
 			// timeout bounds the wait; from the first byte, the header timeout.
 			auto header_deadline = clock::time_point::max();
-			if (!buffered.empty() && ms(header)) { header_deadline = clock::now() + header; }
-			bool idle_wait = buffered.empty();   // nothing of the next request has arrived
+			bool started = !buffered.empty();   // the request's first byte has arrived (pipelined)
+			if (started) {
+				first_byte();
+				if (ms(header)) { header_deadline = clock::now() + header; }
+			}
 			while (!parser.headers_done()) {
 				if (buffered.empty()) {
-					if (idle_wait) {
-						// The connection waits holding only the input's own buffer.
+					std::optional<IdleWait<Stream>> idle_wait;
+					if (!started) {
+						// The connection waits holding only the input's own buffer, on its loop's idle list.
 						scratch.reset();
 						if (buffered.capacity() > 2 * ConnectionInput<Stream>::kReadAhead) { std::string().swap(buffered); }
+						if (!stays_open()) { co_return; }
+						idle_wait.emplace(idle_list, *input);
 					}
 					const bool waiting = header_deadline == clock::time_point::max();
 					const auto until = std::min(request_deadline, waiting ? (ms(idle) ? clock::now() + idle : clock::time_point::max()) : header_deadline);
 					ReadResult r = co_await input->read_ahead(buffered, bounded(until, stop));
+					idle_wait.reset();
 					settle_read(r);
 					if (r.error || r.bytes == 0) { co_return; }
-					idle_wait = false;
+					if (!started) {
+						started = true;
+						first_byte();
+					}
 					if (waiting && ms(header)) { header_deadline = clock::now() + header; }
 				}
 				std::size_t used = parser.feed(buffered.data(), buffered.size());
@@ -1068,7 +1167,7 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 				(void)ignored;
 				input->unwatch();
 				request.set_cancel_watch(nullptr);
-				if (fed != Fed::Complete) { keep_alive = false; }
+				if (fed != Fed::Complete || !stays_open()) { keep_alive = false; }
 
 				if (!writer.is_deferred() && !writer.ended()) {
 					writer.status(500);
@@ -1078,7 +1177,7 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 				const int sent = send_reply(writer, keep_alive);
 				if (sent == 0 || (sent < 0 && !co_await respond(writer, keep_alive, request_deadline))) { request.cancel(disconnected); co_return; }
 				admitted.reset();
-				if (!keep_alive || writer.wants_close()) { break; }
+				if (!keep_alive || writer.wants_close() || !stays_open()) { break; }
 				parser.reset();
 				continue;
 			}
@@ -1121,10 +1220,11 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 					map_handler_error(handler, request, writer, std::current_exception());
 				}
 			}
+			keep_alive = keep_alive && stays_open();
 			const int sent = send_reply(writer, keep_alive);
 			if (sent == 0 || (sent < 0 && !co_await respond(writer, keep_alive, request_deadline))) { request.cancel(disconnected); co_return; }
 			admitted.reset();
-			if (!keep_alive || writer.wants_close()) { break; }
+			if (!keep_alive || writer.wants_close() || !stays_open()) { break; }
 		}
 	} catch (const RequestRejected& error) {
 		rejected.emplace(error);
@@ -1148,9 +1248,9 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 // watch's read to complete, so the socket and the input outlive it.
 template<class Stream>
 inline task::task<void> serve_connection(Stream socket, HttpHandler* handler,
-    reactor::Reactor* reactor, const AsioResponseOptions* options, reactor::SessionContext context) {
+    reactor::Reactor* reactor, ServiceState* state, reactor::SessionContext context) {
 	auto input = std::make_shared<ConnectionInput<Stream>>(socket);
-	try { co_await serve_connection_body(socket, input, handler, reactor, options, context.stop); } catch (...) {}
+	try { co_await serve_connection_body(socket, input, handler, reactor, state, context.stop); } catch (...) {}
 	asio::error_code error; socket.lowest_layer().close(error);
 	co_await input->drain();
 }
@@ -1160,78 +1260,74 @@ inline task::task<void> serve_connection(Stream socket, HttpHandler* handler,
 // The HTTP service: an application HttpHandler served over a reactor::TcpServer. The
 // server owns the runtime (N shared-nothing reactors on N threads, one port via
 // SO_REUSEPORT or a portable shared acceptor, per-reactor admission gate, graceful
-// shutdown); this class is the thin HTTP-shaped adapter -- it turns the handler + the
-// response options into the per-connection Session (detail::serve_connection) and
-// exposes the same surface callers had before the runtime was extracted.
+// shutdown); this class is the thin HTTP-shaped adapter -- it turns the handler, the Limits
+// and the response transforms into the per-connection Session (detail::serve_connection).
 class HttpAsioService {
+	using Serve = task::task<void> (*)(asio::ip::tcp::socket, HttpHandler*, reactor::Reactor*, detail::ServiceState*, reactor::SessionContext);
+	static const Limits& checked(const Limits& limits) {
+		for (const auto timeout : {limits.idle_timeout, limits.header_timeout, limits.inactivity_timeout, limits.request_timeout,
+				limits.shutdown_grace, limits.tls_handshake}) {
+			if (timeout < std::chrono::milliseconds::zero() || timeout > std::chrono::hours(24)) {
+				throw std::invalid_argument("http::Limits: each timeout is between zero and 24 hours");
+			}
+		}
+		if (limits.max_in_flight > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+			throw std::invalid_argument("http::Limits: max_in_flight past int");
+		}
+		return limits;
+	}
+	HttpAsioService(HttpHandler& handler, std::size_t reactors, const Limits& limits, Tls tls, Serve serve)
+		: handler_(handler), state_(checked(limits), std::move(tls), reactors != 0 ? reactors : 1), serve_(serve),
+		  server_(reactors, static_cast<int>(limits.max_in_flight), reactor::Session{
+			[this](asio::ip::tcp::socket socket, reactor::Reactor& reactor, reactor::SessionContext context) {
+				return serve_(std::move(socket), &handler_, &reactor, &state_, std::move(context));
+			}}, limits.max_clients) {
+		server_.set_shutdown_grace(limits.shutdown_grace);
+		for (std::size_t i = 0; i < server_.reactors(); ++i) { state_.idle[i]->reactor = &server_.reactor(i); }
+	}
 public:
-	// A connection's session: serve `socket` with `handler` (detail::serve_connection, the
-	// default, or the TLS factory's) and honor `context.stop` (shutdown) in its waits.
-	using ConnectionFactory = std::function<task::task<void>(asio::ip::tcp::socket, HttpHandler*, reactor::Reactor*,
-		const AsioResponseOptions*, reactor::SessionContext)>;
-	// `reactors` loops, each admitting at most `in_flight_limit` requests at a time (0 =
-	// no cap); a request over the cap is refused with a 503 and `Retry-After: 1`. At most
-	// `maximum_connections` connections live at once (0 = no bound).
-	HttpAsioService(HttpHandler& handler, std::size_t reactors, std::size_t in_flight_limit,
-		ConnectionFactory connection = {}, std::size_t maximum_connections = 0)
-		: handler_(handler), connection_(std::move(connection)),
-		  server_(reactors, static_cast<int>(in_flight_limit), reactor::Session{
-			[this](asio::ip::tcp::socket socket, reactor::Reactor& reactor, reactor::SessionContext context) -> task::task<void> {
-				if (connection_) { return connection_(std::move(socket), &handler_, &reactor, &response_, std::move(context)); }
-				return detail::serve_connection(std::move(socket), &handler_, &reactor, &response_, std::move(context));
-			}}, maximum_connections) {}
+	// `reactors` loops serving plain HTTP within `limits` (the tls_ fields unused). Throws
+	// std::invalid_argument for a timeout outside zero to 24 hours or a max_in_flight past int.
+	HttpAsioService(HttpHandler& handler, std::size_t reactors, const Limits& limits)
+		: HttpAsioService(handler, reactors, limits, {}, &detail::serve_connection<asio::ip::tcp::socket>) {}
+	// The same over TLS with `tls.context`, plain without one; defined in http_asio_tls.h, which
+	// serves it. Also throws for a zero tls_handshake or tls_handshakes.
+	inline HttpAsioService(HttpHandler& handler, std::size_t reactors, const Limits& limits, Tls tls);
 
 	HttpAsioService(const HttpAsioService&) = delete;
 	HttpAsioService& operator=(const HttpAsioService&) = delete;
 
+	const Limits& limits() const noexcept { return state_.limits; }
 	void set_bind_options(const AsioBindOptions& options) { server_.set_bind_options(options); }
-	void set_connection_limit(std::size_t maximum) { server_.set_connection_limit(maximum); }
 	reactor::ConnectionStats connection_stats() const noexcept { return server_.connection_stats(); }
 	std::shared_ptr<const reactor::ConnectionAdmission> connection_observer() const noexcept { return server_.connection_observer(); }
-	std::chrono::milliseconds checked_timeout(std::chrono::milliseconds timeout) const {
-		if (started_) { throw std::logic_error("network timeouts must be set before startup"); }
-		if (timeout < std::chrono::milliseconds::zero() || timeout > std::chrono::hours(24)) {
-			throw std::invalid_argument("network timeouts must be between zero and 24 hours");
-		}
-		return timeout;
-	}
-	void set_request_timeout(std::chrono::milliseconds timeout) {
-		if (started_) { throw std::logic_error("request network timeout must be set before startup"); }
-		if (timeout < std::chrono::milliseconds::zero() || timeout > std::chrono::hours(24)) {
-			throw std::invalid_argument("request network timeout must be between zero and 24 hours");
-		}
-		response_.request_timeout = timeout;
-	}
-	// Each off by default; set before startup, between zero and 24 hours (AsioResponseOptions).
-	void set_idle_timeout(std::chrono::milliseconds timeout) { response_.idle_timeout = checked_timeout(timeout); }
-	void set_header_timeout(std::chrono::milliseconds timeout) { response_.header_timeout = checked_timeout(timeout); }
-	void set_inactivity_timeout(std::chrono::milliseconds timeout) { response_.inactivity_timeout = checked_timeout(timeout); }
-	// The largest body buffered into Request::body (16 MiB by default; 0 = no cap). A larger
-	// request is answered 413 and the connection closes. Streamed and sunk bodies are not capped.
-	void set_max_body(std::size_t bytes) {
-		if (started_) { throw std::logic_error("body cap must be set before startup"); }
-		response_.max_body = bytes;
-	}
-	// How long stop() lets in-flight requests finish after asking them to stop (5 s by
-	// default) before it closes the sockets a stalled peer still holds; see reactor::TcpServer.
-	void set_shutdown_grace(std::chrono::milliseconds grace) { server_.set_shutdown_grace(grace); }
 	void enable_compression(CompressionOptions options = {}) {
-		response_.compress = true;
-		response_.compression = std::move(options);
+		state_.response.compress = true;
+		state_.response.compression = std::move(options);
 	}
 	// A repeat GET of an unchanged resource costs a hash + a header instead of the body
 	// (weak ETag / If-None-Match -> 304).
-	void enable_conditional() { response_.conditional = true; }
+	void enable_conditional() { state_.response.conditional = true; }
 	// A buffered GET 200 advertises Accept-Ranges and serves a single byte Range as 206
 	// (or 416) -- what media players and resumable downloads use to seek.
-	void enable_ranges() { response_.ranges = true; }
+	void enable_ranges() { state_.response.ranges = true; }
 
 	// Bind + run all reactors (each on its own thread). Returns once the threads are
 	// listening; the caller keeps its thread and stops with stop().
-	void start(unsigned short port) { started_ = true; server_.start(port); }
+	void start(unsigned short port) { server_.start(port); }
 	// The port the listeners are bound to, as the OS reports it (the answer for start(0)); see
 	// reactor::TcpServer::port(). Valid after start() returns, until stop(); 0 before start().
 	unsigned short port() const noexcept { return server_.port(); }
+
+	// Closes the connections waiting for a request at once, and every other one after its reply,
+	// which says Connection: close. Returns at once, from any thread (a loop's too); each loop
+	// closes its idle connections on its next turn.
+	void close_idle() {
+		state_.idle_closes.fetch_add(1, std::memory_order_relaxed);
+		for (auto& list : state_.idle) {
+			asio::post(list->reactor->io(), [idle = list.get()] { idle->waiting.each([](reactor::Abortable& wait) { wait.abort(); }); });
+		}
+	}
 
 	// Teardown is task's four phases, each a call forwarded to reactor::TcpServer, so an
 	// application with its own schedulers runs each phase on all of them before the next:
@@ -1243,8 +1339,24 @@ public:
 	//   destruction      runs every phase not yet run (server_'s destructor), so a service going
 	//                    out of scope alone tears down cleanly.
 	// Each phase first runs any earlier one not yet run, so every call order is safe.
-	void stop() { server_.stop(); }
-	void close() { server_.stop(); server_.close(); }
+	// stop()'s first part runs in steps for a caller that lets requests finish first, from outside
+	// the loops and from one thread: stop_accepting(), wait_requests(token), cancel_requests(), then
+	// stop() (force_connections() is stop()'s own after the grace). From stop_accepting() on, a
+	// request whose first byte comes later is answered 503 on the connection it came on, and every
+	// reply says Connection: close and closes its connection. wait_requests() counts a request from
+	// its first byte: an accepted connection that sent nothing yet holds none.
+	void stop_accepting() {
+		state_.closing.store(true, std::memory_order_seq_cst);
+		server_.stop_accepting();
+	}
+	bool wait_requests(const task::cancel_token& token) { return server_.wait_requests(token); }
+	void cancel_requests() { server_.cancel_requests(); }
+	void force_connections() { server_.force_connections(); }
+	void stop() {
+		state_.closing.store(true, std::memory_order_seq_cst);
+		server_.stop();
+	}
+	void close() { stop(); server_.close(); }
 	void destroy_roots() { close(); server_.destroy_roots(); }
 
 	std::size_t reactors() const { return server_.reactors(); }
@@ -1254,13 +1366,12 @@ public:
 	void enable_lag_probe() { server_.enable_lag_probe(); }
 
 private:
-	// Declared before server_: the Session captures &handler_/&response_, and member
+	// Declared before server_: the Session captures &handler_ and &state_, and member
 	// destruction is reverse-declaration, so server_ (its threads joined in ~TcpServer)
-	// is torn down before the handler and options it referenced.
+	// is torn down before what it referenced.
 	HttpHandler& handler_;
-	AsioResponseOptions response_{};
-	bool started_ = false;
-	ConnectionFactory connection_;
+	detail::ServiceState state_;
+	Serve serve_;
 	reactor::TcpServer server_;
 };
 

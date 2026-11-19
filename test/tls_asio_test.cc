@@ -1,4 +1,4 @@
-// The TLS connection factory over real TCP: a client that trusts the server's certificate
+// A TLS service over real TCP: a client that trusts the server's certificate
 // gets its reply; the failure hook names why other connections ended before serving: plain
 // HTTP sent to the TLS port (protocol), a client that refuses the certificate
 // (certificate), and a client that never sends a ClientHello (deadline). The stream itself:
@@ -220,7 +220,7 @@ int main() {
 	reactor::tls::configure(*server, reactor::tls::Options{cert, key, ""}, reactor::tls::Role::Server);
 	Hello hello;
 	unsigned short port = 0;
-	http::HttpAsioService svc(hello, 1, 64, http::tls_connection_factory(server, 300ms, 64, 1024, count), 1024);
+	http::HttpAsioService svc(hello, 1, http::Limits{.max_in_flight = 64, .tls_handshake = 300ms}, http::Tls{server, count});
 	svc.start(0); port = svc.port();
 
 	asio::ssl::context trusting(asio::ssl::context::tls), refusing(asio::ssl::context::tls);

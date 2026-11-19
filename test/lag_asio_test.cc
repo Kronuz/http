@@ -56,7 +56,7 @@ int main() {
 	std::printf("== http reactor lag probe test ==\n");
 	App app;
 	{
-		http::HttpAsioService off(app, 2, 16);
+		http::HttpAsioService off(app, 2, http::Limits{.max_in_flight = 16});
 		unsigned short port = 0;
 		off.start(0); port = off.port();
 		Client c(port);
@@ -67,7 +67,7 @@ int main() {
 		off.stop();
 	}
 	{
-		http::HttpAsioService on(app, 2, 16);
+		http::HttpAsioService on(app, 2, http::Limits{.max_in_flight = 16});
 		on.enable_lag_probe();
 		unsigned short port = 0;
 		on.start(0); port = on.port();

@@ -303,7 +303,7 @@ int main() {
 	try {
 		resource_lifetime();
 		App app;
-		HttpAsioService server(app, 1, 64);
+		HttpAsioService server(app, 1, http::Limits{.max_in_flight = 64});
 		const auto selected = port();
 		server.start(selected);
 		transfer(app, selected);

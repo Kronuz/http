@@ -86,10 +86,7 @@ int main() {
 	std::signal(SIGPIPE, SIG_IGN);  // a send to a closed connection fails instead
 	Echo echo;
 	unsigned short port = 0;
-	http::HttpAsioService svc(echo, 1, 64);
-	svc.set_idle_timeout(300ms);
-	svc.set_header_timeout(400ms);
-	svc.set_inactivity_timeout(300ms);
+	http::HttpAsioService svc(echo, 1, http::Limits{.max_in_flight = 64, .idle_timeout = 300ms, .header_timeout = 400ms, .inactivity_timeout = 300ms});
 	svc.start(0); port = svc.port();
 
 	{  // a connection that never sends: closed at the idle timeout
@@ -200,8 +197,7 @@ int main() {
 
 	{  // a slow reader that keeps moving: every 64 KiB slice completes in time, though the whole reply takes longer than the bound
 		unsigned short p4 = 0;
-		http::HttpAsioService mover(echo, 1, 64);
-		mover.set_inactivity_timeout(1000ms);
+		http::HttpAsioService mover(echo, 1, http::Limits{.max_in_flight = 64, .idle_timeout = 0ms, .header_timeout = 0ms, .inactivity_timeout = 1000ms});
 		mover.start(0); p4 = mover.port();
 		int fd = dial(p4);
 		constexpr std::size_t size = 4u << 20;
@@ -233,10 +229,7 @@ int main() {
 
 	{  // under the header timeout a slow client is served: a request trickled a byte every 10 ms
 		unsigned short p3 = 0;
-		http::HttpAsioService slow(echo, 1, 64);
-		slow.set_idle_timeout(10s);
-		slow.set_header_timeout(10s);
-		slow.set_inactivity_timeout(10s);
+		http::HttpAsioService slow(echo, 1, http::Limits{.max_in_flight = 64, .idle_timeout = 10s, .header_timeout = 10s, .inactivity_timeout = 10s});
 		slow.start(0); p3 = slow.port();
 		const std::string req = "GET / HTTP/1.1\r\nHost: x\r\n\r\n";
 		const auto trickle = [&](int fd) {
@@ -257,7 +250,7 @@ int main() {
 
 	{  // unset: a silent connection stays open past every bound above
 		unsigned short p2 = 0;
-		http::HttpAsioService plain(echo, 1, 64);
+		http::HttpAsioService plain(echo, 1, http::Limits{.max_in_flight = 64, .idle_timeout = 0ms, .header_timeout = 0ms, .inactivity_timeout = 0ms});
 		plain.start(0); p2 = plain.port();
 		int fd = dial(p2);
 		timeval tv{.tv_sec = 1, .tv_usec = 200000};
