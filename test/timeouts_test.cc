@@ -1,10 +1,10 @@
-// The idle, header, and inactivity timeouts (AsioResponseOptions) over real TCP: a silent
+// The idle, header, and inactivity timeouts (http::Limits) over real TCP: a silent
 // connection closes at the idle timeout, from its start and after a reply; headers trickled
 // past the header timeout close even though bytes keep arriving; a body that stops closes at
 // the inactivity timeout while a slow one that moves completes; a reply the client stops
 // reading is cut at the inactivity timeout while a slow reader that moves gets all of it; a
-// slow client that stays under a timeout is served, also on a reused connection; unset, none
-// of them fires.
+// slow client that stays under a timeout is served, also on a reused connection; off (zero),
+// none of them fires.
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -248,7 +248,7 @@ int main() {
 		slow.stop();
 	}
 
-	{  // unset: a silent connection stays open past every bound above
+	{  // off: a silent connection stays open past every bound above
 		unsigned short p2 = 0;
 		http::HttpAsioService plain(echo, 1, http::Limits{.max_in_flight = 64, .idle_timeout = 0ms, .header_timeout = 0ms, .inactivity_timeout = 0ms});
 		plain.start(0); p2 = plain.port();
@@ -257,7 +257,7 @@ int main() {
 		::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 		char b;
 		const ssize_t n = ::recv(fd, &b, 1, 0);
-		check(n < 0, "with the timeouts unset, a silent connection stays open");
+		check(n < 0, "with the timeouts off, a silent connection stays open");
 		::close(fd);
 		plain.stop();
 	}

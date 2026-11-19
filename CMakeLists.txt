@@ -213,6 +213,13 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 		set_target_properties(tls_asio_test PROPERTIES NO_SYSTEM_FROM_IMPORTED ON)
 		add_test(NAME tls_asio COMMAND tls_asio_test)
 		set_tests_properties(tls_asio PROPERTIES TIMEOUT 60)
+
+		# http::Limits at each bound, close_idle() and the phased stop, plain and over TLS.
+		add_executable(limits_test test/limits_test.cc)
+		target_link_libraries(limits_test PRIVATE http reactor::tls)
+		set_target_properties(limits_test PROPERTIES NO_SYSTEM_FROM_IMPORTED ON)
+		add_test(NAME limits COMMAND limits_test)
+		set_tests_properties(limits PROPERTIES TIMEOUT 120)
 	endif()
 
 	# The idle, header, and inactivity timeouts over real TCP.
