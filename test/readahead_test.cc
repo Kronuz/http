@@ -34,6 +34,7 @@
 //       long idle, for headers split across reads and headers larger than the read-ahead
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -308,16 +309,28 @@ static void lazy_watch_tests() {
 		auto r = read_once(p, in, 100);
 		check(r.done && r.error == asio::error::eof, "[L] and the EOF is read afterwards");
 	}
-	{   // a reset before anyone asked is a disconnect too
+	{   // a reset before anyone asked is a disconnect too. The wait polls: a recv, even a peek, takes
+		// the pending reset on Linux, and the next recv then reads EOF (pinned below).
 		Pair p;
 		auto in = std::make_shared<Input>(p.server);
 		int fired = 0;
 		in->watch([&] { ++fired; }, true);
 		linger l{1, 0}; ::setsockopt(p.client, SOL_SOCKET, SO_LINGER, &l, sizeof(l)); ::close(p.client); p.client = -1;
-		check(until([&] { char b; return ::recv(p.server.native_handle(), &b, 1, MSG_PEEK | MSG_DONTWAIT) < 0 && errno != EAGAIN && errno != EWOULDBLOCK; }), "[L] the reset reached the server");
+		check(until([&] { pollfd f{p.server.native_handle(), POLLIN, 0}; return ::poll(&f, 1, 0) > 0; }), "[L] the reset reached the server");
 		in->engage();
 		check(fired == 1, "[L] engage() after a reset fires the disconnect");
 	}
+#if defined(__linux__)
+	{   // Linux: a peek that returns the reset takes it, and the next recv reads EOF
+		Pair p;
+		linger l{1, 0}; ::setsockopt(p.client, SOL_SOCKET, SO_LINGER, &l, sizeof(l)); ::close(p.client); p.client = -1;
+		int first = 0;
+		check(until([&] { char b; const auto n = ::recv(p.server.native_handle(), &b, 1, MSG_PEEK | MSG_DONTWAIT); first = n < 0 ? errno : 0; return n < 0 && errno != EAGAIN; }) && first == ECONNRESET,
+			"[L] Linux: a peek after a reset returns ECONNRESET");
+		char b;
+		check(::recv(p.server.native_handle(), &b, 1, MSG_DONTWAIT) == 0, "[L] Linux: and takes it: the next recv reads EOF, so only the transport's own read may see a reset");
+	}
+#endif
 	{   // asked before anything happened: from then on it is the read-ahead watch
 		Pair p;
 		auto in = std::make_shared<Input>(p.server);

@@ -50,9 +50,10 @@ using Headers = std::vector<std::pair<std::string, std::string>>;
 
 class BodyStream;   // http_body_stream.h -- the streamed request body (Request::body_stream)
 
-// The reason a request is cancelled when its client hangs up: a read fails (a reset), or the
-// reply's write fails. A half-close (EOF) is not a hang-up. The service stopping cancels with
-// task::cancel_reason::shutdown.
+// The reason a request is cancelled when its client hangs up (a read fails: a reset) or its
+// reply is not delivered (the write fails, times out, or a deferred reply ends unwritten); the
+// connection ends either way. A half-close (EOF) is not a hang-up. The service stopping cancels
+// with task::cancel_reason::shutdown.
 inline constexpr task::cancel_reason disconnected = task::cancel_reason::user;
 
 // A transport's watch for a client hang-up that starts when the handler first asks for the

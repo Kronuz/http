@@ -182,7 +182,7 @@ struct App : http::HttpHandler {
 	}
 	static task::task<bool> sleep_for(const http::Request& req, std::chrono::milliseconds d) { return ::sleep_for(req.scheduler().executor(), d); }
 	bool wants_body_stream(const http::Request& r) override { return r.path == "/stream" || r.path == "/tbody" || r.path == "/throwcb-stream" || r.path.rfind("/affine-read", 0) == 0 || r.path == "/affine-wrapped"
-		|| r.path == "/body-wait" || r.path == "/body-skip"; }
+		|| r.path == "/body-wait" || r.path == "/body-skip" || r.path == "/stream-big-token"; }
 	std::unique_ptr<http::BodySink> on_request_body(http::Request& r) override {
 		struct Null : http::BodySink { std::size_t n = 0; void write(std::string_view c) override { n += c.size(); } void end() override {} };
 		return r.path == "/sink" ? std::make_unique<Null>() : nullptr;
@@ -491,6 +491,16 @@ struct App : http::HttpHandler {
 		}
 		if (req.path == "/big-token") {   // [J]: keeps its token past handle() and answers 32 MiB, more than the socket buffers take
 			auto o = get_obs(id);
+			o->token = req.cancel_token();
+			o->started = true;
+			w.send(200, std::string(32u << 20, 'x'));
+			o->finished = true;
+			co_return;
+		}
+		if (req.path == "/stream-big-token") {   // [J]: a streamed-body handler that keeps its token and answers 32 MiB
+			auto o = get_obs(id);
+			std::string chunk;
+			while (!co_await req.body_stream->read(chunk)) {}
 			o->token = req.cancel_token();
 			o->started = true;
 			w.send(200, std::string(32u << 20, 'x'));
@@ -825,6 +835,18 @@ int main() {
 			std::printf("  [J] half-closed then gone: released %.0f ms after the reset, poll ran %.0f ms (bound 300 ms)\n", since_ms(t0), o->finished_after_ms.load());
 			check(o->finished_after_ms.load() >= 290.0 && o->finished_after_ms.load() < 1500.0, "[J] nothing waits past the handler's own bound");
 			check(cancelled, "[J] and the failed write cancels the request (http::disconnected)");
+			o->token.reset();
+		}
+		{   // the same on the streamed-body path: its failed write cancels too
+			auto o = app.get_obs("j-stream-big");
+			Conn c(port);
+			c.send(post("/stream-big-token?id=j-stream-big", "abc"));
+			until([&] { return o->finished.load(); });
+			check(c.fill(), "[J] streamed body: the big reply starts to arrive");
+			c.rst();
+			check(released(), "[J] streamed body: the big reply's failed write ends the connection");
+			check(o->token && o->token->requested() && o->token->reason() == http::disconnected,
+				"[J] streamed body: a failed write cancels the request: the token the handler kept sees http::disconnected");
 			o->token.reset();
 		}
 		{   // a failed write with no half-close: a token kept past handle() sees http::disconnected
