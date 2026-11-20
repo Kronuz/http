@@ -618,7 +618,19 @@ static void body_stream_tests() {
 
 // T4 (h), Debug: a handler body that moved to another scheduler and then writes fails the writer's
 // affinity assertion. Runs in a child forked before any thread exists; true when it held.
+// With NDEBUG the misuse is performed for real, a data race by construction: TSan builds skip it.
+#if defined(__SANITIZE_THREAD__)
+#define COROUTINE_TEST_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define COROUTINE_TEST_TSAN 1
+#endif
+#endif
 static bool affinity_death_test(const std::string& request) {
+#if defined(COROUTINE_TEST_TSAN) && defined(NDEBUG)
+	(void)request;
+	return true;
+#else
 	std::fflush(stdout);   // the child must not repeat what the parent buffered
 	const pid_t child = ::fork();
 	if (child == 0) {
@@ -642,6 +654,7 @@ static bool affinity_death_test(const std::string& request) {
 	return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 #else
 	return WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT;
+#endif
 #endif
 }
 
