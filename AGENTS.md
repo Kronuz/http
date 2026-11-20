@@ -31,7 +31,7 @@ http_asio.h           The Asio transport: the connection as a task::task (the
                       keep-alive, the per-request watch (ConnectionInput), the per-request
                       abort hook (RequestAbort, a reactor::Abortable), the streamed-body
                       feed, and HttpAsioService (a thin adapter over reactor::TcpServer).
-http_deferred.h       DeferredReply: an owned, delayed buffered reply (ResponseWriter::defer()).
+http_deferred.h       ReplyLimits, DeferredOptions, validate_reply: an owned stream's reply options.
 http_owned_stream.h   OwnedStreamCapability: owned response streaming (ResponseWriter::stream()).
 http_owned_stream_asio.h  Its Asio implementation, plain TCP and TLS.
 http_owned_storage.h  Owned chunk storage and allocation refusal for owned streams.
@@ -52,9 +52,8 @@ bench/server_compare.cc http_server_compare (-DHTTP_BUILD_BENCH=ON): a minimal A
                       reactor::TcpServer and http answering the same bytes. bench/run.sh and
                       bench/compare.sh drive it with wrk; bench/summarize.py takes medians.
 test/test.cc          ctest: method dispatch, 404 vs 405, param capture (transport-agnostic).
-test/deferred_test.cc, deferred_asio_test.cc, owned_stream_test.cc,
-owned_stream_asio_test.cc
-                      ctest: deferred replies, owned streaming.
+test/deferred_test.cc, owned_stream_test.cc, owned_stream_asio_test.cc
+                      ctest: reply validation, owned streaming.
 test/coroutine_test.cc ctest "coroutine": coroutine handlers, BodyStream, disconnect cancels
                       reads not writes, the admission 503, the body cap's 413, shutdown.
 test/readahead_test.cc ctest "readahead": the connection's read-ahead watch (its 4096-byte bound,
@@ -71,7 +70,7 @@ test/timeouts_test.cc ctest "timeouts": the idle, header and inactivity timeouts
                       slow clients under and over them, stalled and slow readers.
 docs/mechanisms/coroutine-handlers.md  How a request runs, is cancelled, admitted and stopped.
 docs/status/phase7c-l3.md  The L3 ledger.
-docs/TRANSPORT.md     Deferred replies, TLS, connection and request limits, rejections.
+docs/TRANSPORT.md     TLS, connection and request limits, rejections.
 docs/OWNED_STREAMING.md  Owned response streaming: framing, backpressure, footprint.
 docs/AUDIT.md         Transport audit findings with their before/after measurements.
 docs/perf/timeouts-cpu.md  Per-request CPU and latency against a minimal Asio server, with the
@@ -105,7 +104,7 @@ library does not.
 - **The handler is parser/transport/concurrency-agnostic.** It gets a `Request` and
   writes a `ResponseWriter`. It never sees the parser, the socket, or the loop. Don't
   leak any of those across the seam.
-- **Scoped response ownership.** Synchronous handlers finish before returning. Deferred handlers transfer authority through `ResponseWriter::defer()` and retain only the owned capability. Never retain a stack writer or Request. Original socket IO must be reaped before releasing request or reply leases; acceptance is distinct from delivery.
+- **Scoped response ownership.** A handler answers before it completes, waiting with `co_await` bounded by `Request::deadline()`; an owned stream (`ResponseWriter::stream()`) is the one capability that outlives it. Never retain a stack writer or Request. Original socket IO must be reaped before releasing request or reply leases; acceptance is distinct from delivery.
 
 - **Routing is application config.** `Router` (per-method radix trees + 404/405) is
   what Xapiand's hardcoded `prepare()` method-switch becomes.
@@ -157,7 +156,7 @@ no worker pool and no thread handoff. Invariants -- do not break these when touc
   the write: `abort()` is `Request::cancel(task::cancel_reason::shutdown)`, `force()` closes the socket after the
   grace. `ConnectionInput::watch` keeps one read pending, up to 4096 bytes ahead of the
   parser. One rule reads it: a read error other than EOF (a reset, not our own cancellation)
-  calls `Request::cancel(http::disconnected)`, and closes a deferred or owned-stream reply's
+  calls `Request::cancel(http::disconnected)`, and closes an owned-stream reply's
   exchange; EOF is a half-close, which ends reading and cancels nothing, so the requests already
   read are answered and the connection closes after the last one. A failed reply write also
   calls `Request::cancel(http::disconnected)`. Pipelined input the watch reads ends the watch for the rest of the

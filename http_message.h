@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -51,8 +52,8 @@ using Headers = std::vector<std::pair<std::string, std::string>>;
 class BodyStream;   // http_body_stream.h -- the streamed request body (Request::body_stream)
 
 // The reason a request is cancelled when its client hangs up (a read fails: a reset) or its
-// reply is not delivered (the write fails, times out, or a deferred reply ends unwritten); the
-// connection ends either way. A half-close (EOF) is not a hang-up. The service stopping cancels
+// reply is not delivered (the write fails or times out); the connection ends either way. A
+// half-close (EOF) is not a hang-up. The service stopping cancels
 // with task::cancel_reason::shutdown.
 inline constexpr task::cancel_reason disconnected = task::cancel_reason::user;
 
@@ -129,11 +130,6 @@ struct Request {
 	bool keep_alive = true;
 	std::string remote;        // the client's IP address as the transport saw it ("" if unknown)
 
-	// Per-request application state, opaque to the library. An app can stash a
-	// context here in on_request_body() and read it back in handle() -- e.g. to
-	// carry what a streaming BodySink accumulated.
-	std::shared_ptr<void> user_data;
-
 	// Set by the framework when the handler opted into a streamed body
 	// (wants_body_stream()); the handler reads raw chunks from it with co_await (see
 	// BodyStream) while the connection feeds them flow-controlled. Null otherwise.
@@ -166,6 +162,14 @@ struct Request {
 	// For a transport: the scheduler of the loop that serves this request.
 	void set_scheduler(task::asio_scheduler* scheduler) noexcept { scheduler_ = scheduler; }
 
+	// The bound the transport applies to the request's reads and the rest of its reply: its
+	// request_timeout from the start of the request's read, or time_point::max() when unbounded.
+	// Set before handle(); the body hooks (create_extension, on_request_body, wants_body_stream)
+	// see max(). A handler bounds its own waits by it.
+	std::chrono::steady_clock::time_point deadline() const noexcept { return deadline_; }
+	// For a transport: the deadline of this request.
+	void set_deadline(std::chrono::steady_clock::time_point at) noexcept { deadline_ = at; }
+
 	// Typed per-request application state (see RequestExtension). Created once at
 	// headers-complete by HttpHandler::create_extension(), before on_request_body()
 	// and wants_body_stream() so both can use it; reset when the connection is reused.
@@ -192,12 +196,12 @@ struct Request {
 		method.clear(); target.clear(); path.clear(); query.clear();
 		headers.clear(); trailers.clear(); body.clear();
 		http_major = 1; http_minor = 1; keep_alive = true;
-		user_data.reset();
 		body_stream.reset();
 		extension.reset();
 		cancel_.reset();
 		cancel_watch_ = nullptr;
 		scheduler_ = nullptr;
+		deadline_ = std::chrono::steady_clock::time_point::max();
 	}
 
 private:
@@ -210,6 +214,7 @@ private:
 	mutable std::optional<task::cancel_source> cancel_;
 	mutable CancelWatch* cancel_watch_ = nullptr;   // engaged once, then cleared
 	task::asio_scheduler* scheduler_ = nullptr;
+	std::chrono::steady_clock::time_point deadline_ = std::chrono::steady_clock::time_point::max();
 };
 
 

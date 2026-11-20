@@ -10,8 +10,8 @@
 //   [H] a body cut short (FIN, half-close, RST, chunked) fails the reader, never eof, with the request cancelled
 //   [I] a throwing cancel callback is dropped: the handler's frames outlive it, streamed and buffered
 //   [J] a half-closed client keeps its response (D126): a plain handler, a long poll held on its
-//       token to its own bound, a deferred reply whose work waits on the token; a reset or a failed
-//       write cancels, a failed write included after the peer half-closed and then left
+//       token to its own bound; a reset or a failed write cancels, a failed write included after
+//       the peer half-closed and then left
 //   [S] the streamed join: a hang-up after the body cancels the handler; a handler that answers early stops the feed
 //   [T] the task loop (design T4): (b) budget demotion, (c) affinity after a std::thread resume,
 //       (d) stop() with suspended handlers leaves no task frame, (e) task::cancelled after a
@@ -464,31 +464,6 @@ struct App : http::HttpHandler {
 			w.send(200, token.requested() ? "poll:cancelled" : "poll:bound");
 			co_return;
 		}
-		if (req.path == "/defer-poll") {   // [J]: a deferred reply whose work waits on the request's token up to its bound (ms)
-			auto o = get_obs(id);
-			o->t0 = clk::now();
-			const task::cancel_token token = req.cancel_token();
-			o->token = token;
-			http::DeferredOptions options;
-			options.deadline = clk::now() + 5s;
-			auto reply = w.defer(std::move(options));
-			o->started = true;
-			const auto work = [](std::unique_ptr<http::DeferredReply> reply, task::cancel_token token, asio::any_io_executor loop,
-				std::chrono::milliseconds ms, std::shared_ptr<Obs> o) -> task::task<void> {
-				asio::steady_timer bound(loop, ms);
-				(void)co_await task::await_asio<void(asio::error_code)>([&](auto h) { bound.async_wait(std::move(h)); }, token);
-				if (token.requested()) { o->reason = static_cast<int>(token.reason()); }
-				http::Response response;
-				response.status = 200;
-				response.body = token.requested() ? "deferred:cancelled" : "deferred:bound";
-				o->finished_after_ms = since_ms(o->t0);
-				(void)reply->complete(std::move(response));
-				o->finished = true;
-			};
-			task::spawn(task::scheduler_ref::of(req.scheduler()),
-				work(std::move(reply), token, req.scheduler().executor(), std::chrono::milliseconds(std::atoi(param(req.query, "ms").c_str())), o));
-			co_return;
-		}
 		if (req.path == "/big-token") {   // [J]: keeps its token past handle() and answers 32 MiB, more than the socket buffers take
 			auto o = get_obs(id);
 			o->token = req.cancel_token();
@@ -807,18 +782,6 @@ int main() {
 			check(o->reason == -1 && r.complete && r.status == 200 && r.body == "poll:bound",
 				"[J] a long poll waiting on its token, half-closed before it asked, is answered when its own bound ends it (" + r.body + ")");
 			check(o->finished_after_ms.load() >= 290.0, "[J] it ran to its bound, not cut short by the half-close");
-			check(c.closed_by_peer() && released(), "[J] and then the connection closes and the request is released");
-			o->token.reset();
-		}
-		{   // a deferred reply whose work waits on the token, half-closed before the handler asked
-			auto o = app.get_obs("j-defer");
-			Conn c(port);
-			c.send(get("/defer-poll?id=j-defer&ms=300"));
-			c.shut_wr();
-			auto r = c.read_response();
-			until([&] { return o->finished.load(); });
-			check(o->reason == -1 && r.complete && r.status == 200 && r.body == "deferred:bound",
-				"[J] a deferred reply waiting on the token gets its full response after a half-close (" + r.body + ")");
 			check(c.closed_by_peer() && released(), "[J] and then the connection closes and the request is released");
 			o->token.reset();
 		}

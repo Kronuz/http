@@ -69,16 +69,16 @@ the last response is written.
 
 1. **A request in flight (`ConnectionInput::watch`).** A reset (any read error other than EOF
    and our own cancellation) calls `cancel(http::disconnected)`.
-2. **A deferred or owned-stream reply (`ConnectionInput::monitor`).** A reset closes the
+2. **An owned-stream reply (`ConnectionInput::monitor`).** A reset closes the
    exchange as `Disconnected`.
 3. **The reply's write.** A failed write ends the connection and calls
    `cancel(http::disconnected)`, so a token the application kept past `handle()` (an owned
-   stream's producer, a deferred reply's work) sees it.
+   stream's producer) sees it.
 
 TCP cannot tell a half-close from a full close until the server writes: after EOF nothing more
 is read, so a client that closed entirely is seen only when the reply's write fails. A handler
 that waits after a half-close is therefore ended by its own bound (a search's budget, a long
-poll's maximum wait, a deferred reply's deadline) or by shutdown, never by the transport's
+poll's maximum wait, `Request::deadline()`) or by shutdown, never by the transport's
 reads; its response is then written, or its write fails and the connection closes. The
 transport's request timeout bounds the request's reads and writes, not the handler.
 
@@ -108,10 +108,9 @@ close_notify from data), so its watch arms its read when set.
 
 ## Exceptions
 
-An exception that escapes `handle()` is mapped at the connection: a deferred reply is
-abandoned; an owned stream whose head is on the wire closes the connection without its
-terminal chunk, so the client reads a truncated body; otherwise the application's `on_error`
-answers, and what it leaves unanswered is a `500`, or a `503` with `Connection: close` when
+An exception that escapes `handle()` is mapped at the connection: an owned stream whose head
+is on the wire closes the connection without its terminal chunk, so the client reads a
+truncated body; otherwise the application's `on_error` answers, and what it leaves unanswered is a `500`, or a `503` with `Connection: close` when
 the exception is `task::cancelled` and the request's token was requested. `task::cancelled`
 from the handler's own source is any exception.
 
@@ -164,8 +163,8 @@ Teardown is task's four phases, each a call on `HttpAsioService` forwarded to re
 `TcpServer`; each runs the earlier ones first:
 
 1. `stop()`: `abort_all()` on each reactor's loop requests every session's token and
-   cancels every running request (`task::cancel_reason::shutdown`); a deferred or
-   owned-stream reply closes with `Shutdown`. The acceptors close. An idle keep-alive
+   cancels every running request (`task::cancel_reason::shutdown`); an owned-stream
+   reply closes with `Shutdown`. The acceptors close. An idle keep-alive
    connection ends at once, a streamed body read fails with `operation_aborted`, handlers
    stop at their next checkpoint and their responses are written. After the grace
    (`Limits::shutdown_grace`, 5 s by default) `force_all()` closes the sockets still held

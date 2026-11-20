@@ -738,11 +738,13 @@ static void input_tests() {
 		auto a = read_once(p, in, 100);
 		check(a.done && a.data == "xyz", "[U] the bytes are still delivered");
 	}
-	// The reply monitor (a deferred or owned-stream reply waits) uses the same read-ahead: it never
+	// The reply monitor (an owned-stream reply waits) uses the same read-ahead: it never
 	// reads over bytes that wait, a half-close is not a disconnect, and a reset is.
 	{
 		const auto make = [](Pair& p) {
-			return http::detail::AsioDeferredControl::create(p.io.get_executor(), http::DeferredOptions{clk::now() + 30s, {}, {}, {}});
+			http::StreamOptions options;
+			options.reply.deadline = clk::now() + 30s;
+			return http::detail::AsioOwnedStreamControl::create(p.io.get_executor(), std::move(options));
 		};
 		{
 			Pair p;
@@ -775,7 +777,7 @@ static void input_tests() {
 			::shutdown(p.client, SHUT_WR);
 			p.settle();
 			check(a.data == "abc" && fired == 0, "[U] a watch that data ended stays ended: a later EOF does not call it");
-			check(control->exchange->phase() == http::detail::DeferredExchange::Phase::Waiting, "[U] the monitor does not treat EOF as a disconnect (a half-close still expects its reply)");
+			check(control->exchange->phase() == http::detail::OwnedStreamExchange::Phase::Waiting, "[U] the monitor does not treat EOF as a disconnect (a half-close still expects its reply)");
 			control->disable();
 		}
 		{   // a reset is one
@@ -786,7 +788,7 @@ static void input_tests() {
 			p.settle();
 			linger l{1, 0}; ::setsockopt(p.client, SOL_SOCKET, SO_LINGER, &l, sizeof(l)); ::close(p.client); p.client = -1;
 			p.settle();
-			check(control->exchange->phase() != http::detail::DeferredExchange::Phase::Waiting, "[U] the monitor treats a reset as a disconnect");
+			check(control->exchange->phase() != http::detail::OwnedStreamExchange::Phase::Waiting, "[U] the monitor treats a reset as a disconnect");
 			control->disable();
 		}
 	}

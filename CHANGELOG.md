@@ -42,6 +42,32 @@ note's C1, Settled 1 and 6). Pins reactor:6fdd45f.
 Build a `Limits` (designated initializers: `http::Limits{.max_in_flight = 64}`) and pass TLS as
 `http::Tls{context, failed}`. A caller that relied on the timeouts being off sets them to zero.
 
+## 2026-11-19: `Request::deadline()`; `user_data` and `DeferredReply` are gone
+
+A handler reads its request's deadline from the request, and the two surfaces no consumer used
+leave the API.
+
+### Added
+
+- **`Request::deadline()`**: the bound the transport applies to the request's reads and the rest
+  of its reply, its `request_timeout` from the start of the request's read, or
+  `steady_clock::time_point::max()` without one. Set before `handle()` on the buffered and the
+  streamed path; the body hooks (`create_extension`, `on_request_body`, `wants_body_stream`) run
+  before it and see `max()`. A handler bounds its own waits by it.
+
+### Removed
+
+- **`Request::user_data`.** Per-request state is `Request::extension`, made by
+  `HttpHandler::create_extension()` before `on_request_body()` (the example and `asio_test` show a
+  body sink counting into it).
+- **`ResponseWriter::defer()` and `DeferredReply`**, with `detail::DeferredExchange` and the
+  transport's deferred path. A handler that waits `co_await`s within `handle()`; an owned stream
+  (`ResponseWriter::stream()`) is the one reply that outlives it. `DeferredOptions`,
+  `ReplyLimits`, `ReplySettlement` and `detail::validate_reply` stay as an owned stream's reply
+  options; `ReplySubmit` keeps `Accepted`, `TooLarge` and `Invalid`.
+- **For callers:** Detent, Xapiand, prism and http-log use neither surface; a pin bump needs no
+  source change.
+
 ## 2026-11-18: a half-closed client gets its response
 
 A client that sends its request and then half-closes (`shutdown(SHUT_WR)`) is answered. Before, the

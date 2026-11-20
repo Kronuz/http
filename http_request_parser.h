@@ -149,7 +149,7 @@ public:
 
 	// Move out the completed request and reset for the next one on the same connection.
 	// The body sink (if the request streamed) is done -- end() already fired -- so it is
-	// released here; the app's own state lives on in Request::user_data.
+	// released here; the app's own state lives on in Request::extension.
 	Request take() {
 		Request out = std::move(request_);
 		request_.clear();

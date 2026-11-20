@@ -38,8 +38,9 @@
 // whose Request::cancel_token() is requested returns, and the transport still writes its
 // response. The scoped writer and request must not escape handle(), and are used on the
 // connection's loop only (a child that moves to another scheduler comes back when it ends).
-// For delayed replies, transfer response authority with defer() and retain only the owned
-// capability. A handler calls end() before it completes.
+// A handler that waits co_awaits within handle(), bounded by Request::deadline(); an owned
+// stream (stream()) is the one capability that outlives it. A handler calls end() before it
+// completes.
 //
 // A ready-made HttpHandler that dispatches by method + path -- the application's
 // routing table -- lives in http_router.h (the radix-tree Router).
@@ -57,7 +58,6 @@
 
 #include "http_body_stream.h"
 #include "http_message.h"
-#include "http_deferred.h"
 #include "http_owned_stream.h"
 
 namespace http {
@@ -102,10 +102,7 @@ public:
 	virtual void end() = 0;
 	// Close the connection after this response (overrides keep-alive).
 	virtual void set_close() = 0;
-	// Transfer response authority to an owned capability, when supported.
-	// Existing synchronous writers remain source-compatible.
-	virtual std::unique_ptr<DeferredReply> defer(DeferredOptions) { return {}; }
-	// Optional independently owned finite-body streaming capability.
+	// Transfer response authority to an owned finite-body stream, when supported.
 	virtual OwnedStreamCapability stream(StreamOptions) { return {}; }
 
 	// ---- buffered conveniences (non-virtual) ----

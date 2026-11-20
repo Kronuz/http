@@ -111,8 +111,8 @@ Not for:
 
 - **HTTP/2, HTTP/3 or WebSockets.** None is implemented.
 - **Blocking handlers.** A handler runs on its connection's loop, so a blocking call stalls
-  every connection of that reactor; `co_await` instead, or hand the work to your own pool
-  through `ResponseWriter::defer()`.
+  every connection of that reactor; `co_await` instead, bounded by `Request::deadline()`, or
+  hand the work to your own pool and `co_await` its result.
 - **HTTP clients.** The library is a server.
 
 ## ⚡ Performance
@@ -172,8 +172,8 @@ python3 bench/summarize.py < out.txt
   lifecycle and the response transforms.
 - [docs/mechanisms/coroutine-handlers.md](docs/mechanisms/coroutine-handlers.md): how a
   request runs, is cancelled, is admitted and stops at shutdown.
-- [docs/TRANSPORT.md](docs/TRANSPORT.md): deferred replies, TLS, connection caps, request
-  deadlines and early rejections.
+- [docs/TRANSPORT.md](docs/TRANSPORT.md): TLS, connection caps, request deadlines and early
+  rejections.
 - [docs/OWNED_STREAMING.md](docs/OWNED_STREAMING.md): owned response streaming.
 - [docs/perf/](docs/perf/): per-request CPU and latency against a minimal Asio server, Boost.Beast and cpp-httplib.
 - [CHANGELOG.md](CHANGELOG.md): behavior and performance changes, newest first.
