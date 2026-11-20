@@ -145,14 +145,15 @@ thread-safe.
 
 ## Admission and the body cap
 
-The reactor's `AdmissionGate` counts requests from headers-complete to the settled
-response (`HttpAsioService`'s `in_flight_limit`, 0 for no cap). Over the cap, the
-connection answers `503` with `Retry-After: 1` and closes without reading the body. A
+The reactor's `AdmissionGate` counts requests from their first byte to the settled
+response (`Limits::max_in_flight`, 0 for no cap), so `wait_requests()` sees a request
+whose headers are still arriving. Over the cap, the connection answers `503` with
+`Retry-After: 1` at headers-complete and closes without reading the body. A
 second cap of the application's own is a throw of `RequestRejected(503, ..., retry_after)`
 from `create_extension`. The lease is a local of the connection task: completion or the
 frame's destruction releases it once.
 
-A body buffered into `Request::body` is capped (`set_max_body`, 16 MiB by default): a
+A body buffered into `Request::body` is capped (`Limits::max_body`, 16 MiB by default): a
 `Content-Length` over the cap is a `413` at headers-complete, before any body byte is
 read, and a chunked body is a `413` the moment it passes the cap. Streamed and sunk
 bodies are not buffered and not capped.
@@ -167,14 +168,37 @@ Teardown is task's four phases, each a call on `HttpAsioService` forwarded to re
    owned-stream reply closes with `Shutdown`. The acceptors close. An idle keep-alive
    connection ends at once, a streamed body read fails with `operation_aborted`, handlers
    stop at their next checkpoint and their responses are written. After the grace
-   (`set_shutdown_grace`, 5 s by default) `force_all()` closes the sockets still held and
-   sessions get the grace once more; then the loops stop and join. `stop()` is bounded by
-   about twice the grace.
+   (`Limits::shutdown_grace`, 5 s by default) `force_all()` closes the sockets still held
+   and sessions get the grace once more; then the loops stop and join. `stop()` is bounded
+   by about twice the grace.
 2. `close()`: the reactors' schedulers drop what is posted and destroy what is spawned.
 3. `destroy_roots()`: the tasks still suspended (a handler that ignored its token) are
    destroyed with every `io_context` alive. Their responses go nowhere.
 4. Destruction runs any phase not yet run.
 
 An application with its own schedulers runs each phase across http's reactors and its own
-before the next. `Reactor::track` is an intrusive list touched on the loop only: O(1) per
+before the next.
+
+Phase 1 also runs in steps, so in-flight requests finish before anything is cancelled:
+`stop_accepting()`, `wait_requests(token)`, `cancel_requests()`, then `stop()`. The service's
+own `stop_accepting()` sets a flag every connection reads (reactor's listener state is
+private to `TcpServer`), so callers stop through the service. A request reads it at its
+first byte, after entering the gate, with a sequentially consistent fence between the two:
+either `wait_requests()`, which reads the gates after the flag's store, counts the request,
+or the request reads the flag set and is refused with `503` at headers-complete, holding no
+lease. A request already counted is served, and its reply, like every reply framed once the
+flag is set, says `Connection: close`. The window `wait_requests()` cannot see is an accepted
+connection whose first byte the server has not read: that request is refused.
+
+## Closing idle connections
+
+`close_idle()` closes every connection waiting for a request at once and every other one
+after its reply. Two mechanisms carry it. A connection waiting for its next request's first
+byte is on its loop's idle list (a `reactor::AbortList`, touched on the loop only, no
+allocation); `close_idle()` posts a walk of each list to its loop, and the walk ends each
+wait the way a requested token does (`ConnectionInput::cancel_read()`), so the connection
+closes. And `close_idle()` bumps a count each connection read at its start: a connection
+that sees it changed frames its reply with `Connection: close` and closes, or closes at its
+next idle wait, so one that was busy, or between its read and the walk, still closes after
+its reply. `Reactor::track` is an intrusive list touched on the loop only: O(1) per
 request, no allocation, no lock.

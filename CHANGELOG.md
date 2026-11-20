@@ -4,6 +4,44 @@ Newest first. Dates are 2026.
 
 Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://github.com/Kronuz/cpp-libraries/blob/main/docs/UPGRADING-2026-10.md#http) lists what changes for callers, how to find affected inputs, the commits not to pin, and the speedup.
 
+## 2026-11-19: every bound in one Limits, the phased stop, close_idle
+
+A service takes every bound whole, plain and TLS alike, so no bound is set in two places or left
+unset by accident, and Xapiand, Detent and Prism build theirs one way (the server composition
+note's C1, Settled 1 and 6). Pins reactor:6fdd45f.
+
+### Changed
+
+- **`HttpAsioService(handler, reactors, const http::Limits&, http::Tls = {})`** replaces the
+  `in_flight_limit`, `ConnectionFactory` and `maximum_connections` arguments, the setters
+  `set_connection_limit`, `set_request_timeout`, `set_idle_timeout`, `set_header_timeout`,
+  `set_inactivity_timeout`, `set_max_body` and `set_shutdown_grace`, and
+  `tls_connection_factory`. `AsioResponseOptions` keeps only the response transforms. The TLS
+  constructor is defined in `http_asio_tls.h`; `http::Tls` and `TlsFailure` live in
+  `http_asio.h`, so a plain service still needs no OpenSSL.
+- **Timeouts on by default, on every connection:** idle 75 s, header 30 s, inactivity 60 s;
+  `max_clients` 1024 and `max_in_flight` 1024 per loop. Zero turns each off; a timeout outside
+  zero to 24 hours, or a `max_in_flight` past `int`, throws `std::invalid_argument`.
+- **`max_clients` bounds TLS connections at the accept,** as it does plain ones; TLS's own
+  connection count and `TlsFailure::connections` are gone.
+- **A request enters the admission gate at its first byte,** not at headers-complete, so
+  `wait_requests()` counts one whose headers are still arriving. Over the cap it is still
+  answered `503` at headers-complete.
+
+### Added
+
+- **The phased stop on the service:** `stop_accepting()`, `wait_requests(token)`,
+  `cancel_requests()`, `force_connections()`. From `stop_accepting()` on, a request whose first
+  byte comes later is answered `503` and closes, and every reply says `Connection: close`.
+- **`close_idle()`** closes the connections waiting for a request at once and every other one
+  after its reply (`Connection: close`).
+- **`limits()`** returns the service's `Limits`.
+
+### For callers
+
+Build a `Limits` (designated initializers: `http::Limits{.max_in_flight = 64}`) and pass TLS as
+`http::Tls{context, failed}`. A caller that relied on the timeouts being off sets them to zero.
+
 ## 2026-11-18: a half-closed client gets its response
 
 A client that sends its request and then half-closes (`shutdown(SHUT_WR)`) is answered. Before, the
