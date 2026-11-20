@@ -3,9 +3,11 @@
 // request timeouts, shutdown_grace, max_body; tls_handshake and tls_handshakes over TLS), and the
 // constructor's refusals; [I] close_idle() closes an idle connection at once and a busy one after
 // its reply; [S] after stop_accepting() a new connection is refused, a request on an open
-// keep-alive connection is answered 503 and an in-flight reply says Connection: close, and
-// wait_requests() counts a request whose headers are still arriving; [P] a held poll, its headers
-// complete and its body unread, trips neither the header nor the inactivity timeout.
+// keep-alive connection is answered 503, an in-flight reply says Connection: close, one framed
+// keep-alive before the stop keeps its connection, and wait_requests() counts a request whose
+// headers are still arriving; [P] a held poll, its headers complete and its body unread, trips
+// neither the header nor the inactivity timeout; [R] keep-alive clients race stop_accepting() and
+// wait_requests(): no handler runs past the drain, and a served connection is never closed unanswered.
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -21,6 +23,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 #include <vector>
@@ -50,7 +53,8 @@ template<class F> static bool until(F f, ms within = 3000ms) {
 // ---- the application ----
 // "/" answers ok; "/hold?id=" (and the streamed "/stream-hold?id=") runs until the test releases
 // it, without reading its body or asking about cancellation, as a held poll does; "/size" answers
-// its buffered body's size.
+// its buffered body's size; "/big?id=" answers kBig bytes, more than the socket buffers hold.
+constexpr std::size_t kBig = 32u << 20;
 struct Hold {
 	std::atomic<bool> started{false}, release{false};
 };
@@ -71,6 +75,11 @@ struct App : http::HttpHandler {
 			const auto loop = req.scheduler().executor();
 			for (auto end = clk::now() + 10s; !h->release.load() && clk::now() < end;) { co_await sleep_for(loop, 2ms); }
 			w.send(200, "held");
+			co_return;
+		}
+		if (req.path == "/big") {
+			hold(req.query.substr(3))->started = true;
+			w.send(200, std::string(kBig, 'x'));
 			co_return;
 		}
 		if (req.path == "/size") { w.send(200, std::to_string(req.body.size())); co_return; }
@@ -196,11 +205,11 @@ struct Mode {
 	SSL_CTX* client = nullptr;
 	std::atomic<int>* handshake_failures = nullptr;   // TlsFailure::handshakes seen
 	std::atomic<int>* deadline_failures = nullptr;    // TlsFailure::deadline seen
-	std::unique_ptr<http::HttpAsioService> service(App& app, const http::Limits& limits) const {
-		if (!server) { return std::make_unique<http::HttpAsioService>(app, 1, limits); }
+	std::unique_ptr<http::HttpAsioService> service(http::HttpHandler& app, const http::Limits& limits, std::size_t loops = 1) const {
+		if (!server) { return std::make_unique<http::HttpAsioService>(app, loops, limits); }
 		auto* handshakes = handshake_failures;
 		auto* deadlines = deadline_failures;
-		return std::make_unique<http::HttpAsioService>(app, 1, limits, http::Tls{server, [handshakes, deadlines](http::TlsFailure why) {
+		return std::make_unique<http::HttpAsioService>(app, loops, limits, http::Tls{server, [handshakes, deadlines](http::TlsFailure why) {
 			if (why == http::TlsFailure::handshakes) { ++*handshakes; }
 			if (why == http::TlsFailure::deadline) { ++*deadlines; }
 		}});
@@ -475,6 +484,27 @@ static void stop_accepting(const Mode& m, App& app) {
 		check(waited.wait_for(2000ms) == std::future_status::ready && waited.get(), m.label("and then wait_requests() returns true"));
 		svc->stop();
 	}
+	{  // a reply framed keep-alive before stop_accepting() keeps its connection: the next request is refused
+		auto svc = m.service(app, http::Limits{});
+		svc->start(0);
+		const std::string id = std::string(m.name) + "-framed";
+		Client c(svc->port(), m.client);
+		c.send(get("/big?id=" + id));
+		until([&] { return app.hold(id)->started.load(); });
+		std::this_thread::sleep_for(100ms);   // the reply is framed; its write waits on the unread socket
+		svc->stop_accepting();
+		task::cancel_source give_up;
+		auto waited = std::async(std::launch::async, [&] { return svc->wait_requests(give_up.token()); });
+		check(waited.wait_for(200ms) == std::future_status::timeout, m.label("a large reply framed before stop_accepting() is still being written"));
+		const auto reply = c.response(10000ms);
+		check(status(reply, 200) && body(reply).size() == kBig && !closes(reply), m.label("which arrives whole and says keep-alive"));
+		check(waited.wait_for(2000ms) == std::future_status::ready && waited.get(), m.label("then wait_requests() returns true"));
+		c.send(get("/"));
+		const auto refused = c.response();
+		check(status(refused, 503) && closes(refused), m.label("and the next request on its connection is answered 503, Connection: close, not reset"));
+		give_up.request();
+		svc->stop();
+	}
 	{  // wait_requests() ends at its token while a request runs
 		auto svc = m.service(app, http::Limits{});
 		svc->start(0);
@@ -515,6 +545,89 @@ static void held_poll(const Mode& m, App& app) {
 	svc->stop();
 }
 
+// ---- [R]: eight keep-alive clients on two loops race stop_accepting() and wait_requests() ----
+// "/" answers at once, "/slow" after 1 ms; the counts show whether a handler runs at the drain.
+struct RaceApp : http::HttpHandler {
+	std::atomic<long> entered{0}, exited{0};
+	task::task<void> handle(http::Request& req, http::ResponseWriter& w) override {
+		entered.fetch_add(1);
+		if (req.path == "/slow") { co_await sleep_for(req.scheduler().executor(), 1ms); }
+		exited.fetch_add(1);
+		w.send(200, "ok");
+	}
+};
+
+static void race(const Mode& m, int rounds) {
+	long oks = 0, refusals = 0, odd = 0, drops = 0, timeouts = 0, running = 0, late = 0;
+	std::mt19937 rng(12345);
+	for (int round = 0; round < rounds; ++round) {
+		RaceApp app;
+		auto svc = m.service(app, http::Limits{.max_in_flight = 64}, 2);
+		svc->start(0);
+		const auto port = svc->port();
+		std::atomic<bool> halt{false};
+		std::atomic<long> r_oks{0}, r_refusals{0}, r_odd{0}, r_drops{0};
+		std::vector<std::thread> clients;
+		for (int c = 0; c < 8; ++c) {
+			clients.emplace_back([&, c] {
+				std::unique_ptr<Client> conn;
+				bool served = false;   // this connection already got a reply
+				for (int i = 0; !halt.load();) {
+					if (!conn) {
+						conn = std::make_unique<Client>(port, m.client);
+						served = false;
+						if (!conn->ok()) { conn.reset(); std::this_thread::sleep_for(1ms); continue; }
+					}
+					// Split at a varying point, so a request's first byte and its headers' end straddle the stop.
+					const std::string req = get((c + i++) % 2 ? "/slow" : "/");
+					const std::size_t cut = static_cast<std::size_t>(i % 5) * 4;
+					if (cut) {
+						conn->send(req.substr(0, cut));
+						if (i % 3 == 0) { std::this_thread::sleep_for(200us); }
+					}
+					conn->send(req.substr(cut));
+					const std::string r = conn->response();
+					if (r.empty()) {
+						if (served) { r_drops.fetch_add(1); }
+						conn.reset();
+						std::this_thread::sleep_for(1ms);
+						continue;
+					}
+					served = true;
+					if (status(r, 200)) { r_oks.fetch_add(1); }
+					else if (status(r, 503)) { r_refusals.fetch_add(1); }
+					else { r_odd.fetch_add(1); }
+					if (closes(r)) { conn.reset(); }
+				}
+			});
+		}
+		std::this_thread::sleep_for(std::chrono::microseconds(5000 + rng() % 20000));
+		svc->stop_accepting();
+		task::cancel_source give_up;
+		std::thread timer([&] {
+			for (const auto end = clk::now() + 5s; clk::now() < end && !give_up.token().requested();) { std::this_thread::sleep_for(1ms); }
+			give_up.request();
+		});
+		const bool drained = svc->wait_requests(give_up.token());
+		const long e1 = app.entered.load(), x1 = app.exited.load();
+		if (!drained) { ++timeouts; }
+		if (drained && e1 != x1) { ++running; }
+		std::this_thread::sleep_for(20ms);   // the clients keep sending on their open connections
+		if (drained && app.entered.load() != e1) { ++late; }
+		halt = true;
+		for (auto& t : clients) { t.join(); }
+		give_up.request();
+		timer.join();
+		svc->stop();
+		oks += r_oks; refusals += r_refusals; odd += r_odd; drops += r_drops;
+	}
+	std::printf("  %d rounds: 200 %ld, 503 %ld, other %ld, closed unanswered %ld, wait timeouts %ld\n", rounds, oks, refusals, odd, drops, timeouts);
+	check(drops == 0, m.label("no request on a served connection is closed unanswered (" + std::to_string(drops) + ")"));
+	check(refusals > 0, m.label("the stop refused requests on open connections (" + std::to_string(refusals) + " 503s)"));
+	check(odd == 0 && timeouts == 0, m.label("every reply is 200 or 503, and wait_requests() drains"));
+	check(running == 0 && late == 0, m.label("no handler runs at the drain or starts after it"));
+}
+
 int main() {
 	std::signal(SIGPIPE, SIG_IGN);
 	App app;
@@ -531,6 +644,8 @@ int main() {
 		stop_accepting(m, app);
 		std::printf("[P] held poll, %s\n", m.name);
 		held_poll(m, app);
+		std::printf("[R] stop race, %s\n", m.name);
+		race(m, 40);
 	}
 	std::printf("[B] refusals\n");
 	refusals();
