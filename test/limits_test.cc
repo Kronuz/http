@@ -10,6 +10,7 @@
 // wait_requests(): no handler runs past the drain, and a served connection is never closed unanswered.
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -53,7 +54,7 @@ template<class F> static bool until(F f, ms within = 3000ms) {
 // ---- the application ----
 // "/" answers ok; "/hold?id=" (and the streamed "/stream-hold?id=") runs until the test releases
 // it, without reading its body or asking about cancellation, as a held poll does; "/size" answers
-// its buffered body's size; "/big?id=" answers kBig bytes, more than the socket buffers hold.
+// its buffered body's size; "/big" answers kBig bytes, more than the socket buffers hold.
 constexpr std::size_t kBig = 32u << 20;
 struct Hold {
 	std::atomic<bool> started{false}, release{false};
@@ -77,11 +78,7 @@ struct App : http::HttpHandler {
 			w.send(200, "held");
 			co_return;
 		}
-		if (req.path == "/big") {
-			hold(req.query.substr(3))->started = true;
-			w.send(200, std::string(kBig, 'x'));
-			co_return;
-		}
+		if (req.path == "/big") { w.send(200, std::string(kBig, 'x')); co_return; }
 		if (req.path == "/size") { w.send(200, std::to_string(req.body.size())); co_return; }
 		w.send(200, "ok");
 	}
@@ -111,11 +108,14 @@ static std::shared_ptr<asio::ssl::context> server_tls() {
 }
 
 // ---- a blocking client, plain or TLS, whose reads take a bound ----
+// No Nagle: a request sent in pieces leaves at once, not after the server's delayed ACK.
 static int dial(unsigned short port) {
 	int fd = ::socket(AF_INET, SOCK_STREAM, 0);
 	sockaddr_in a{}; a.sin_family = AF_INET; a.sin_port = htons(port);
 	::inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
 	if (::connect(fd, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0) { ::close(fd); return -1; }
+	const int on = 1;
+	::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
 	return fd;
 }
 struct Client {
@@ -487,17 +487,18 @@ static void stop_accepting(const Mode& m, App& app) {
 	{  // a reply framed keep-alive before stop_accepting() keeps its connection: the next request is refused
 		auto svc = m.service(app, http::Limits{});
 		svc->start(0);
-		const std::string id = std::string(m.name) + "-framed";
 		Client c(svc->port(), m.client);
-		c.send(get("/big?id=" + id));
-		until([&] { return app.hold(id)->started.load(); });
-		std::this_thread::sleep_for(100ms);   // the reply is framed; its write waits on the unread socket
+		c.send(get("/big"));
+		// Its head arrives before the stop, so it was framed before it; the rest waits on the unread socket.
+		while (c.in.find("\r\n\r\n") == std::string::npos && c.read(10000ms) > 0) {}
+		const std::string head = c.in.substr(0, c.in.find("\r\n\r\n") + 2);
+		check(status(head, 200) && !closes(head), m.label("a large reply's head arrives, keep-alive"));
 		svc->stop_accepting();
 		task::cancel_source give_up;
 		auto waited = std::async(std::launch::async, [&] { return svc->wait_requests(give_up.token()); });
-		check(waited.wait_for(200ms) == std::future_status::timeout, m.label("a large reply framed before stop_accepting() is still being written"));
+		check(waited.wait_for(200ms) == std::future_status::timeout, m.label("and after stop_accepting() its body is still being written"));
 		const auto reply = c.response(10000ms);
-		check(status(reply, 200) && body(reply).size() == kBig && !closes(reply), m.label("which arrives whole and says keep-alive"));
+		check(status(reply, 200) && body(reply).size() == kBig, m.label("which arrives whole"));
 		check(waited.wait_for(2000ms) == std::future_status::ready && waited.get(), m.label("then wait_requests() returns true"));
 		c.send(get("/"));
 		const auto refused = c.response();
