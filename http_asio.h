@@ -949,10 +949,9 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 		// close_idle()'s count when the connection started: a later call closes it, at once when it
 		// waits for a request (the walk on its loop), else at its next wait.
 		const std::uint64_t idle_epoch = state->idle_closes.load(std::memory_order_relaxed);
+		const auto idle_closed = [&] { return state->idle_closes.load(std::memory_order_relaxed) != idle_epoch; };
 		// Whether the connection may carry another request after this reply.
-		const auto stays_open = [&] {
-			return !state->closing.load(std::memory_order_relaxed) && state->idle_closes.load(std::memory_order_relaxed) == idle_epoch;
-		};
+		const auto stays_open = [&] { return !state->closing.load(std::memory_order_relaxed) && !idle_closed(); };
 		reactor::AbortList& idle_list = state->idle_of(*reactor);
 		// The headers-complete hook: refuse a request the gate or the stop did not admit, build the
 		// app's per-request extension, then choose how to take the body -- a BodyStream, an
@@ -1059,7 +1058,7 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 						// The connection waits holding only the input's own buffer, on its loop's idle list.
 						scratch.reset();
 						if (buffered.capacity() > 2 * ConnectionInput<Stream>::kReadAhead) { std::string().swap(buffered); }
-						if (!stays_open()) { co_return; }
+						if (idle_closed()) { co_return; }
 						idle_wait.emplace(idle_list, *input);
 					}
 					const bool waiting = header_deadline == clock::time_point::max();
