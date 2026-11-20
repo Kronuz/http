@@ -112,7 +112,8 @@ struct Limits {
 	// from that byte to the end of the headers. inactivity: per body read and per 64 KiB of a
 	// buffered reply, so a slow transfer that moves completes. None bounds a running handler.
 	std::chrono::milliseconds idle_timeout{75'000}, header_timeout{30'000}, inactivity_timeout{60'000};
-	// Absolute, from a request's start to its reply's end, so trickled bytes cannot renew it.
+	// Absolute, from the wait for a request's first byte (idle time included) to its reply's end,
+	// so trickled bytes cannot renew it.
 	std::chrono::milliseconds request_timeout{0};
 	std::chrono::milliseconds shutdown_grace{5'000};   // stop() between asking requests to stop and forcing them
 	// The largest body buffered into Request::body (0 = no cap); a larger request gets 413.
@@ -950,7 +951,8 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 		// waits for a request (the walk on its loop), else at its next wait.
 		const std::uint64_t idle_epoch = state->idle_closes.load(std::memory_order_relaxed);
 		const auto idle_closed = [&] { return state->idle_closes.load(std::memory_order_relaxed) != idle_epoch; };
-		// Whether the connection may carry another request after this reply.
+		// Whether the connection may carry another request after this reply, read once, as the reply
+		// is framed: a stop after it refuses the next request (503), a close_idle() closes at the idle wait.
 		const auto stays_open = [&] { return !state->closing.load(std::memory_order_relaxed) && !idle_closed(); };
 		reactor::AbortList& idle_list = state->idle_of(*reactor);
 		// The headers-complete hook: refuse a request the gate or the stop did not admit, build the
@@ -1176,7 +1178,7 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 				const int sent = send_reply(writer, keep_alive);
 				if (sent == 0 || (sent < 0 && !co_await respond(writer, keep_alive, request_deadline))) { request.cancel(disconnected); co_return; }
 				admitted.reset();
-				if (!keep_alive || writer.wants_close() || !stays_open()) { break; }
+				if (!keep_alive || writer.wants_close()) { break; }
 				parser.reset();
 				continue;
 			}
@@ -1223,7 +1225,7 @@ inline task::task<void> serve_connection_body(Stream& socket, const std::shared_
 			const int sent = send_reply(writer, keep_alive);
 			if (sent == 0 || (sent < 0 && !co_await respond(writer, keep_alive, request_deadline))) { request.cancel(disconnected); co_return; }
 			admitted.reset();
-			if (!keep_alive || writer.wants_close() || !stays_open()) { break; }
+			if (!keep_alive || writer.wants_close()) { break; }
 		}
 	} catch (const RequestRejected& error) {
 		rejected.emplace(error);

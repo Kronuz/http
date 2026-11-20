@@ -187,7 +187,8 @@ first byte, after entering the gate, with a sequentially consistent fence betwee
 either `wait_requests()`, which reads the gates after the flag's store, counts the request,
 or the request reads the flag set and is refused with `503` at headers-complete, holding no
 lease. A request already counted is served, and its reply, like every reply framed once the
-flag is set, says `Connection: close`. The window `wait_requests()` cannot see is an accepted
+flag is set, says `Connection: close`. A reply framed before the flag keeps its connection open,
+as it said: the decision is read once, and the next request on it is refused. The window `wait_requests()` cannot see is an accepted
 connection whose first byte the server has not read: that request is refused.
 
 ## Closing idle connections
@@ -200,5 +201,6 @@ wait the way a requested token does (`ConnectionInput::cancel_read()`), so the c
 closes. And `close_idle()` bumps a count each connection read at its start: a connection
 that sees it changed frames its reply with `Connection: close` and closes, or closes at its
 next idle wait, so one that was busy, or between its read and the walk, still closes after
-its reply. `Reactor::track` is an intrusive list touched on the loop only: O(1) per
+its reply. A connection accepted before the call whose session starts after it (still queued,
+or in its TLS handshake) reads the new count and stays open. `Reactor::track` is an intrusive list touched on the loop only: O(1) per
 request, no allocation, no lock.
