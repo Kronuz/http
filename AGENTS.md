@@ -35,7 +35,7 @@ http_deferred.h       DeferredReply: an owned, delayed buffered reply (ResponseW
 http_owned_stream.h   OwnedStreamCapability: owned response streaming (ResponseWriter::stream()).
 http_owned_stream_asio.h  Its Asio implementation, plain TCP and TLS.
 http_owned_storage.h  Owned chunk storage and allocation refusal for owned streams.
-http_asio_tls.h       Optional TLS adapter (tls_connection_factory); the only OpenSSL user.
+http_asio_tls.h       Optional TLS adapter (the HttpAsioService constructor taking http::Tls); the only OpenSSL user.
                       Its connection is a detail::TlsStream: OpenSSL reads and writes the
                       non-blocking socket through a BIO over it and waits for readiness, so
                       an idle TLS connection keeps no staging or BIO buffers.
@@ -65,6 +65,8 @@ test/readahead_test.cc ctest "readahead": the connection's read-ahead watch (its
 test/tls_asio_test.cc ctest "tls_asio": the TLS factory and its failure hook, and TlsStream: keep-
                       alive across a long idle, pipelining, large bodies under a slow reader,
                       close with and without close_notify, stop with idle connections.
+test/limits_test.cc   ctest "limits": each http::Limits field at its bound, close_idle() and the
+                      phased stop, plain and over TLS.
 test/timeouts_test.cc ctest "timeouts": the idle, header and inactivity timeouts over real TCP,
                       slow clients under and over them, stalled and slow readers.
 docs/mechanisms/coroutine-handlers.md  How a request runs, is cancelled, admitted and stopped.
@@ -146,9 +148,10 @@ no worker pool and no thread handoff. Invariants -- do not break these when touc
   reaches only the next request's reads and the TLS handshake, never the handler, its body
   reads or the reply's writes. Shutdown and hang-ups arrive as `Request::cancel`, never as a
   destroyed frame.
-- **Admitted at headers-complete, released when the response is settled.**
-  `reactor->gate().enter()` in the headers hook; empty means `RequestRejected(503, ...,
-  retry_after 1)`. The lease is a connection-scope local, reset after the write.
+- **Admitted at the first byte, released when the response is settled.**
+  `reactor->gate().enter()` at the request's first byte, so `wait_requests()` counts it;
+  empty (or a first byte after `stop_accepting()`) means `RequestRejected(503, ...)` in the
+  headers hook. The lease is a connection-scope local, reset after the write.
 - **Tracked for the whole run, watched once the handler asks.** `RequestAbort` (a stack
   `reactor::Abortable`) is on the reactor's intrusive list from before the handler to after
   the write: `abort()` is `Request::cancel(task::cancel_reason::shutdown)`, `force()` closes the socket after the
@@ -226,7 +229,7 @@ Chosen at headers-complete:
   The body is not capped. `asio_test [K]` (2 MB through a slow consumer, all reads on the
   one loop thread, a fast request served mid-stream, an over-read returns eof, a tiny
   body arriving with the headers) and `[L]` (stop() while a stream is mid-flight).
-- The **buffered cap** (`AsioResponseOptions::max_body`, 16 MiB by default) is enforced
+- The **buffered cap** (`Limits::max_body`, 16 MiB by default) is enforced
   by `RequestParser::set_body_limit`: a `Content-Length` over it stops the parse at
   headers-complete, and a chunked body stops it as bytes arrive; the connection throws
   `RequestRejected(413)`. The callbacks return -1 (http_parser treats 1 as "no body").
@@ -274,6 +277,4 @@ ctest --test-dir build              # http (unit) + asio (transport, ~2s)
 ./build/bench_http 8080 4 &  ./build/bench_asio 8081 4 &             # framework vs raw ceiling
 ```
 
-`HttpAsioService(handler, reactors, in_flight_limit, connection = {}, maximum_connections = 0)` takes one `ConnectionFactory`, a `task::task<void>` over the socket, the handler, the reactor, the response options and reactor's `SessionContext` (the accept timestamp and the session's stop token); the default is the plain-TCP connection. `maximum_connections` caps the sockets before destination dispatch; `set_connection_limit()` and `connection_stats()` expose the same gate. A factory honors `SessionContext::stop` in its waits, or a shutdown waits for it until `force()` closes its socket after the grace.
-
-For TLS, `tls_connection_factory(context, handshake_deadline = 5s, maximum_handshakes = 64, maximum_connections = 1024, failed = {})` uses the accept timestamp so destination queue wait consumes the handshake deadline, and the session token ends a pending handshake at shutdown. Pass it with an explicit service connection bound: without one it does not bound sockets queued before the factory starts. TLS allocation follows capacity and elapsed-deadline checks. Transport leases survive original serving IO and refund on retirement.
+`HttpAsioService(handler, reactors, const http::Limits&, http::Tls = {})` takes every bound whole in `Limits` (see `docs/TRANSPORT.md`); `max_clients` caps the sockets before destination dispatch, plain and TLS, and `connection_stats()` reports it. With `Tls::context` the connection is TLS (the constructor is in `http_asio_tls.h`): the accept timestamp starts the `tls_handshake` deadline, so destination queue wait consumes it, `tls_handshakes` caps those in progress, and the session token ends a pending handshake at shutdown. The phased stop (`stop_accepting`, `wait_requests`, `cancel_requests`, then `stop`) and `close_idle()` are in `docs/mechanisms/coroutine-handlers.md`.
