@@ -527,8 +527,14 @@ public:
 	// Ends the waiting reader's read as a requested token does: with operation_aborted.
 	void cancel_read() noexcept {
 		cancelled_ = true;
-		asio::error_code ignored;
-		stream_.lowest_layer().cancel(ignored);
+		if constexpr (kLazyWatch) {
+			asio::error_code ignored;
+			stream_.lowest_layer().cancel(ignored);
+		} else {
+			// The slot reaches the TLS read also after its lowest-layer read completed, before its
+			// continuation: that checks the slot and does not read again.
+			watch_cancel_.emit(asio::cancellation_type::terminal);
+		}
 	}
 private:
 	// The one coroutine the pending read resumes when it completes: a reader or the drain, with
@@ -583,9 +589,10 @@ private:
 			if constexpr (kLazyWatch) {
 				stream_.async_wait(asio::socket_base::wait_read, [owner](asio::error_code error) { owner->readable(error); });
 			} else {
-				stream_.async_read_some(asio::buffer(buffer_, sizeof buffer_), [owner](asio::error_code error, std::size_t size) {
-					owner->completed(error, size);
-				});
+				stream_.async_read_some(asio::buffer(buffer_, sizeof buffer_),
+					asio::bind_cancellation_slot(watch_cancel_.slot(), [owner](asio::error_code error, std::size_t size) {
+						owner->completed(error, size);
+					}));
 			}
 		} catch (...) { pending_ = false; throw; }
 	}
@@ -647,6 +654,7 @@ private:
 	asio::error_code error_;
 	bool pending_ = false, ready_ = false;
 	bool cancelled_ = false;   // the waiting reader's token was requested
+	asio::cancellation_signal watch_cancel_;   // the TLS watch's read: cancel_read() ends it
 	std::function<void()> on_disconnect_;
 	std::weak_ptr<AsioOwnedStreamControl> observer_;
 };

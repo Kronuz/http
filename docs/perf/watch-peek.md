@@ -28,7 +28,9 @@ more `recv`, two task frames, a channel operation and two more Asio handlers per
    resume (in a top-level handler on the waiter's loop, inside its scheduler's scope and its inline-resume bound; else
    posted): no frame, no channel. A reader's token still ends the wait by cancelling it on the socket, and marks it
    cancelled, so a wake that finds nothing after a cancel the socket no longer saw ends the read instead of waiting
-   again; `drain()` waits the same way. (http:6ec7324)
+   again; `drain()` waits the same way. (http:6ec7324) On a TLS stream the watch's read carries a cancellation slot
+   that the token emits, which the stream checks before it reads again: a cancel between its lowest-layer read's wake
+   and its continuation (`test/tls_watch_test.cc`) ends the read as well.
 
 ## Counts
 
@@ -57,12 +59,12 @@ outside the A/A range.
 
 | kind | conns | req/s before | req/s after | after vs before | A/A range | CPU us/req before | after | verdict |
 | --- | ---: | ---: | ---: | --- | --- | ---: | ---: | --- |
-| `httpc` (asks) | 1 | 16,570 | 23,688 | 1.39x faster (1.37-1.98) | 0.96-1.00 | 24.4 | 18.8 | 21% less CPU |
+| `httpc` (asks) | 1 | 16,570 | 23,688 | 1.39x faster (1.37-1.97) | 0.96-1.00 | 24.4 | 18.8 | 21% less CPU |
 | `httpc` (asks) | 8 | 92,414 | 105,055 | 1.10x faster (1.06-1.18) | 0.93-1.05 | 17.4 | 15.3 | 11% less CPU |
-| `httpc` (asks) | 64 | 131,346 | 133,057 | 1.03x (0.82-1.11) | 0.82-1.10 | 13.7 | 13.4 | noise |
+| `httpc` (asks) | 64 | 131,346 | 133,057 | 1.03x (0.82-1.12) | 0.82-1.10 | 13.7 | 13.4 | noise |
 | `http` (never asks) | 1 | 23,359 | 24,515 | 1.04x (1.01-1.22) | 1.00-1.24 | 18.9 | 18.1 | noise |
 | `http` (never asks) | 8 | 105,463 | 105,522 | 0.98x (0.92-1.05) | 0.96-1.03 | 14.3 | 14.2 | noise |
-| `http` (never asks) | 64 | 133,364 | 130,363 | 1.00x (0.89-1.03) | 0.98-1.05 | 12.4 | 12.7 | noise |
+| `http` (never asks) | 64 | 133,364 | 130,363 | 1.00x (0.90-1.03) | 0.98-1.05 | 12.4 | 12.7 | noise |
 
 What asking costs, `httpc` against `http` in the same binary (medians):
 
