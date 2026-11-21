@@ -33,17 +33,17 @@ using clk = std::chrono::steady_clock;
 namespace detail {
 
 inline int g_fail = 0;
-inline void check(bool ok, const std::string& m) {
+static void check(bool ok, const std::string& m) {
 	std::printf("  %s %s\n", ok ? "ok:  " : "FAIL:", m.c_str());
 	if (!ok) { ++g_fail; }
 }
 
 // ---- helpers ----
-template <class F> bool until(F&& f, int ms = 3000) {
+template <class F> static bool until(F&& f, int ms = 3000) {
 	for (int i = 0; i < ms / 2; ++i) { if (f()) { return true; } std::this_thread::sleep_for(2ms); }
 	return f();
 }
-inline std::string pattern(std::size_t n, unsigned seed = 0) {
+static std::string pattern(std::size_t n, unsigned seed = 0) {
 	std::string s(n, '\0');
 	for (std::size_t i = 0; i < n; ++i) { s[i] = static_cast<char>('a' + (i * 7 + seed) % 26); }
 	return s;
@@ -51,7 +51,7 @@ inline std::string pattern(std::size_t n, unsigned seed = 0) {
 
 // ---- a raw client ----
 struct Resp { int status = 0; std::string head, body; bool complete = false; };
-inline std::string header_value(const std::string& head, const std::string& name) {
+static std::string header_value(const std::string& head, const std::string& name) {
 	std::string low = head, ln = name + ":";
 	for (auto& c : low) { c = static_cast<char>(::tolower(c)); }
 	for (auto& c : ln) { c = static_cast<char>(::tolower(c)); }
@@ -118,10 +118,10 @@ struct Conn {
 	bool ends_silently() { return rest.empty() && !fill(); }
 };
 
-inline std::string get(const std::string& path, const std::string& extra = "") {
+static std::string get(const std::string& path, const std::string& extra = "") {
 	return "GET " + path + " HTTP/1.1\r\nHost: x\r\n" + extra + "\r\n";
 }
-inline std::string post(const std::string& path, const std::string& body, const std::string& extra = "") {
+static std::string post(const std::string& path, const std::string& body, const std::string& extra = "") {
 	return "POST " + path + " HTTP/1.1\r\nHost: x\r\nContent-Length: " + std::to_string(body.size()) + "\r\n" + extra + "\r\n" + body;
 }
 
@@ -220,3 +220,7 @@ struct Held {
 }  // namespace detail
 
 using namespace detail;
+
+// The [U] sections, run by main() unless READAHEAD_TEST_INTEGRATION_ONLY.
+void read_ahead_tests();
+void input_tests();

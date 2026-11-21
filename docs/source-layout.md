@@ -32,16 +32,13 @@ moved out; they link into the one `coroutine_test` target (`ctest` name `corouti
 
 ## `test/readahead_test.cc` and `test/readahead/`
 
-`readahead_test.cc` holds `main()`, which runs the sections in order. The sections are functions
-in the pieces below, all linked into the one `readahead_test` target (`ctest` name `readahead`).
-The [U] pieces are left out by `-DREADAHEAD_TEST_INTEGRATION_ONLY`, as before.
+`readahead_test.cc` keeps `main()` and its integration sections [I] [P] [F] [D] [B] [S] [Q] [N] [W]
+(about 430 lines): each is a block of `main`, so cutting `main` would change code, not move it. The
+[U] sections, which test `ConnectionInput` alone over a socket pair, are functions of their own and
+moved out with their helpers. Both link into the one `readahead_test` target (`ctest` name
+`readahead`); `-DREADAHEAD_TEST_INTEGRATION_ONLY` leaves the [U] file empty, as before.
 
 | File | Holds |
 |---|---|
-| `test/readahead/support.h` | the shared helpers in `detail`: `check`, `until`, `pattern`, the raw client, `Obs`, `App`, `Server`, `Held` |
-| `test/readahead/input.h` | `Pair` and `read_once`, the socket pair the [U] sections drive, and their declarations |
-| `test/readahead/sections.h` | the declarations of the integration sections |
-| `test/readahead/input_watch.cc` | [U] sections on the lazy watch, a held read and the waiter's lane |
-| `test/readahead/input_reads.cc` | [U] sections on `read()` and `read_ahead()` |
-| `test/readahead/requests.cc` | sections [I] [P] [F] [S] [N] [W]: idle scratch, pipelining, smuggling, buffered and sliced replies |
-| `test/readahead/disconnects.cc` | sections [D] [B] [Q]: hang-up, a body cut short, the lazy first question |
+| `test/readahead/support.h` | the shared helpers in `detail`: `check`, `until`, `pattern`, the raw client, `Obs`, `App`, `Server`, `Held`, and the [U] functions' prototypes |
+| `test/readahead/input_tests.cc` | `ConnectionInput` on its own: the lazy watch, a held read, the waiter's lane, `read_ahead()`, the bound and the disconnect rules (about 600 lines, one topic, kept whole) |

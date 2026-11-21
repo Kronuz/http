@@ -233,7 +233,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 
 	# The connection's read-ahead watch and the sliced reply write over real TCP: the watch
 	# bound, pipelining inside the window, disconnects, cut-short bodies, request smuggling.
-	add_executable(readahead_test test/readahead_test.cc test/readahead/input_watch.cc test/readahead/input_reads.cc test/readahead/requests.cc test/readahead/disconnects.cc)
+	add_executable(readahead_test test/readahead_test.cc test/readahead/input_tests.cc)
 	target_link_libraries(readahead_test PRIVATE http)
 	add_test(NAME readahead COMMAND readahead_test)
 	set_tests_properties(readahead PROPERTIES TIMEOUT 120)
