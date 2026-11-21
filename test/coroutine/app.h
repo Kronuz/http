@@ -337,3 +337,5 @@ struct App : http::HttpHandler {
 };
 
 }  // namespace detail
+
+using namespace detail;

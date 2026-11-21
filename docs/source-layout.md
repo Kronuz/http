@@ -19,17 +19,16 @@ response, the socket I/O, the serving of a connection, and the service.
 
 ## `test/coroutine_test.cc` and `test/coroutine/`
 
-`coroutine_test.cc` holds `main()`, which runs the sections in order. The sections are functions
-in the pieces below, all linked into the one `coroutine_test` target (`ctest` name `coroutine`).
+`coroutine_test.cc` keeps `main()`: its twelve sections run in order against one shared application
+and each is a block of `main`, so cutting `main` would change code, not move it. It stays one file
+(about 770 lines) for that reason. The pieces that sections use, and the one test that stands alone,
+moved out; they link into the one `coroutine_test` target (`ctest` name `coroutine`).
 
 | File | Holds |
 |---|---|
 | `test/coroutine/support.h` | the shared helpers in `detail`: `check`, the raw client (`Conn`, `get`, `post`, `one`), `until`, `Obs`, `wrapper_scheduler` |
 | `test/coroutine/app.h` | `App`, the `HttpHandler` the sections drive |
-| `test/coroutine/sections.h` | the declarations of the sections |
-| `test/coroutine/requests.cc` | sections [A] [G] [D] [S] [E] and the BodyStream tests [B]: suspension, pipelining, the in-flight gate, the streamed join, the body cap |
-| `test/coroutine/disconnects.cc` | sections [C] [J] [H] [I]: reset, half-close, a body cut short, a throwing cancel callback |
-| `test/coroutine/lifecycle.cc` | sections [F] [T] [X] and the affinity death test: shutdown, the task loop, the teardown phases |
+| `test/coroutine/body_stream.cc` | `body_stream_tests`: BodyStream semantics (section [B]) on a private loop |
 
 ## `test/readahead_test.cc` and `test/readahead/`
 

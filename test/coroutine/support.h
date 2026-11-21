@@ -31,15 +31,15 @@ using clk = std::chrono::steady_clock;
 namespace detail {
 
 inline int g_fail = 0;
-inline void check(bool ok, const std::string& m) {
+static void check(bool ok, const std::string& m) {
 	std::printf("  %s %s\n", ok ? "ok:  " : "FAIL:", m.c_str());
 	if (!ok) { ++g_fail; }
 }
-inline double since_ms(clk::time_point t) { return std::chrono::duration<double, std::milli>(clk::now() - t).count(); }
+static double since_ms(clk::time_point t) { return std::chrono::duration<double, std::milli>(clk::now() - t).count(); }
 
 // ---- a raw client ----
 struct Resp { int status = 0; std::string head, body; bool complete = false; };
-inline std::string header_value(const std::string& head, const std::string& name) {
+static std::string header_value(const std::string& head, const std::string& name) {
 	std::string low = head, ln = name + ":";
 	for (auto& c : low) { c = static_cast<char>(::tolower(c)); }
 	for (auto& c : ln) { c = static_cast<char>(::tolower(c)); }
@@ -93,25 +93,25 @@ struct Conn {
 	}
 	bool closed_by_peer() { char b; return ::recv(fd, &b, 1, 0) == 0; }
 };
-inline std::string get(const std::string& path, const std::string& extra = "") {
+static std::string get(const std::string& path, const std::string& extra = "") {
 	return "GET " + path + " HTTP/1.1\r\nHost: x\r\n" + extra + "\r\n";
 }
-inline std::string post(const std::string& path, const std::string& body, const std::string& extra = "") {
+static std::string post(const std::string& path, const std::string& body, const std::string& extra = "") {
 	return "POST " + path + " HTTP/1.1\r\nHost: x\r\nContent-Length: " + std::to_string(body.size()) + "\r\n" + extra + "\r\n" + body;
 }
-inline Resp one(unsigned short port, const std::string& request) {
+static Resp one(unsigned short port, const std::string& request) {
 	Conn c(port);
 	c.send(request);
 	return c.read_response();
 }
-inline void wait_listen(unsigned short port) {
+static void wait_listen(unsigned short port) {
 	for (int i = 0; i < 300; ++i) {
 		Conn c(port, 1);
 		if (c.fd >= 0) { return; }
 		std::this_thread::sleep_for(5ms);
 	}
 }
-template <class F> bool until(F&& f, int ms = 3000) {
+template <class F> static bool until(F&& f, int ms = 3000) {
 	for (int i = 0; i < ms / 5; ++i) { if (f()) { return true; } std::this_thread::sleep_for(5ms); }
 	return f();
 }
@@ -133,7 +133,7 @@ struct Obs {
 	clk::time_point t0{};
 };
 // Busy work of about `d`, between checkpoints.
-inline void spin(std::chrono::microseconds d) { for (auto end = clk::now() + d; clk::now() < end;) {} }
+static void spin(std::chrono::microseconds d) { for (auto end = clk::now() + d; clk::now() < end;) {} }
 // A per-request wrapper scheduler: its resumes run on the reactor's loop thread under its own identity.
 struct wrapper_scheduler {
 	task::asio_scheduler& loop;
@@ -145,6 +145,7 @@ struct wrapper_scheduler {
 	}
 	std::uint64_t now() const noexcept { return loop.now(); }
 	bool runs_here() const noexcept { return loop.runs_here(); }
+};
 
 }  // namespace detail
 
