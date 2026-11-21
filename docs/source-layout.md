@@ -30,3 +30,19 @@ in the pieces below, all linked into the one `coroutine_test` target (`ctest` na
 | `test/coroutine/requests.cc` | sections [A] [G] [D] [S] [E] and the BodyStream tests [B]: suspension, pipelining, the in-flight gate, the streamed join, the body cap |
 | `test/coroutine/disconnects.cc` | sections [C] [J] [H] [I]: reset, half-close, a body cut short, a throwing cancel callback |
 | `test/coroutine/lifecycle.cc` | sections [F] [T] [X] and the affinity death test: shutdown, the task loop, the teardown phases |
+
+## `test/readahead_test.cc` and `test/readahead/`
+
+`readahead_test.cc` holds `main()`, which runs the sections in order. The sections are functions
+in the pieces below, all linked into the one `readahead_test` target (`ctest` name `readahead`).
+The [U] pieces are left out by `-DREADAHEAD_TEST_INTEGRATION_ONLY`, as before.
+
+| File | Holds |
+|---|---|
+| `test/readahead/support.h` | the shared helpers in `detail`: `check`, `until`, `pattern`, the raw client, `Obs`, `App`, `Server`, `Held` |
+| `test/readahead/input.h` | `Pair` and `read_once`, the socket pair the [U] sections drive, and their declarations |
+| `test/readahead/sections.h` | the declarations of the integration sections |
+| `test/readahead/input_watch.cc` | [U] sections on the lazy watch, a held read and the waiter's lane |
+| `test/readahead/input_reads.cc` | [U] sections on `read()` and `read_ahead()` |
+| `test/readahead/requests.cc` | sections [I] [P] [F] [S] [N] [W]: idle scratch, pipelining, smuggling, buffered and sliced replies |
+| `test/readahead/disconnects.cc` | sections [D] [B] [Q]: hang-up, a body cut short, the lazy first question |
