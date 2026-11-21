@@ -215,6 +215,14 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 		set_target_properties(limits_test PROPERTIES NO_SYSTEM_FROM_IMPORTED ON)
 		add_test(NAME limits COMMAND limits_test)
 		set_tests_properties(limits PROPERTIES TIMEOUT 120)
+
+		# A held read on a TLS connection's watch ends at its token, also between the lowest-layer
+		# read's wake and the TLS stream's continuation.
+		add_executable(tls_watch_test test/tls_watch_test.cc)
+		target_link_libraries(tls_watch_test PRIVATE http reactor::tls)
+		set_target_properties(tls_watch_test PROPERTIES NO_SYSTEM_FROM_IMPORTED ON)
+		add_test(NAME tls_watch COMMAND tls_watch_test)
+		set_tests_properties(tls_watch PROPERTIES TIMEOUT 60)
 	endif()
 
 	# The idle, header, and inactivity timeouts over real TCP.
