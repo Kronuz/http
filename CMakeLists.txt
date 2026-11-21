@@ -151,7 +151,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 	target_link_libraries(http_owned_stream_asio_test PRIVATE http)
 	add_test(NAME owned_stream_asio COMMAND http_owned_stream_asio_test)
 	set_tests_properties(owned_stream_asio PROPERTIES TIMEOUT 30)
-	add_executable(coroutine_test test/coroutine_test.cc)
+	add_executable(coroutine_test test/coroutine_test.cc test/coroutine/requests.cc test/coroutine/disconnects.cc test/coroutine/lifecycle.cc)
 	target_link_libraries(coroutine_test PRIVATE http)
 	target_compile_definitions(coroutine_test PRIVATE TASK_COUNT_FRAMES=1)   # task::detail::live_frames() counts
 	add_test(NAME coroutine COMMAND coroutine_test)
