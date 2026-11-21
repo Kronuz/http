@@ -2,7 +2,7 @@
 
 // HttpAsioService: the HTTP service over a reactor::TcpServer.
 
-#include "http_asio/serve_connection.h"
+#include "http_asio/connection.h"
 
 namespace http {
 

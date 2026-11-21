@@ -46,11 +46,9 @@
 // through in O(read-buffer) memory, never held whole.
 
 #pragma once
-// The pieces, in dependency order: http_asio/options.h (options, Limits, TLS),
-// response_writer.h, connection_io.h, connection_state.h, serve_connection.h, service.h.
-#include "http_asio/options.h"
-#include "http_asio/response_writer.h"
+// The pieces, in dependency order: http_asio/response.h (configuration and the response writer),
+// connection_io.h, connection.h and service.h.
+#include "http_asio/response.h"
 #include "http_asio/connection_io.h"
-#include "http_asio/connection_state.h"
-#include "http_asio/serve_connection.h"
+#include "http_asio/connection.h"
 #include "http_asio/service.h"
