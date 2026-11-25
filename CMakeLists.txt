@@ -24,21 +24,21 @@ endif()
 find_package(Threads REQUIRED)
 
 # --- the radix-tree path router (transport-agnostic) ---
-FetchContent_Declare(radix_router GIT_REPOSITORY https://github.com/Kronuz/radix-router.git GIT_TAG e67543d615e223e066c782a52ec4e49150ada9c1)
+FetchContent_Declare(radix_router GIT_REPOSITORY https://github.com/Kronuz/radix-router.git GIT_TAG 67454c762ddd1bdddc2921d95ac3bc1f9ab7e384)
 FetchContent_MakeAvailable(radix_router)
 
 # --- http-parser (the HTTP parser) ---
 # The Joyent http_parser fork: its fixed method table holds Xapiand's REST verbs
 # (COUNT, INFO, DUMP, RESTORE, ...), which stock llhttp rejects. The seam stays
 # parser-agnostic, so this is contained inside the connection.
-FetchContent_Declare(http_parser GIT_REPOSITORY https://github.com/Kronuz/http-parser.git GIT_TAG fcdad32fa8d8950da2dc3c237f3f91ad1b5eb211)
+FetchContent_Declare(http_parser GIT_REPOSITORY https://github.com/Kronuz/http-parser.git GIT_TAG 38950a00039b2779cbe0e330041df222f1e13e47)
 FetchContent_MakeAvailable(http_parser)
 
 # --- compressors (the deflate/gzip + zstd codecs) ---
 # Response compression (http_compression.h) negotiates Accept-Encoding and applies a
 # coding. The codecs are Kronuz/compressors (has compiled units + lz4/zstd/zlib
 # wiring). Previously reached transitively via Kronuz/server; now a direct dependency.
-FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 5566260a30bbd2d77d5cfa890bfe33f503a2add6)
+FetchContent_Declare(compressors GIT_REPOSITORY https://github.com/Kronuz/compressors.git GIT_TAG 54dd2f0b2f99f800a9f91db4900d30581a4d9069)
 FetchContent_MakeAvailable(compressors)
 
 # --- standalone Asio (the runtime + transport substrate) ---
@@ -57,7 +57,7 @@ endif()
 # --- task: the coroutine type of handlers, connections and sessions, and their cancellation ---
 # Header-only; its asio binding finds the ASIO_INCLUDE_DIR set above and fetches no second Asio. Declared before
 # reactor, so this pin is the one reactor builds against too. Set FETCHCONTENT_SOURCE_DIR_TASK for a local checkout.
-FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG 18eb51672e4f306aac508bd0444f6d367eac4291)
+FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG 477a7d3f15a8951f2047616b834753177d838a8b)
 FetchContent_MakeAvailable(task)
 
 # --- reactor: the generic Asio server runtime (shared reactor pool + accept + shutdown) ---
@@ -66,10 +66,10 @@ FetchContent_MakeAvailable(task)
 # Kronuz/reactor so other Kronuz network services share one runtime. Header-only; rides
 # on the same standalone Asio (so no second Asio fetch -- just its include dir). Set
 # REACTOR_INCLUDE_DIR to use a local checkout instead of fetching (dev iteration). The pin is
-# reactor:6fdd45f (the stop phases: stop_accepting, wait_requests, cancel_requests, force_connections).
+# reactor:d28e5e0; the stop phases (stop_accepting, wait_requests, cancel_requests, force_connections) need reactor:6fdd45f or later.
 set(REACTOR_INCLUDE_DIR "" CACHE PATH "use an existing Kronuz/reactor dir instead of fetching")
 if(REACTOR_INCLUDE_DIR STREQUAL "")
-	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG 6fdd45fb783ff4de035b2b8c3cd06ec8f3c1a90a)
+	FetchContent_Declare(reactor GIT_REPOSITORY https://github.com/Kronuz/reactor.git GIT_TAG d28e5e024b64f2fd706b44fa628741d5700a925b)
 	FetchContent_MakeAvailable(reactor)
 	set(REACTOR_INCLUDE_DIR "${reactor_SOURCE_DIR}")
 endif()
